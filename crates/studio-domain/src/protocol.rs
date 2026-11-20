@@ -16,10 +16,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::job::{Failure, JobReport, JobSpec, Progress, SourceFacts, Stage, WirePath};
 use crate::settings::OutputKind;
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -75,6 +76,23 @@ pub enum Command {
         /// The app build.
         client: BuildIdentity,
     },
+    /// Reads a source's header. Answered by [`Event::Probed`] or
+    /// [`Event::Failed`]. Nothing is decoded or written.
+    Probe {
+        /// The file to inspect.
+        source: WirePath,
+    },
+    /// Starts the one job this worker process runs. Followed by
+    /// [`Event::Stage`] and [`Event::Progress`] events and exactly one of
+    /// [`Event::Completed`], [`Event::Cancelled`] or [`Event::Failed`].
+    Start {
+        /// The job.
+        job: JobSpec,
+    },
+    /// Asks the running job to stop. [`Event::CancelRequested`] acknowledges
+    /// the request; only [`Event::Cancelled`] means the job has stopped.
+    /// Closing the worker's input has the same effect.
+    Cancel,
 }
 
 /// Why the engine refused a command.
@@ -85,6 +103,8 @@ pub enum ErrorCode {
     IncompatibleVersion,
     /// The frame or its body could not be decoded.
     Malformed,
+    /// A job is already running, or there is none to cancel.
+    WrongState,
 }
 
 /// A message from the engine to the app.
@@ -104,6 +124,37 @@ pub enum Event {
         code: ErrorCode,
         /// A human-readable explanation.
         message: String,
+    },
+    /// Answers [`Command::Probe`].
+    Probed {
+        /// What the source's header says.
+        facts: SourceFacts,
+    },
+    /// The job entered a stage.
+    Stage {
+        /// The stage.
+        stage: Stage,
+    },
+    /// Counters of the running job. Coalesced: at most about ten a second,
+    /// and any of them may be skipped.
+    Progress {
+        /// The counters.
+        progress: Progress,
+    },
+    /// [`Command::Cancel`] was received. The job is still stopping.
+    CancelRequested,
+    /// Terminal: the verified file is at its destination.
+    Completed {
+        /// What was produced and checked.
+        report: JobReport,
+    },
+    /// Terminal: the job stopped on request. No output file was published.
+    Cancelled,
+    /// Terminal for a job, or the answer to a failed probe. No output file
+    /// was published.
+    Failed {
+        /// Why.
+        failure: Failure,
     },
 }
 
@@ -287,7 +338,7 @@ mod tests {
 
     #[test]
     fn unknown_messages_are_malformed() {
-        let frame = br#"{"protocol_version":1,"request_id":1,"body":{"type":"encode"}}"#;
+        let frame = br#"{"protocol_version":2,"request_id":1,"body":{"type":"transmogrify"}}"#;
         assert!(matches!(
             decode::<Command>(frame),
             Err(ProtocolError::Malformed(_))

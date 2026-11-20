@@ -1,69 +1,101 @@
 # Status
 
-**Phase:** STUDIO-01 complete on Linux x86_64; awaiting owner review.
-**Updated:** 2026-11-20. Nothing committed or pushed.
-**Next prompt:** `docs/planning/studio-v1/prompts/02-RAW-VIDEO.md` (run only on the owner's go).
+**Phase:** STUDIO-02 complete on Linux x86_64.
+**Updated:** 2026-11-20.
+**Next prompt:** `docs/planning/studio-v1/prompts/03-FFMPEG-INPUT.md`, with the
+deviations below (run only on the owner's go).
 
-## What exists
+## What works
 
-- `studio-domain`: `OutputKind`, `SpeedPreset` (0–10), `Crf` (1–63), `EncoderSettings`;
-  control protocol v1 (little-endian `u32` length + JSON `Envelope`, 64 KiB cap,
-  version checked before the body, `Command::Hello`, `Event::{Hello, Error}`).
-- `splot-studio-engine`: `--help`, `--version`, `handshake` (framed stdin/stdout).
-  Reports `encode_outputs: []`. **It cannot encode.**
-- `splot-studio`: Slint window with menu bar (File › Open…, Quit; Help › About),
-  toolbar, source sidebar, empty state, settings inspector, status bar, light/dark
-  following the system, About dialog with the `AboutSlint` widget, native Open
-  dialog (sets a label only — the file is not opened or probed), real engine
-  handshake result in the status bar. Encode is disabled and says why.
-- `cargo xtask ci`, `cargo xtask ci --fast`, `cargo xtask doctor`.
-- `.github/workflows/ci.yml` for `ubuntu-24.04`, `windows-2025`, `macos-15`.
+- **Convert progressive 8-bit or 10-bit Y4M to AV2** as IVF or an Annex B `.obu`
+  stream, with real codec calls in an isolated worker process.
+- **App (`splot-studio [FILE]`):** one compact window. Open a file → the engine
+  probes it → pick Quality (4 steps) and Priority (3 steps) → Convert → real
+  stage, counters and elapsed time → Cancel, or a result with each verification
+  check and Show in Folder. Advanced holds output format, rate factor, speed
+  preset, destination and the full source facts.
+- **Engine (`splot-studio-engine`):** `worker` (one job per process, protocol v2)
+  and `encode <in> <out>` for the command line. Chroma 4:2:0, 4:2:2, 4:4:4 and
+  monochrome at both depths are tested end to end.
+- **Safety:** source opened read-only; source ≠ destination by file identity;
+  exclusive `.partial` file beside the destination; verified before publishing;
+  published without replacing an existing file. Cancel removes the partial file.
+- **Verification per job:** Structure (framing and frame count, plus
+  `splot-validate`) and Splot decode. The independent AVM check is reported as
+  **not run** — no AVM decoder is installed. Splot decoding its own output is not
+  independent proof.
 
-## Provenance
+## Not supported (rejected with a reason)
 
-- Splot baseline `c1183fec4b81d72045d861973a9d8e563c6e9e2e`; AGENTS blob
-  `daf08ea45c6386223f791b1d2046179a357c92bd`, identical on `main` at inspection.
-  `main` was 2 commits ahead (`ac1f5ecf`, `00097ef8`, encoder-only); not adopted.
-- `LICENSE.md` is the byte-exact file from that commit. Its Required Notice names
-  “splot”, not Splot Studio — owner to decide whether it needs its own notice.
-- `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md` are the pack templates,
-  unmodified. The pack is in `docs/planning/studio-v1/` (manifest checksums verified).
-- Remote `splotlabs/splot-studio` already existed with one commit and is **public**
-  (the pack assumed a private staging repo). Not created, changed, or pushed to here.
+MP4/MKV/MOV and every non-Y4M input; interlaced; bit depths other than 8 and 10;
+non-square pixel aspect; `XCOLORRANGE=FULL`; frames over the encoder or IVF size
+limits or the 8 GiB memory bound (5K/8K). No audio, subtitles, HDR, VFR, resize,
+target size, preview, queue or background continuation: closing the window stops
+the job.
 
-## Deliberate deviations from the pack (owner-approved 2026-11-20)
+Y4M states no colour model and the pinned encoder writes none, so the output
+carries no primaries, transfer, matrix, range, chroma siting, aspect or timing
+(`.obu` has no frame rate at all). The app discloses this per source.
 
-- **STUDIO-03:** ffprobe/ffmpeg as child processes piping into the worker's Y4M
-  path, instead of rsmpeg FFI. No `studio-media` unsafe adapter.
-- **STUDIO-04:** the GUI owns the durable queue and its journal; no supervisor
-  process or local-socket IPC. An encode does not survive the GUI closing.
-- **Pacing:** stop after every phase.
-- Engine and xtask parse arguments with `std`; no `clap` or `anyhow` yet.
+## Deliberate deviations from the pack (owner decisions, 2026-11-20)
 
-## Dependencies (direct, locked)
+- **UI:** one compact "Simple" window (Quality, Priority, Convert, Advanced)
+  instead of the three-panel workbench in `05-DESIGN-SYSTEM.md`.
+- **STUDIO-03:** ffprobe/ffmpeg child processes, not rsmpeg FFI.
+- **STUDIO-04:** GUI-owned durable queue, no supervisor process.
+- **Preview** (thumbnail, live frame) stays in STUDIO-05.
+- Phase PRs are opened and merged by the agent once CI is green.
+- No `clap`/`anyhow`; arguments are parsed with `std`.
 
-`slint` and `slint-build` 1.19.0 (features `std`, `compat-1-18`, `backend-winit`,
-`renderer-femtovg`, `renderer-software`, `accessibility`, `raw-window-handle-06`;
-Royalty-free 2.0 route, licence file read in the crate), `rfd` 0.18.0
-(`xdg-portal`, `wayland`; no GTK, no async runtime), `serde`, `serde_json`,
-`thiserror` 2. Linux build needs `pkg-config` and `libfontconfig-dev`.
+## Measurements
 
-## Checks run (Linux x86_64, Wayland, Rust 1.100.0)
+i7-12700H (20 threads), 45 GiB, Linux, Rust 1.100.0, release, portable x86-64.
+Clip: ffmpeg `testsrc2` 1280×720, 30000/1001, 60 frames, CRF 20.
 
-- `cargo xtask ci` — pass: fmt, SPDX headers, dependency direction, clippy
-  `-D warnings`, 37 tests (7 domain, 6 engine unit, 13 engine process, 8 app, 3 xtask).
-- `cargo xtask doctor` — pass.
-- App launched on Wayland (FemtoVG) and with `SLINT_BACKEND=winit-software`: stayed
-  up, clean stderr, engine child reaped, 0 CPU ticks idle over 10 s.
-- Evidence in `docs/evidence/studio-01/`: one real window capture (X11 backend under
-  XWayland, via `xwd`) and six Slint renderer snapshots (not OS screenshots).
+| Run | Wall | fps | Peak RSS |
+|---|---|---|---|
+| 8-bit, preset 6 | 424.8 s | 0.14 | 425 MB |
+| 10-bit, preset 6 | 425.6 s | 0.14 | 483 MB |
+| 8-bit, preset 10 | 77.5 s | 0.77 | 472 MB |
+| 10-bit, preset 10 | 75.9 s | 0.79 | 482 MB |
+| upstream `splot encode`, 10-bit, preset 10 (x86-64-v3 build) | 63.9 s | 0.94 | 433 MB |
+
+The speed is the codec's: Studio's wrapper adds nothing measurable. A one-off
+x86-64-v3 build of the engine was 1.32× faster with byte-identical output; the
+committed build stays portable. Encoding uses under two cores.
+
+Cancel: acknowledged in under 1 ms; finished in 9 ms between frames, otherwise
+500 ms (the engine abandons the codec call, removes its file and exits).
+
+## Checks run (Linux x86_64, Wayland)
+
+- `cargo xtask ci` — pass, about 8.5 min cold: fmt, SPDX headers, dependency
+  direction, clippy `-D warnings`, 115 tests (domain 10, engine 12 + 14 + 21,
+  app 46 + 9 against the real engine, xtask 3).
+- App launched with a clip: window sized to content (464×529 logical), clean
+  stderr, engine children reaped.
+- Evidence: `docs/evidence/studio-02/` — 22 Slint renderer snapshots and one
+  real window capture (X11 backend under XWayland).
 
 ## Not tested / open
 
-- Windows and macOS: nothing built or run. The CI workflow is configured, never executed.
-- Keyboard (Tab order, shortcuts, Escape), the Open dialog, opening About from the
-  menu, and screen readers were not exercised by hand.
-- Scaling other than 2×; multi-monitor.
-- Known rough edges: no timeout if the engine hangs during the handshake; the About
-  popup has no backdrop; primary buttons use the Slint style accent because std
-  widgets cannot be recoloured (`accent`/`focus-ring` tokens defined but unused).
+- **Clicking through the real window** (Convert, Cancel, Show in Folder, Open and
+  Save dialogs, closing mid-job): synthetic input does not reach the window on
+  this host. Covered only by the worker-client tests against the real engine.
+- Windows and macOS: never run locally; CI is the first execution. Removing the
+  open `.partial` file on forced cancel is untested on Windows.
+- AVM differential check; disk-full; screen readers; keyboard walk-through.
+- OS file drag-and-drop is not possible with Slint 1.19's winit backend.
+- A killed worker (`kill -9`, crash) leaves its `.partial` file behind.
+- Quality and Priority mappings are provisional (CRF 36/28/20/12, preset 8/6/3)
+  and not yet calibrated; preset 3 is impractically slow at these speeds.
+- Chroma siting is neither signalled nor disclosed.
+- Memory bound is calibrated at 720p only.
+
+## Provenance and dependencies
+
+Splot `c1183fec4b81d72045d861973a9d8e563c6e9e2e` for `splot-encode`, `-decode`,
+`-validate`, `-core` (dev profile builds them at `opt-level = 2`). `slint` 1.19.0,
+`rfd` 0.18.0, `tempfile` 3.27.0, `serde`, `serde_json`, `thiserror`. Linux build
+needs `pkg-config` and `libfontconfig-dev`. Cargo fetches Git crates with the git
+CLI (`.cargo/config.toml`).

@@ -22,18 +22,26 @@ export global Tokens {
     // Surfaces
     out property <color> background: dark ? #0c0c12 : #fbfbfc;
     out property <color> surface: dark ? #15151d : #f2f2f5;
+    // The card everything sits on, and the recessed track inside it
+    // (segmented controls, the file card, the progress rail).
+    out property <color> raised: dark ? #1b1b24 : #ffffff;
+    out property <color> track: dark ? #111118 : #f0f0f3;
+    out property <color> selected: dark ? #2e2e3b : #ffffff;
     out property <color> border: dark ? #2c2c38 : #d6d6de;
+    out property <color> border-strong: dark ? #3d3d4c : #c4c4ce;
 
     // Text
     out property <color> text: dark ? #f5f5f7 : #18181d;
     out property <color> text-secondary: dark ? #a1a1aa : #5d5d68;
     out property <color> text-disabled: dark ? #6e6e78 : #8e8e99;
 
-    // Accent and states. The standard widgets draw their own accent and focus
-    // ring (the style's, or the OS accent where the platform reports one), so
-    // primary actions stay native. `accent` and `focus-ring` are for future
-    // Splot-drawn elements only; nothing in this build draws one.
+    // Accent and states. The one accent fills Splot-drawn primary actions,
+    // the progress bar and the selected-step marker; `on-accent` is text on
+    // it (light 6.1:1, dark 7.6:1). Standard widgets keep their own style
+    // colours. `focus-ring` outlines Splot-drawn controls with keyboard focus.
     out property <color> accent: dark ? #a78bfa : #6342d6;
+    out property <color> accent-hover: dark ? #b9a2fc : #5534c4;
+    out property <color> on-accent: dark ? #0c0c12 : #ffffff;
     out property <color> focus-ring: dark ? #5ee7ff : #0b72a8;
     out property <color> warning: dark ? #f5b94a : #9a5b00;
     out property <color> error: dark ? #ff7ab6 : #c0245f;
@@ -67,7 +75,13 @@ export global Tokens {
     // Radius
     out property <length> radius-small: 4px;
     out property <length> radius-medium: 8px;
+    out property <length> radius-large: 14px;
 
-    // Motion: nothing in this build animates; transitions must use this.
+    // Hit targets
+    out property <length> control-height: 32px;
+    out property <length> primary-height: 40px;
+
+    // Motion. Slint skips `animate` when the platform asks for reduced motion.
     out property <duration> motion-short: 120ms;
+    out property <duration> motion-medium: 200ms;
 }

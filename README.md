@@ -13,17 +13,18 @@ Windows, macOS and Linux. Processing is local; there is no web or browser target
 
 ## Status
 
-Early foundation (milestone STUDIO-01). **Nothing can be encoded yet.**
+First usable slice (milestone STUDIO-02): it converts **progressive 8-bit or 10-bit Y4M** to
+AV2. Ordinary files (MP4, MKV, MOV) are not read yet. Encoding is slow: the codec is young.
 
-- `studio-app` (`splot-studio`): a Slint desktop shell. It does not probe, preview or encode
-  media.
-- `studio-engine` (`splot-studio-engine`): a headless executable with `--help`, `--version`
-  and a `handshake` command that speaks the versioned, length-prefixed JSON control protocol
-  from `studio-domain`. It reports an empty capability list: no encode support.
-- `studio-domain`: shared settings and protocol values (no GUI, codec or native types).
+- `studio-app` (`splot-studio`): the Slint desktop app. Open a Y4M file, pick Quality and
+  Priority, press Convert, watch real progress, cancel, reveal the result.
+- `studio-engine` (`splot-studio-engine`): the headless engine. `worker` runs one job per
+  process over the versioned, length-prefixed JSON control protocol from `studio-domain`;
+  `encode` runs the same job from the command line. Output is verified, then published
+  without ever replacing an existing file.
+- `studio-domain`: shared settings, job and protocol values (no GUI, codec or native types).
 
-Planned output is video-only AV2 in IVF and Annex B `.obu`; non-video input tracks are not
-carried over. The phased plan is in [`docs/planning/studio-v1/`](docs/planning/studio-v1/).
+Output is video-only AV2 in IVF or Annex B `.obu`; non-video input tracks are not carried over. The phased plan is in [`docs/planning/studio-v1/`](docs/planning/studio-v1/).
 What has actually been run, and what has not, is recorded in `STATUS.md`.
 
 ## Development
@@ -36,9 +37,9 @@ Debian/Ubuntu).
 cargo xtask doctor                 # toolchain and native prerequisites; read-only
 cargo xtask ci --fast              # fmt, repo checks, clippy, unit tests
 cargo xtask ci                     # full gate, as CI runs it
-cargo run -p studio-app            # the desktop shell
+cargo run -p studio-app            # the desktop app
 cargo run -p studio-engine -- --help
-cargo run -p studio-engine -- handshake    # framed protocol on stdin/stdout
+cargo run --release -p studio-engine -- encode in.y4m out.ivf
 ```
 
 Rules for contributors and coding agents are in [`AGENTS.md`](AGENTS.md).

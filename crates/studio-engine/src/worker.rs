@@ -1,0 +1,665 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+//! The worker session: framed commands in, framed events out.
+//!
+//! Three threads. The caller's thread reads commands and never runs codec
+//! work, so `Cancel` is seen while the encoder is busy. One job thread runs
+//! the single job. One writer thread owns the output stream, so frames never
+//! interleave and a peer that stops reading blocks only the writer: the job
+//! only ever replaces a progress slot or appends one of its few stage and
+//! terminal events, and neither of those is dropped.
+//!
+//! A cancel (the `Cancel` command or the end of input) is cooperative first:
+//! the job stops at its next frame or packet boundary. One codec call can
+//! take far longer than that (the pinned encoder codes a whole mini-GOP per
+//! `receive_packet`), so after [`CANCEL_GRACE`] the reader finishes the
+//! cancellation itself: it removes the job's temporary file, emits
+//! `Cancelled`, waits for the writer and exits the process while the job
+//! thread is still inside the codec. Both happen under the lock that orders
+//! the terminal event and the publication claim, so a forced cancel never
+//! follows a claimed publication and nothing is published after it.
+
+use std::collections::VecDeque;
+use std::fs;
+use std::io::{Read, Write};
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread::{self, Scope, ScopedJoinHandle};
+use std::time::{Duration, Instant};
+
+use studio_domain::job::{Failure, FailureCode, JobSpec};
+use studio_domain::protocol::{
+    Command, Envelope, ErrorCode, Event, ProtocolError, decode, read_frame, write_message,
+};
+use thiserror::Error;
+
+use crate::job::{self, Control, JOB_STACK_BYTES, Stop};
+use crate::{build_identity, capabilities, source};
+
+/// The shortest gap between two progress events.
+pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// How long a cancelled job may take to stop by itself before the worker
+/// abandons it and exits.
+pub const CANCEL_GRACE: Duration = Duration::from_millis(500);
+
+/// Command replies queued for a peer that does not read before the reader
+/// stops taking commands. Job events do not count against it.
+const REPLY_BACKLOG: usize = 64;
+
+/// The session ended because the framing is unrecoverable or a stream failed.
+///
+/// A bad *message* is not an error here: it is answered with
+/// [`Event::Error`] and the session continues.
+#[derive(Debug, Error)]
+pub enum SessionError {
+    /// The command stream is broken: bad length, truncated frame, or I/O failure.
+    #[error("cannot read command: {0}")]
+    Read(#[source] ProtocolError),
+    /// The event stream could not be written.
+    #[error("cannot write event: {0}")]
+    Write(#[source] ProtocolError),
+}
+
+/// Serves commands from `input` until it ends, then waits for a running job
+/// to reach its terminal event (the end of input cancels it) and for every
+/// queued event to be written.
+///
+/// Every frame gets one reply, echoing its `request_id` (0 when the frame
+/// carries none), except `Start`, which is answered by its job's events, all
+/// with the `Start`'s `request_id`. One job per session; a second `Start` and
+/// a `Cancel` without a running job are refused with
+/// [`ErrorCode::WrongState`].
+///
+/// A cancelled job that does not stop within [`CANCEL_GRACE`] is abandoned:
+/// once its `Cancelled` event is written, this exits the process with the
+/// status the session would have returned (0 unless a stream failed),
+/// without waiting for the end of input.
+///
+/// # Errors
+/// [`SessionError::Read`] on an invalid length prefix, a stream that ends
+/// inside a frame, or an input failure (a running job is cancelled first);
+/// [`SessionError::Write`] when the output fails (a running job is
+/// cancelled, and later events are discarded).
+pub fn run(input: &mut impl Read, output: impl Write + Send) -> Result<(), SessionError> {
+    let outbox = Outbox::default();
+    thread::scope(|scope| {
+        let writer = scope.spawn(|| outbox.write_all(output));
+        let (read, forced) = serve(input, &outbox, scope);
+        outbox.close();
+        let written = writer
+            .join()
+            .unwrap_or_else(|_| Err(ProtocolError::Io(std::io::Error::other("writer panicked"))));
+        let result = read
+            .map_err(SessionError::Read)
+            .and(written.map_err(SessionError::Write));
+        if forced {
+            // The job thread is still inside the codec; leaving the scope
+            // would join it. Its file is gone and its events are discarded.
+            if let Err(error) = &result {
+                let _ = writeln!(std::io::stderr(), "{}: {error}", crate::ENGINE_NAME);
+            }
+            std::process::exit(i32::from(result.is_err()));
+        }
+        result
+    })
+}
+
+/// Reads commands until the end of input, then cancels and joins the job.
+/// The flag is `true` when the job was abandoned instead and must not be
+/// joined.
+fn serve<'scope>(
+    input: &mut impl Read,
+    outbox: &'scope Outbox,
+    scope: &'scope Scope<'scope, '_>,
+) -> (Result<(), ProtocolError>, bool) {
+    let mut job: Option<ScopedJoinHandle<'scope, ()>> = None;
+    let result = loop {
+        let frame = match read_frame(input) {
+            Ok(Some(frame)) => frame,
+            Ok(None) => break Ok(()),
+            Err(error) => break Err(error),
+        };
+        let envelope = match decode::<Command>(&frame) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                let code = match error {
+                    ProtocolError::IncompatibleVersion { .. } => ErrorCode::IncompatibleVersion,
+                    _ => ErrorCode::Malformed,
+                };
+                outbox.reply(request_id_of(&frame), refusal(code, error.to_string()));
+                continue;
+            }
+        };
+        let id = envelope.request_id;
+        match envelope.body {
+            Command::Hello { .. } => outbox.reply(
+                id,
+                Event::Hello {
+                    engine: build_identity(),
+                    capabilities: capabilities(),
+                },
+            ),
+            Command::Probe { source } => {
+                let event = match source.to_path_buf() {
+                    Ok(path) => match source::probe(&path) {
+                        Ok(facts) => Event::Probed { facts },
+                        Err(stop) => failed(stop),
+                    },
+                    Err(e) => failed(Stop::failed(FailureCode::InvalidSource, e.to_string())),
+                };
+                outbox.reply(id, event);
+            }
+            Command::Start { job: spec } => {
+                if job.is_some() {
+                    outbox.reply(
+                        id,
+                        refusal(
+                            ErrorCode::WrongState,
+                            "this worker has already started its job",
+                        ),
+                    );
+                    continue;
+                }
+                match start(scope, outbox, id, spec) {
+                    Ok(handle) => job = Some(handle),
+                    Err(error) => outbox.job_end(
+                        id,
+                        failed(Stop::failed(
+                            FailureCode::Encoder,
+                            format!("cannot start the job thread: {error}"),
+                        )),
+                    ),
+                }
+            }
+            Command::Cancel => {
+                if !outbox.cancel(id) {
+                    outbox.reply(id, refusal(ErrorCode::WrongState, "no job is running"));
+                } else if outbox.settle(CANCEL_GRACE) {
+                    return (Ok(()), true);
+                }
+            }
+        }
+    };
+    // The end of input, or an unreadable one, means nobody can cancel later.
+    outbox.cancel.store(true, Ordering::Relaxed);
+    if outbox.settle(CANCEL_GRACE) {
+        return (result, true);
+    }
+    if let Some(handle) = job {
+        // The job body cannot panic past `catch_unwind`.
+        let _ = handle.join();
+    }
+    (result, false)
+}
+
+fn start<'scope>(
+    scope: &'scope Scope<'scope, '_>,
+    outbox: &'scope Outbox,
+    id: u64,
+    spec: JobSpec,
+) -> std::io::Result<ScopedJoinHandle<'scope, ()>> {
+    outbox.begin_job(id);
+    thread::Builder::new()
+        .name("studio-job".to_owned())
+        .stack_size(JOB_STACK_BYTES)
+        .spawn_scoped(scope, move || {
+            let mut report = |event: Event| match event {
+                Event::Progress { .. } => outbox.progress(id, event),
+                event => outbox.job_event(id, event),
+            };
+            let end = catch_unwind(AssertUnwindSafe(|| job::run(&spec, outbox, &mut report)))
+                .unwrap_or_else(|_| {
+                    failed(Stop::failed(
+                        FailureCode::Encoder,
+                        "the job stopped unexpectedly (panic)",
+                    ))
+                });
+            outbox.job_end(id, end);
+        })
+}
+
+fn refusal(code: ErrorCode, message: impl Into<String>) -> Event {
+    Event::Error {
+        code,
+        message: message.into(),
+    }
+}
+
+fn failed(stop: Stop) -> Event {
+    match stop {
+        Stop::Failed(failure) => Event::Failed { failure },
+        // Probes and thread starts are not cancellable.
+        Stop::Cancelled => Event::Failed {
+            failure: Failure {
+                code: FailureCode::Encoder,
+                message: "cancelled".to_owned(),
+            },
+        },
+    }
+}
+
+/// Best-effort `request_id` of a frame that did not decode as a command.
+fn request_id_of(frame: &[u8]) -> u64 {
+    serde_json::from_slice::<serde_json::Value>(frame)
+        .ok()
+        .and_then(|value| value.get("request_id")?.as_u64())
+        .unwrap_or(0)
+}
+
+/// Events waiting for the writer thread, and the job's cancel flag.
+#[derive(Debug, Default)]
+struct Outbox {
+    state: Mutex<State>,
+    changed: Condvar,
+    /// Set by `Cancel`, the end of input, or a failed output.
+    cancel: AtomicBool,
+}
+
+#[derive(Debug, Default)]
+struct State {
+    /// Events that are never dropped, in order.
+    queue: VecDeque<Envelope<Event>>,
+    /// The newest progress, not yet written. Replaced, never queued.
+    progress: Option<Envelope<Event>>,
+    job: JobState,
+    /// The `request_id` of the job's `Start`.
+    job_id: u64,
+    /// The job's temporary file, while it exists.
+    temp: Option<PathBuf>,
+    /// The job has claimed publication; it can no longer be cancelled.
+    publishing: bool,
+    /// No more events will be added.
+    closed: bool,
+    /// The output failed; events are discarded.
+    broken: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum JobState {
+    #[default]
+    None,
+    Running,
+    Ended,
+}
+
+impl Outbox {
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Queues a command reply, waiting while the peer is far behind.
+    fn reply(&self, request_id: u64, event: Event) {
+        let mut state = self.lock();
+        while state.queue.len() >= REPLY_BACKLOG && !state.broken {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        state.push(Envelope::new(request_id, event));
+        drop(state);
+        self.changed.notify_all();
+    }
+
+    fn begin_job(&self, request_id: u64) {
+        let mut state = self.lock();
+        state.job = JobState::Running;
+        state.job_id = request_id;
+    }
+
+    /// Queues a stage event after any pending progress, so order holds.
+    fn job_event(&self, request_id: u64, event: Event) {
+        let mut state = self.lock();
+        if state.job == JobState::Running {
+            state.flush_progress();
+            state.push(Envelope::new(request_id, event));
+        }
+        drop(state);
+        self.changed.notify_all();
+    }
+
+    /// Replaces the pending progress. Never waits.
+    fn progress(&self, request_id: u64, event: Event) {
+        let mut state = self.lock();
+        if state.job == JobState::Running && !state.broken {
+            state.progress = Some(Envelope::new(request_id, event));
+        }
+        drop(state);
+        self.changed.notify_all();
+    }
+
+    /// Queues the job's terminal event; nothing of the job follows it. A job
+    /// already abandoned by [`Self::settle`] has had its terminal event.
+    fn job_end(&self, request_id: u64, event: Event) {
+        let mut state = self.lock();
+        if state.job != JobState::Ended {
+            state.flush_progress();
+            state.push(Envelope::new(request_id, event));
+            state.job = JobState::Ended;
+        }
+        drop(state);
+        self.changed.notify_all();
+    }
+
+    /// After a cancel, waits up to `grace` for the job to end. A job that has
+    /// claimed publication is waited for until it completes. Otherwise the
+    /// job is abandoned: its temporary file is removed and `Cancelled` is
+    /// queued as its terminal event. Returns whether it was abandoned.
+    fn settle(&self, grace: Duration) -> bool {
+        let deadline = Instant::now() + grace;
+        let mut state = self.lock();
+        loop {
+            if state.job != JobState::Running {
+                return false;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if !state.publishing && left.is_zero() {
+                break;
+            }
+            let wait = if state.publishing { grace } else { left };
+            state = self
+                .changed
+                .wait_timeout(state, wait)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        if let Some(temp) = state.temp.take() {
+            // Already gone is fine; anything else cannot be helped here.
+            let _ = fs::remove_file(temp);
+        }
+        state.progress = None;
+        let id = state.job_id;
+        state.push(Envelope::new(id, Event::Cancelled));
+        state.job = JobState::Ended;
+        drop(state);
+        self.changed.notify_all();
+        true
+    }
+
+    /// Requests cancellation and acknowledges it, unless no job is running.
+    /// Decided under the lock that orders the terminal event, so an
+    /// acknowledgement never follows it.
+    fn cancel(&self, request_id: u64) -> bool {
+        let mut state = self.lock();
+        if state.job != JobState::Running {
+            return false;
+        }
+        self.cancel.store(true, Ordering::Relaxed);
+        state.flush_progress();
+        state.push(Envelope::new(request_id, Event::CancelRequested));
+        drop(state);
+        self.changed.notify_all();
+        true
+    }
+
+    fn close(&self) {
+        self.lock().closed = true;
+        self.changed.notify_all();
+    }
+
+    /// The writer thread: writes until closed and empty. Progress is held
+    /// back to one per [`PROGRESS_INTERVAL`]; the rest is written at once.
+    fn write_all(&self, mut output: impl Write) -> Result<(), ProtocolError> {
+        let mut next_progress = Instant::now();
+        let mut state = self.lock();
+        loop {
+            let envelope = if let Some(envelope) = state.queue.pop_front() {
+                envelope
+            } else if let Some(envelope) =
+                state.progress.take_if(|_| Instant::now() >= next_progress)
+            {
+                next_progress = Instant::now() + PROGRESS_INTERVAL;
+                envelope
+            } else if state.progress.is_some() {
+                let wait = next_progress.saturating_duration_since(Instant::now());
+                state = self
+                    .changed
+                    .wait_timeout(state, wait)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+                continue;
+            } else if state.closed {
+                return Ok(());
+            } else {
+                state = self
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
+                continue;
+            };
+            drop(state);
+            self.changed.notify_all();
+            if let Err(error) = write_message(&mut output, &envelope) {
+                let mut state = self.lock();
+                state.broken = true;
+                state.queue.clear();
+                state.progress = None;
+                drop(state);
+                // Nobody can hear the job any more.
+                self.cancel.store(true, Ordering::Relaxed);
+                self.changed.notify_all();
+                return Err(error);
+            }
+            state = self.lock();
+        }
+    }
+}
+
+impl Control for Outbox {
+    fn cancel_flag(&self) -> &AtomicBool {
+        &self.cancel
+    }
+
+    /// Creates the file under the lock, so an abandoning reader always
+    /// knows of it, and never after the job was abandoned.
+    fn hold_temp(&self, create: &mut dyn FnMut() -> Option<PathBuf>) {
+        let mut state = self.lock();
+        if state.job == JobState::Running {
+            state.temp = create();
+        }
+    }
+
+    fn release_temp(&self) {
+        self.lock().temp = None;
+    }
+
+    fn claim_publish(&self) -> bool {
+        let mut state = self.lock();
+        let free = state.job == JobState::Running && !self.cancel.load(Ordering::Relaxed);
+        state.publishing = free;
+        free
+    }
+}
+
+impl State {
+    fn push(&mut self, envelope: Envelope<Event>) {
+        if !self.broken {
+            self.queue.push_back(envelope);
+        }
+    }
+
+    fn flush_progress(&mut self) {
+        if let Some(progress) = self.progress.take() {
+            self.push(progress);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::sync::mpsc;
+
+    use studio_domain::protocol::{BuildIdentity, read_message};
+
+    use super::*;
+
+    fn hello(id: u64) -> Envelope<Command> {
+        let client = BuildIdentity {
+            name: "t".into(),
+            version: "0".into(),
+        };
+        Envelope::new(id, Command::Hello { client })
+    }
+
+    fn serve_bytes(input: &[u8]) -> (Result<(), SessionError>, Vec<u8>) {
+        let mut out = Vec::new();
+        let result = run(&mut { input }, &mut out);
+        (result, out)
+    }
+
+    #[test]
+    fn hello_reports_both_outputs() {
+        let mut input = Vec::new();
+        assert!(write_message(&mut input, &hello(3)).is_ok());
+        let (result, out) = serve_bytes(&input);
+        assert!(result.is_ok());
+        let reply = read_message::<Event>(&mut out.as_slice());
+        assert!(matches!(
+            reply,
+            Ok(Some(Envelope { request_id: 3, body: Event::Hello { ref capabilities, .. }, .. }))
+                if capabilities.encode_outputs.len() == 2
+        ));
+    }
+
+    #[test]
+    fn bad_message_is_answered_and_session_continues() {
+        let bad = br#"{"protocol_version":2,"request_id":8,"body":{"type":"encode"}}"#;
+        let mut input = Vec::new();
+        input.extend_from_slice(&u32::try_from(bad.len()).unwrap_or(0).to_le_bytes());
+        input.extend_from_slice(bad);
+        assert!(write_message(&mut input, &hello(9)).is_ok());
+        let (result, out) = serve_bytes(&input);
+        assert!(result.is_ok());
+        let mut reader = out.as_slice();
+        assert!(matches!(
+            read_message::<Event>(&mut reader),
+            Ok(Some(Envelope {
+                request_id: 8,
+                body: Event::Error {
+                    code: ErrorCode::Malformed,
+                    ..
+                },
+                ..
+            }))
+        ));
+        assert!(matches!(
+            read_message::<Event>(&mut reader),
+            Ok(Some(Envelope {
+                request_id: 9,
+                body: Event::Hello { .. },
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn cancel_without_a_job_is_refused() {
+        let mut input = Vec::new();
+        assert!(write_message(&mut input, &Envelope::new(4, Command::Cancel)).is_ok());
+        let (result, out) = serve_bytes(&input);
+        assert!(result.is_ok());
+        assert!(matches!(
+            read_message::<Event>(&mut out.as_slice()),
+            Ok(Some(Envelope {
+                request_id: 4,
+                body: Event::Error {
+                    code: ErrorCode::WrongState,
+                    ..
+                },
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn truncated_frame_ends_the_session_with_nothing_written() {
+        let (result, out) = serve_bytes(&[10, 0, 0, 0, b'{']);
+        assert!(matches!(
+            result,
+            Err(SessionError::Read(ProtocolError::Truncated))
+        ));
+        assert_eq!(out, Vec::<u8>::new());
+    }
+
+    /// A writer that blocks until the test lets it go.
+    struct Gate(mpsc::Receiver<()>, Vec<u8>);
+
+    impl Write for &mut Gate {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.1.is_empty() {
+                let _ = self.0.recv();
+            }
+            self.1.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The job side never waits on a stuck writer, progress collapses to the
+    /// newest value, and the terminal event is still delivered in order.
+    #[test]
+    fn a_stuck_writer_blocks_neither_job_events_nor_the_terminal() {
+        let outbox = Outbox::default();
+        let (open, gate) = mpsc::channel();
+        let mut sink = Gate(gate, Vec::new());
+        thread::scope(|scope| {
+            let writer = scope.spawn(|| outbox.write_all(&mut sink));
+            outbox.begin_job(1);
+            outbox.job_event(
+                1,
+                Event::Stage {
+                    stage: studio_domain::job::Stage::Encoding,
+                },
+            );
+            for frames_read in 0..10_000 {
+                let progress = studio_domain::job::Progress {
+                    frames_read,
+                    ..Default::default()
+                };
+                outbox.progress(1, Event::Progress { progress });
+            }
+            outbox.job_end(1, Event::Cancelled);
+            outbox.close();
+            assert!(open.send(()).is_ok());
+            assert!(matches!(writer.join(), Ok(Ok(()))));
+        });
+        let mut reader = sink.1.as_slice();
+        let mut bodies = Vec::new();
+        while let Ok(Some(envelope)) = read_message::<Event>(&mut reader) {
+            bodies.push(envelope.body);
+        }
+        assert!(matches!(bodies.first(), Some(Event::Stage { .. })));
+        assert!(matches!(bodies.last(), Some(Event::Cancelled)));
+        // The stage, one progress (the newest), the terminal.
+        assert!(
+            matches!(bodies.as_slice(), [_, Event::Progress { progress }, _] if progress.frames_read == 9_999),
+            "{bodies:?}"
+        );
+    }
+
+    /// Output failure cancels the job and the session reports it.
+    #[test]
+    fn a_failed_output_cancels() {
+        struct Broken;
+        impl Write for Broken {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from(io::ErrorKind::BrokenPipe))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut input = Vec::new();
+        assert!(write_message(&mut input, &hello(1)).is_ok());
+        let result = run(&mut input.as_slice(), Broken);
+        assert!(matches!(result, Err(SessionError::Write(_))));
+    }
+}
