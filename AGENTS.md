@@ -64,9 +64,12 @@ its adapter and no Slint types in the media/job model.
 ## Toolchain and dependencies
 
 Use the pinned rust-toolchain.toml, edition 2024, resolver 3, and committed Cargo.lock.
-The initial inspected codec baseline uses Rust 1.100.0. Keep every splot-* Git
-source on the same exact revision. No moving branch dependency, uncommitted path
-patch, random prebuilt FFmpeg, or generated latest-version guess.
+The initial inspected codec baseline uses Rust 1.100.0. Until Splot has releases,
+splot-* Git sources track `main` (owner decision, 2026-11-20): Cargo.lock holds the
+one exact commit for all of them, and it moves only by a deliberate `cargo update`
+with the full gate. No other moving branch dependency, uncommitted path patch,
+random prebuilt FFmpeg, or generated latest-version guess. Codec limitations are
+reported and fixed in the Splot repository, not worked around here.
 
 Add only used, phase-approved dependencies from the pack. Other dependencies or
 crate-graph changes require justification and maintainer approval. Candidate

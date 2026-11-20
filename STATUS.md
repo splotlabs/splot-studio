@@ -45,6 +45,8 @@ carries no primaries, transfer, matrix, range, chroma siting, aspect or timing
 - **STUDIO-04:** GUI-owned durable queue, no supervisor process.
 - **Preview** (thumbnail, live frame) stays in STUDIO-05.
 - Phase PRs are opened and merged by the agent once CI is green.
+- `splot-*` dependencies track `main` until Splot has releases; codec
+  limitations are reported and fixed in the Splot repository.
 - No `clap`/`anyhow`; arguments are parsed with `std`.
 
 ## Measurements
@@ -94,8 +96,9 @@ Cancel: acknowledged in under 1 ms; finished in 9 ms between frames, otherwise
 
 ## Provenance and dependencies
 
-Splot `c1183fec4b81d72045d861973a9d8e563c6e9e2e` for `splot-encode`, `-decode`,
-`-validate`, `-core` (dev profile builds them at `opt-level = 2`). `slint` 1.19.0,
+Splot `main` at `529f3ee673c83b2469701953d0c0d13f44c517da` (in `Cargo.lock`) for
+`splot-encode`, `-decode`, `-validate`, `-core` (dev profile builds them at
+`opt-level = 2`). The measurements above were taken at `c1183fec`. `slint` 1.19.0,
 `rfd` 0.18.0, `tempfile` 3.27.0, `serde`, `serde_json`, `thiserror`. Linux build
 needs `pkg-config` and `libfontconfig-dev`. Cargo fetches Git crates with the git
 CLI (`.cargo/config.toml`).
