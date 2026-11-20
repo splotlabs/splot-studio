@@ -3,7 +3,7 @@
 
 [package]
 name = "studio-engine"
-description = "Splot Studio engine executable: framed control protocol. No encoding yet."
+description = "Splot Studio engine executable: Y4M to AV2 IVF/OBU worker over a framed control protocol."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,6 +19,11 @@ path = "src/main.rs"
 [dependencies]
 studio-domain.workspace = true
 serde_json.workspace = true
+splot-core.workspace = true
+splot-decode.workspace = true
+splot-encode.workspace = true
+splot-validate.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 
 [lints]

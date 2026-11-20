@@ -4,5 +4,10 @@
 # Aliases only. No target-cpu or stack flags: the codec checkout's x86-64-v3
 # floor is not Studio policy (docs/planning/studio-v1/08-DEPENDENCIES-AND-RELEASE.md).
 
+# Fetch the pinned splot-* Git crates with the git CLI, so a developer's own
+# URL rewrites and SSH host aliases apply (Cargo's built-in client ignores them).
+[net]
+git-fetch-with-cli = true
+
 [alias]
 xtask = "run --package xtask --"

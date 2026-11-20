@@ -18,6 +18,8 @@ resolved in `Cargo.lock`, not from a licence audit. Transitive dependencies are 
 | `slint` | 1.19.0 | GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0 | studio-app |
 | `slint-build` | 1.19.0 | GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0 | studio-app (build) |
 | `rfd` | 0.18.0 | MIT | studio-app |
+| `tempfile` | 3.27.0 | MIT OR Apache-2.0 | studio-engine |
+| `splot-encode`, `splot-decode`, `splot-validate`, `splot-core` | git `c1183fec` | PolyForm-Noncommercial-1.0.0 (same owner) | studio-engine |
 
 ## Slint
 
