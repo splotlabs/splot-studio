@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+[package]
+name = "studio-app"
+description = "Splot Studio desktop GUI (Slint)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "splot-studio"
+path = "src/main.rs"
+
+[dependencies]
+studio-domain.workspace = true
+# Winit backend (Wayland + X11 on Linux, native on Windows/macOS) with AccessKit
+# accessibility; FemtoVG/OpenGL as the GPU renderer and the software renderer as
+# the fallback (`SLINT_BACKEND=winit-software`). `raw-window-handle-06` lets the
+# Open dialog be parented to the main window. No Qt, Skia, tray, wgpu or extras.
+slint = { workspace = true, features = [
+  "std",
+  "compat-1-18",
+  "backend-winit",
+  "renderer-femtovg",
+  "renderer-software",
+  "accessibility",
+  "raw-window-handle-06",
+] }
+# XDG desktop portal (dlopened libdbus, zenity fallback) with Wayland parenting on
+# Linux; native panels on Windows/macOS. No GTK, no async runtime.
+rfd = { workspace = true, features = ["xdg-portal", "wayland"] }
+
+[build-dependencies]
+slint-build.workspace = true
+
+[lints]
+workspace = true
