@@ -122,6 +122,9 @@ impl Step {
 pub struct Activity {
     destination: PathBuf,
     total_frames: Option<u64>,
+    /// The engine checks the source's real timestamps before the first
+    /// frame, which can take a moment on a large file.
+    checks_timing: bool,
     phase: Phase,
     /// The last stage reported, kept while cancelling.
     stage: Option<Stage>,
@@ -131,12 +134,20 @@ pub struct Activity {
 }
 
 impl Activity {
-    /// A job whose `Start` was just sent.
+    /// A job whose `Start` was just sent. `checks_timing` says the engine
+    /// verifies the source's timestamps before encoding (sources read with
+    /// `FFmpeg`).
     #[must_use]
-    pub const fn new(destination: PathBuf, total_frames: Option<u64>, now: Instant) -> Self {
+    pub const fn new(
+        destination: PathBuf,
+        total_frames: Option<u64>,
+        checks_timing: bool,
+        now: Instant,
+    ) -> Self {
         Self {
             destination,
             total_frames,
+            checks_timing,
             phase: Phase::Starting,
             stage: None,
             progress: Progress {
@@ -271,6 +282,19 @@ impl Activity {
         self.total_frames
     }
 
+    /// Whether the engine checks the source's timestamps before encoding.
+    #[must_use]
+    pub const fn checks_timing(&self) -> bool {
+        self.checks_timing
+    }
+
+    /// No frame has been read yet: the job is starting or checking the
+    /// source, and only the elapsed time moves.
+    #[must_use]
+    pub const fn before_first_frame(&self) -> bool {
+        self.progress.frames_read == 0 && self.progress.frames_encoded == 0
+    }
+
     /// The requested destination.
     #[must_use]
     pub fn destination(&self) -> &Path {
@@ -294,10 +318,15 @@ impl Activity {
             .saturating_duration_since(self.started)
     }
 
-    /// Encoded frames as a fraction of the total, only when the total is known.
+    /// Encoded frames as a fraction of the total, only when the total is
+    /// known and counts have arrived. Before the first frame a share of
+    /// zero would look frozen; the bar stays indeterminate instead.
     #[must_use]
     pub fn fraction(&self) -> Option<f32> {
         let total = self.total_frames.filter(|&t| t > 0)?;
+        if self.before_first_frame() {
+            return None;
+        }
         // Display precision only; counts stay exact everywhere else.
         #[allow(clippy::cast_precision_loss)]
         let fraction = self.progress.frames_encoded.min(total) as f64 / total as f64;
@@ -313,7 +342,10 @@ mod tests {
 
     fn job(total: Option<u64>) -> (Activity, Instant) {
         let now = Instant::now();
-        (Activity::new("/out/clip.ivf".into(), total, now), now)
+        (
+            Activity::new("/out/clip.ivf".into(), total, false, now),
+            now,
+        )
     }
 
     fn progress(read: u64, encoded: u64, bytes: u64) -> Input {
@@ -367,8 +399,11 @@ mod tests {
     #[test]
     fn a_normal_job_runs_through_its_stages_to_completion() {
         let (mut a, now) = job(Some(90));
-        assert_eq!(a.fraction(), Some(0.0));
+        // No counts yet: indeterminate, not a frozen 0 %.
+        assert_eq!(a.fraction(), None);
+        assert!(a.before_first_frame());
         assert_eq!(a.apply(stage(Stage::Encoding), now).changed, Changed::Phase);
+        assert_eq!(a.fraction(), None);
         assert_eq!(a.phase(), &Phase::Running(Stage::Encoding));
         assert_eq!(
             a.apply(progress(50, 45, 1000), now),

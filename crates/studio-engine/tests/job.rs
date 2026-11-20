@@ -145,11 +145,15 @@ fn import_preserves_8_and_10_bit_samples() -> TestResult {
         let src = dir.path().join("in.y4m");
         let clip = Clip::new(9, 5, colorspace, 2);
         clip.write(&src)?;
-        let mut source = source::open(&src).map_err(|e| e.to_string())?;
+        let mut source =
+            source::open(&src, source::Selection::default()).map_err(|e| e.to_string())?;
         let config = studio_engine::job::config(&source.header, settings(OutputKind::Ivf))
             .map_err(|e| e.to_string())?;
         for frame in 0..clip.frames {
-            let planes = source.reader.read_frame()?.ok_or("missing frame")?;
+            let planes = source
+                .read_frame()
+                .map_err(|e| e.to_string())?
+                .ok_or("missing frame")?;
             let frame_value = SourceFrame::new(&config, frame as u64, planes)?;
             let mut expected = clip.samples(frame);
             expected.resize(3, Vec::new());
@@ -171,7 +175,7 @@ fn probe_reports_header_facts() -> TestResult {
     let dir = tempfile::tempdir()?;
     let src = dir.path().join("in.y4m");
     Clip::new(17, 9, "444p10", 3).write(&src)?;
-    let facts = source::probe(&src).map_err(|e| e.to_string())?;
+    let facts = source::probe(&src, None).map_err(|e| e.to_string())?;
     assert_eq!((facts.width, facts.height, facts.bit_depth), (17, 9, 10));
     assert_eq!(facts.chroma, ChromaLayout::Yuv444);
     assert_eq!(
@@ -191,7 +195,7 @@ fn probe_reports_header_facts() -> TestResult {
         ..Clip::new(16, 8, "420", 2)
     };
     clip.write(&src)?;
-    let facts = source::probe(&src).map_err(|e| e.to_string())?;
+    let facts = source::probe(&src, None).map_err(|e| e.to_string())?;
     assert_eq!(facts.pixel_aspect, None);
     assert_eq!(
         facts.disclosures,
@@ -204,7 +208,9 @@ fn probe_reports_header_facts() -> TestResult {
     bytes.splice(at..at + 6, b"FRAME Ixyz\n".iter().copied());
     fs::write(&src, &bytes)?;
     assert_eq!(
-        source::probe(&src).map_err(|e| e.to_string())?.frame_count,
+        source::probe(&src, None)
+            .map_err(|e| e.to_string())?
+            .frame_count,
         None
     );
     Ok(())
@@ -499,7 +505,7 @@ fn a_foreign_or_missing_source_is_invalid() -> TestResult {
     );
     assert_eq!(code(&end), Some(FailureCode::InvalidSource), "{end:?}");
     assert!(matches!(
-        source::probe(Path::new("/nonexistent/x.y4m")),
+        source::probe(Path::new("/nonexistent/x.y4m"), None),
         Err(Stop::Failed(_))
     ));
     Ok(())
@@ -514,7 +520,7 @@ fn verification_catches_damaged_output() -> TestResult {
     let clip = Clip::new(16, 8, "420", 3);
     for kind in [OutputKind::Ivf, OutputKind::Av2AnnexB] {
         let (dir, _) = encode_ok(&clip, kind)?;
-        let header = source::open(&dir.path().join("in.y4m"))
+        let header = source::open(&dir.path().join("in.y4m"), source::Selection::default())
             .map_err(|e| e.to_string())?
             .header;
         let config =

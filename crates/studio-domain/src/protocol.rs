@@ -20,7 +20,7 @@ use crate::job::{Failure, JobReport, JobSpec, Progress, SourceFacts, Stage, Wire
 use crate::settings::OutputKind;
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -65,6 +65,28 @@ pub struct BuildIdentity {
 pub struct Capabilities {
     /// The output kinds this engine can encode.
     pub encode_outputs: Vec<OutputKind>,
+    /// The `FFmpeg` this engine reads ordinary media files with; `None` means
+    /// only Y4M can be read.
+    pub media_tool: Option<MediaTool>,
+}
+
+/// Where the engine found its `FFmpeg`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaToolOrigin {
+    /// Shipped beside the engine executable.
+    Bundled,
+    /// A development opt-in to whatever is installed on this machine.
+    System,
+}
+
+/// The identity of the `FFmpeg` executables the engine runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaTool {
+    /// The version string the tool reports.
+    pub version: String,
+    /// Where it was found.
+    pub origin: MediaToolOrigin,
 }
 
 /// A request from the app to the engine.
@@ -76,11 +98,14 @@ pub enum Command {
         /// The app build.
         client: BuildIdentity,
     },
-    /// Reads a source's header. Answered by [`Event::Probed`] or
-    /// [`Event::Failed`]. Nothing is decoded or written.
+    /// Reads a source's header and stream inventory. Answered by
+    /// [`Event::Probed`] or [`Event::Failed`]. Nothing is decoded or written.
     Probe {
         /// The file to inspect.
         source: WirePath,
+        /// The video stream to describe; `None` picks the first one that is
+        /// not an attached picture.
+        video_stream: Option<u32>,
     },
     /// Starts the one job this worker process runs. Followed by
     /// [`Event::Stage`] and [`Event::Progress`] events and exactly one of
@@ -338,9 +363,11 @@ mod tests {
 
     #[test]
     fn unknown_messages_are_malformed() {
-        let frame = br#"{"protocol_version":2,"request_id":1,"body":{"type":"transmogrify"}}"#;
+        let frame = format!(
+            r#"{{"protocol_version":{PROTOCOL_VERSION},"request_id":1,"body":{{"type":"transmogrify"}}}}"#
+        );
         assert!(matches!(
-            decode::<Command>(frame),
+            decode::<Command>(frame.as_bytes()),
             Err(ProtocolError::Malformed(_))
         ));
         assert!(matches!(

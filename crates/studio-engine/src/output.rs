@@ -53,7 +53,10 @@ impl FileId {
     }
 
     /// The identity of the file `path` names, following symlinks.
-    fn of_path(path: &Path) -> io::Result<Self> {
+    ///
+    /// # Errors
+    /// Any error from reading its metadata or canonicalizing `path`.
+    pub fn of_path(path: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -75,20 +78,10 @@ impl FileId {
 /// a dangling symlink), or [`FailureCode::Output`] when the temporary file
 /// cannot be created.
 pub fn prepare(destination: &Path, source: &FileId) -> Result<NamedTempFile, Stop> {
+    check_destination(destination, source)?;
     let name = destination
         .file_name()
         .ok_or_else(|| output("the destination has no file name"))?;
-    if FileId::of_path(destination).is_ok_and(|id| id == *source) {
-        return Err(Stop::failed(
-            FailureCode::SourceIsDestination,
-            "the destination is the source file",
-        ));
-    }
-    match fs::symlink_metadata(destination) {
-        Ok(_) => return Err(exists()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(output(format!("cannot inspect the destination: {e}"))),
-    }
     let dir = match destination.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
         _ => PathBuf::from("."),
@@ -110,6 +103,28 @@ pub fn prepare(destination: &Path, source: &FileId) -> Result<NamedTempFile, Sto
             dir.display()
         ))
     })
+}
+
+/// The checks of [`prepare`] without creating anything, so a long job can
+/// fail early. [`prepare`] repeats them.
+///
+/// # Errors
+/// As [`prepare`], except for creating the temporary file.
+pub fn check_destination(destination: &Path, source: &FileId) -> Result<(), Stop> {
+    if destination.file_name().is_none() {
+        return Err(output("the destination has no file name"));
+    }
+    if FileId::of_path(destination).is_ok_and(|id| id == *source) {
+        return Err(Stop::failed(
+            FailureCode::SourceIsDestination,
+            "the destination is the source file",
+        ));
+    }
+    match fs::symlink_metadata(destination) {
+        Ok(_) => Err(exists()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(output(format!("cannot inspect the destination: {e}"))),
+    }
 }
 
 /// Moves the verified `temp` to `destination` without replacing anything

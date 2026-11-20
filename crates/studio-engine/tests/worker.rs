@@ -205,11 +205,11 @@ fn version_mismatch_is_answered_and_the_session_continues() -> TestResult {
 #[test]
 fn malformed_messages_are_answered() -> TestResult {
     let mut input =
-        raw_frame(br#"{"protocol_version":2,"request_id":5,"body":{"type":"encode"}}"#)?;
+        raw_frame(br#"{"protocol_version":3,"request_id":5,"body":{"type":"encode"}}"#)?;
     input.extend(raw_frame(b"not json")?);
     // A Start whose settings are out of range does not decode either.
     input.extend(raw_frame(
-        br#"{"protocol_version":2,"request_id":6,"body":{"type":"start","job":{"source":{"kind":"utf8","value":"a"},"destination":{"kind":"utf8","value":"b"},"settings":{"output":"ivf","preset":11,"crf":20}}}}"#,
+        br#"{"protocol_version":3,"request_id":6,"body":{"type":"start","job":{"source":{"kind":"utf8","value":"a"},"destination":{"kind":"utf8","value":"b"},"settings":{"output":"ivf","preset":11,"crf":20}}}}"#,
     )?);
     let output = worker(&input)?;
     assert_eq!(output.status.code(), Some(0));
@@ -290,12 +290,14 @@ fn probe_answers_facts_or_failure() -> TestResult {
         1,
         Command::Probe {
             source: WirePath::from_path(&src),
+            video_stream: None,
         },
     )?;
     input.extend(frame(
         2,
         Command::Probe {
             source: WirePath::from_path(&dir.path().join("no")),
+            video_stream: None,
         },
     )?);
     let output = worker(&input)?;
@@ -754,5 +756,278 @@ fn a_cancel_racing_completion_has_one_outcome() -> TestResult {
         );
     }
     eprintln!("completed {completed}, cancelled {cancelled}");
+    Ok(())
+}
+
+/// A worker with `SPLOT_STUDIO_SYSTEM_FFMPEG` removed (or set, as Cargo
+/// sets it for tests).
+fn worker_with(opt_in: bool, stdin: &[u8]) -> Result<Output, Box<dyn Error>> {
+    let mut command = Process::new(BIN);
+    command.arg("worker");
+    if !opt_in {
+        command.env_remove(studio_engine::media::SYSTEM_OPT_IN);
+    }
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let _ = child.stdin.take().map(|mut pipe| pipe.write_all(stdin));
+    Ok(child.wait_with_output()?)
+}
+
+/// A small MP4 made by the `ffmpeg` on `PATH`.
+fn mp4(
+    dir: &Path,
+    width: usize,
+    height: usize,
+    frames: usize,
+) -> Result<std::path::PathBuf, Box<dyn Error>> {
+    let src = dir.join("in.mp4");
+    common::make(
+        &Clip::new(width, height, "420", frames),
+        dir,
+        &["-c:v", "libx264"],
+        &src,
+    )?;
+    Ok(src)
+}
+
+#[test]
+fn hello_reports_the_media_tool() -> TestResult {
+    let output = worker_with(true, &hello_frame(1)?)?;
+    let got = events(&output)?;
+    let Some(Event::Hello { capabilities, .. }) = got.first().map(|e| &e.body) else {
+        return Err(format!("{got:?}").into());
+    };
+    let tool = capabilities.media_tool.as_ref().ok_or("no media tool")?;
+    assert_eq!(
+        tool.origin,
+        studio_domain::protocol::MediaToolOrigin::System
+    );
+    assert_ne!(tool.version, "");
+    Ok(())
+}
+
+/// Without the opt-in and with nothing bundled, ordinary media files are
+/// refused with `MediaToolMissing`, and Y4M still works.
+#[test]
+fn without_a_tool_only_y4m_is_read() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let media = mp4(dir.path(), 16, 8, 2)?;
+    let y4m = dir.path().join("in.y4m");
+    Clip::new(16, 8, "420", 2).write(&y4m)?;
+    let probe = |id, path: &Path| {
+        frame(
+            id,
+            Command::Probe {
+                source: WirePath::from_path(path),
+                video_stream: None,
+            },
+        )
+    };
+    let mut input = hello_frame(1)?;
+    input.extend(probe(2, &media)?);
+    input.extend(probe(3, &y4m)?);
+    let output = worker_with(false, &input)?;
+    let got = events(&output)?;
+    assert!(
+        matches!(&got[0].body, Event::Hello { capabilities, .. } if capabilities.media_tool.is_none()),
+        "{got:?}"
+    );
+    assert!(
+        matches!(&got[1].body, Event::Failed { failure } if failure.code == FailureCode::MediaToolMissing),
+        "{got:?}"
+    );
+    assert!(matches!(&got[2].body, Event::Probed { .. }), "{got:?}");
+    // A job on the media file fails the same way.
+    let dst = dir.path().join("out.ivf");
+    let output = worker_with(
+        false,
+        &frame(
+            4,
+            Command::Start {
+                job: spec(&media, &dst, OutputKind::Ivf),
+            },
+        )?,
+    )?;
+    let got = events(&output)?;
+    assert!(
+        matches!(&got.last().map(|e| &e.body), Some(Event::Failed { failure }) if failure.code == FailureCode::MediaToolMissing),
+        "{got:?}"
+    );
+    assert!(!dst.exists());
+    Ok(())
+}
+
+/// The first `PATH` directory holding `name`.
+fn on_path(name: &str) -> Option<std::path::PathBuf> {
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(&file))
+        .find(|path| path.is_file())
+}
+
+/// Tools in the engine's `ffmpeg/` directory are used without the opt-in
+/// and reported as bundled.
+#[test]
+fn tools_beside_the_engine_are_bundled() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let engine = dir
+        .path()
+        .join(format!("engine{}", std::env::consts::EXE_SUFFIX));
+    std::fs::copy(BIN, &engine)?;
+    let tools = dir.path().join("ffmpeg");
+    std::fs::create_dir(&tools)?;
+    for name in ["ffmpeg", "ffprobe"] {
+        let found = on_path(name).ok_or(format!("{name} is not on PATH"))?;
+        let found = std::fs::canonicalize(found)?;
+        let link = tools.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&found, &link)?;
+        #[cfg(not(unix))]
+        if std::fs::hard_link(&found, &link).is_err() {
+            std::fs::copy(&found, &link)?;
+        }
+    }
+    let output = Process::new(&engine)
+        .arg("--version")
+        .env_remove(studio_engine::media::SYSTEM_OPT_IN)
+        .output()?;
+    let text = String::from_utf8(output.stdout)?;
+    assert!(text.contains("(Bundled,"), "{text}");
+    Ok(())
+}
+
+/// The live `ffmpeg`/`ffprobe` children of `live` reading `needle`.
+#[cfg(target_os = "linux")]
+fn tools_of(live: &Live, needle: &Path) -> Vec<u32> {
+    common::tool_children(live.child.id(), &needle.to_string_lossy())
+}
+
+/// A forced cancel (the worker exits without unwinding) inside a long codec
+/// call kills the decoding `ffmpeg` too; nothing is published or left.
+#[test]
+fn a_forced_cancel_leaves_no_ffmpeg_behind() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let src = mp4(dir.path(), 640, 360, 12)?;
+    let dst = dir.path().join("out.ivf");
+    let mut live = Live::spawn()?;
+    live.send(
+        1,
+        Command::Start {
+            job: spec(&src, &dst, OutputKind::Ivf),
+        },
+    )?;
+    live.read_until(|e| matches!(e, Event::Progress { progress } if progress.frames_encoded >= 1))?;
+    #[cfg(target_os = "linux")]
+    let decoders = tools_of(&live, &src);
+    #[cfg(target_os = "linux")]
+    assert_eq!(decoders.len(), 1, "one ffmpeg decodes: {decoders:?}");
+    live.send(2, Command::Cancel)?;
+    let got = live.read_until(terminal)?;
+    assert!(
+        matches!(got.last().map(|e| &e.body), Some(Event::Cancelled)),
+        "{got:?}"
+    );
+    assert_eq!(exits_within(&mut live, Duration::from_secs(3))?, Some(0));
+    #[cfg(target_os = "linux")]
+    for pid in decoders {
+        assert!(!common::alive_tool(pid), "ffmpeg {pid} outlived the worker");
+    }
+    assert!(!dst.exists());
+    assert_eq!(
+        leftovers(dir.path(), &[&src]),
+        Vec::<std::path::PathBuf>::new()
+    );
+    Ok(())
+}
+
+/// `kill -9` of the worker runs no code; its `ffmpeg` stops at its next
+/// write to the closed pipe and is reaped by the system.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_killed_worker_leaves_no_ffmpeg_running() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let src = mp4(dir.path(), 640, 360, 12)?;
+    let dst = dir.path().join("out.ivf");
+    let mut live = Live::spawn()?;
+    live.send(
+        1,
+        Command::Start {
+            job: spec(&src, &dst, OutputKind::Ivf),
+        },
+    )?;
+    live.read_until(|e| matches!(e, Event::Progress { .. }))?;
+    let decoders = tools_of(&live, &src);
+    assert_eq!(decoders.len(), 1, "{decoders:?}");
+    live.child.kill()?;
+    live.child.wait()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while decoders.iter().any(|&pid| common::alive_tool(pid)) {
+        assert!(
+            Instant::now() < deadline,
+            "ffmpeg kept running after the worker was killed"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!dst.exists());
+    Ok(())
+}
+
+/// `encode` on a media file prints the inventory, and needs the
+/// acknowledgement when something is left out.
+#[test]
+fn encode_command_reads_media_files() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let clip = Clip::new(32, 16, "420", 3);
+    let raw = dir.path().join("v.yuv");
+    std::fs::write(&raw, clip.raw())?;
+    let audio = dir.path().join("a.raw");
+    std::fs::write(&audio, vec![0_u8; 3200])?;
+    let src = dir.path().join("with audio.mkv");
+    let mut args = clip.raw_input("yuv420p", &raw);
+    args.extend(["-f", "s16le", "-ar", "8000", "-ac", "1", "-i"].map(str::to_owned));
+    args.push(audio.to_string_lossy().into_owned());
+    args.extend(["-map", "0", "-map", "1", "-c:v", "ffv1", "-c:a", "flac"].map(str::to_owned));
+    args.push(src.to_string_lossy().into_owned());
+    common::ffmpeg(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+    let dst = dir.path().join("out.obu");
+    let (Some(src_arg), Some(dst_arg)) = (src.to_str(), dst.to_str()) else {
+        return Err("non-UTF-8 temp path".into());
+    };
+    let refused = run(&["encode", src_arg, dst_arg, "--output", "obu"], &[])?;
+    let text = String::from_utf8(refused.stdout)?;
+    assert_eq!(refused.status.code(), Some(1), "{text}");
+    assert!(
+        text.contains("left out (video-only output)") && text.contains("1 audio"),
+        "{text}"
+    );
+    assert!(text.contains("OmissionsNotAcknowledged"), "{text}");
+    assert!(!dst.exists());
+    let output = run(
+        &[
+            "encode",
+            src_arg,
+            dst_arg,
+            "--output",
+            "obu",
+            "--stream",
+            "0",
+            "--acknowledge-omissions",
+            "--preset",
+            "10",
+        ],
+        &[],
+    )?;
+    let text = String::from_utf8(output.stdout)?;
+    assert_eq!(output.status.code(), Some(0), "{text}");
+    assert!(
+        text.contains("decoded by FFmpeg") && text.contains("<- encoded"),
+        "{text}"
+    );
+    assert!(text.contains("completed frames=3"), "{text}");
+    let wrong = run(&["encode", src_arg, dst_arg, "--stream", "1"], &[])?;
+    assert!(String::from_utf8(wrong.stdout)?.contains("UnsupportedSource"));
     Ok(())
 }

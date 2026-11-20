@@ -14,7 +14,13 @@
 //!
 //! Scenarios: `empty` (default), `engine-missing`, `probing`, `probed`, `unreadable`,
 //! `running` (known frame count), `running-unknown`, `cancelling`,
-//! `completed`, `cancelled`, `failed`, `lost`.
+//! `completed`, `cancelled`, `failed`, `lost`; for ordinary files read with
+//! `FFmpeg`: `ordinary` (audio, subtitles, chapters, two video tracks and cover
+//! art), `confirm` (the video-only confirmation), `checking` (started, no
+//! frame yet), `unsupported` (refused when opened), `unsupported-job`
+//! (refused at Start), `changed` (the file changed before Start),
+//! `tool-missing` (no `FFmpeg` in this build) and `tool-missing-file` (an MP4
+//! opened without one).
 
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -22,18 +28,29 @@ use std::time::{Duration, Instant};
 use slint::{ComponentHandle, Rgba8Pixel, SharedPixelBuffer};
 use studio_app::Palette;
 use studio_app::activity::Input;
-use studio_app::state::{AppState, Effect, Intent};
+use studio_app::state::{AppState, Effect, Intent, ProbeFailure};
 use studio_domain::job::{
     Check, CheckKind, CheckOutcome, ChromaLayout, Disclosure, Failure, FailureCode, JobReport,
-    Progress, Rational, SourceFacts, Stage, WirePath,
+    Omissions, Progress, Rational, SourceFacts, SourceFingerprint, SourceReader, Stage, VideoTrack,
+    WirePath,
 };
-use studio_domain::protocol::Event;
+use studio_domain::protocol::{Capabilities, Event, MediaTool, MediaToolOrigin};
 use studio_domain::settings::OutputKind;
 
 const SOURCE: &str = "/home/user/Videos/park walk.y4m";
 const LONG_SOURCE: &str = "/home/user/Videos/2026-11-20 family reunion at the lake house, drone pass over the jetty, take 3 (final).y4m";
+const MP4: &str = "/home/user/Videos/harbour at dusk.mp4";
+
 fn facts(frame_count: Option<u64>) -> SourceFacts {
     SourceFacts {
+        reader: SourceReader::Y4m,
+        fingerprint: SourceFingerprint {
+            len: 1_866_247_800,
+            modified: Some((1_779_000_000, 0)),
+        },
+        video_stream: 0,
+        video_tracks: Vec::new(),
+        omissions: Omissions::default(),
         width: 1920,
         height: 1080,
         frame_rate: Rational {
@@ -45,6 +62,53 @@ fn facts(frame_count: Option<u64>) -> SourceFacts {
         chroma: ChromaLayout::Yuv420,
         frame_count,
         disclosures: vec![Disclosure::ColorUnspecified],
+    }
+}
+
+fn track(stream: u32, codec: &str, width: u32, height: u32, attached_picture: bool) -> VideoTrack {
+    VideoTrack {
+        stream,
+        codec: codec.into(),
+        width,
+        height,
+        attached_picture,
+    }
+}
+
+/// An MP4 from a phone editor: two H.264 renditions, cover art, two audio
+/// tracks, three subtitle tracks and chapters; frame count unknown.
+fn mp4_facts() -> SourceFacts {
+    SourceFacts {
+        reader: SourceReader::Ffmpeg,
+        video_stream: 0,
+        video_tracks: vec![
+            track(0, "h264", 1920, 1080, false),
+            track(1, "h264", 1280, 720, false),
+            track(7, "mjpeg", 600, 600, true),
+        ],
+        omissions: Omissions {
+            other_video: 2,
+            audio: 2,
+            subtitles: 3,
+            chapters: 8,
+            ..Omissions::default()
+        },
+        frame_rate: Rational { num: 25, den: 1 },
+        bit_depth: 8,
+        disclosures: vec![Disclosure::ColorNotCarried, Disclosure::LayoutRepacked],
+        ..facts(None)
+    }
+}
+
+/// What the engine says when it has `FFmpeg`: this machine's, as a
+/// development build reports it.
+fn capabilities(tool: bool) -> Capabilities {
+    Capabilities {
+        encode_outputs: OutputKind::ALL.to_vec(),
+        media_tool: tool.then(|| MediaTool {
+            version: "8.0.1-3ubuntu2".into(),
+            origin: MediaToolOrigin::System,
+        }),
     }
 }
 
@@ -64,41 +128,126 @@ fn scenario(name: &str, long: bool, now: Instant) -> Result<AppState, String> {
         );
         return Ok(state);
     }
-    state.apply(Intent::EngineAnswered(Ok(OutputKind::ALL.to_vec())), now);
-    if name == "empty" {
+    let tool = !name.starts_with("tool-missing");
+    state.apply(Intent::EngineAnswered(Ok(capabilities(tool))), now);
+    if matches!(name, "empty" | "tool-missing") {
         return Ok(state);
     }
-    let source = if long { LONG_SOURCE } else { SOURCE };
-    let Effect::Probe { id, .. } = state.apply(Intent::PickFinished(Some(source.into())), now)
-    else {
+    let ordinary = matches!(
+        name,
+        "ordinary"
+            | "confirm"
+            | "checking"
+            | "unsupported"
+            | "unsupported-job"
+            | "changed"
+            | "tool-missing-file"
+    );
+    let source = match (ordinary, long) {
+        (true, _) => MP4,
+        (false, true) => LONG_SOURCE,
+        (false, false) => SOURCE,
+    };
+    let Effect::Probe(request) = state.apply(Intent::PickFinished(Some(source.into())), now) else {
         return Err("picking did not probe".into());
     };
-    // 300 frames of 1920x1080 10-bit 4:2:0 Y4M.
-    state.note_source_size(Some(1_866_247_800));
+    let id = request.id;
+    // 300 frames of 1920x1080 10-bit 4:2:0 Y4M, or a phone clip.
+    state.note_source_size(Some(if ordinary { 412_733_901 } else { 1_866_247_800 }));
     let total = if name == "running-unknown" {
         None
     } else {
         Some(300)
     };
+    let refused = |code, message: &str| {
+        Err(ProbeFailure {
+            code: Some(code),
+            message: message.to_owned(),
+        })
+    };
     let result = match name {
         "probing" => return Ok(state),
-        "unreadable" => Err(
-            "Unsupported Y4M: interlaced content (Itop) is not encoded by this build.".to_owned(),
+        "unreadable" => refused(
+            FailureCode::UnsupportedSource,
+            "Unsupported Y4M: interlaced content (Itop) is not encoded by this build.",
         ),
+        "unsupported" => refused(
+            FailureCode::UnsupportedSource,
+            "The video is HDR (PQ transfer). Only SDR video is encoded",
+        ),
+        "tool-missing-file" => refused(
+            FailureCode::MediaToolMissing,
+            "Reading this file needs FFmpeg, and this engine has none.",
+        ),
+        _ if ordinary => Ok(mp4_facts()),
         _ => Ok(facts(total)),
     };
     state.apply(Intent::ProbeAnswered { id, result }, now);
-    if matches!(name, "probed" | "unreadable") {
+    if matches!(
+        name,
+        "probed" | "unreadable" | "ordinary" | "unsupported" | "tool-missing-file"
+    ) {
         return Ok(state);
     }
 
-    let start = now.checked_sub(Duration::from_secs(83)).unwrap_or(now);
-    let Effect::Start { id, .. } = state.apply(Intent::EncodeRequested, start) else {
-        return Err("encode did not start".into());
+    // The checking scenario is two seconds in; the others 1:23.
+    let ago = if name == "checking" { 2 } else { 83 };
+    let start = now.checked_sub(Duration::from_secs(ago)).unwrap_or(now);
+    let id = match state.apply(Intent::EncodeRequested, start) {
+        Effect::Start { id, .. } => id,
+        Effect::None if state.confirmation().is_some() => {
+            if name == "confirm" {
+                return Ok(state);
+            }
+            let Effect::Start { id, .. } = state.apply(Intent::OmissionsConfirmed, start) else {
+                return Err("confirming did not start".into());
+            };
+            id
+        }
+        _ => return Err("encode did not start".into()),
     };
     let mut job = |input: Input| {
         state.apply(Intent::Job { id, input }, now);
     };
+    if ordinary {
+        match name {
+            // No stage and no counts yet: the engine is checking timestamps.
+            "checking" => {}
+            "unsupported-job" => job(Input::Event(Event::Failed {
+                failure: Failure {
+                    code: FailureCode::UnsupportedSource,
+                    message: "The video has a variable frame rate: frame 412 lasts 1/30 s \
+                              after frames of 1/25 s"
+                        .into(),
+                },
+            })),
+            "changed" => {
+                let failed = Input::Event(Event::Failed {
+                    failure: Failure {
+                        code: FailureCode::SourceChanged,
+                        message: "harbour at dusk.mp4 changed since it was read".into(),
+                    },
+                });
+                // The app reads the file again by itself; show it read.
+                let Effect::Job {
+                    reprobe: Some(request),
+                    ..
+                } = state.apply(Intent::Job { id, input: failed }, now)
+                else {
+                    return Err("a changed source was not read again".into());
+                };
+                state.apply(
+                    Intent::ProbeAnswered {
+                        id: request.id,
+                        result: Ok(mp4_facts()),
+                    },
+                    now,
+                );
+            }
+            other => return Err(format!("unknown scenario {other:?}")),
+        }
+        return Ok(state);
+    }
     job(Input::Event(Event::Stage {
         stage: Stage::Encoding,
     }));

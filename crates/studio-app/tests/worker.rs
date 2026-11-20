@@ -7,9 +7,14 @@
 //! (`target/<profile>/splot-studio-engine`). It is not built by
 //! `cargo test -p studio-app`; when it is missing these tests fail and say so
 //! instead of skipping.
+//!
+//! Ordinary media files are generated with the `ffmpeg` on `PATH`, which the
+//! engine also uses here (`SPLOT_STUDIO_SYSTEM_FFMPEG=1` from
+//! `.cargo/config.toml`). Without it those tests fail and say so.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command as Process;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
@@ -17,9 +22,9 @@ use std::time::{Duration, Instant};
 use studio_app::activity::{Activity, Input, Phase};
 use studio_app::engine::{Delivery, ENGINE_NAME, Ending, EngineStatus, Worker};
 use studio_domain::job::{
-    ChromaLayout, FailureCode, JobSpec, Rational, SourceFacts, Stage, WirePath,
+    ChromaLayout, FailureCode, JobSpec, Rational, SourceFacts, SourceReader, Stage, WirePath,
 };
-use studio_domain::protocol::{BuildIdentity, Command, Event};
+use studio_domain::protocol::{BuildIdentity, Command, Event, MediaToolOrigin};
 use studio_domain::settings::{Crf, EncoderSettings, OutputKind, SpeedPreset};
 
 /// Long enough for a debug-build encode of a tiny clip.
@@ -154,12 +159,56 @@ const fn is_terminal(event: &Event) -> bool {
     )
 }
 
+/// Runs the `ffmpeg` on `PATH` with `args` in `dir`; fails the test, with
+/// the reason, when it is missing or refuses.
+fn ffmpeg(dir: &Scratch, args: &[&str]) {
+    let output = Process::new("ffmpeg")
+        .current_dir(&dir.0)
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y"])
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| {
+            unreachable!(
+                "these tests need FFmpeg: install it so that `ffmpeg` and `ffprobe` are on \
+                 PATH ({e})"
+            )
+        });
+    assert!(
+        output.status.success(),
+        "ffmpeg {args:?} failed ({}): {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A tiny MP4: six 64×48 frames of MPEG-4 Part 2 video at 25 fps and, when
+/// `audio`, one AAC track. Both codecs are `FFmpeg`'s own, so any build has them.
+fn write_mp4(dir: &Scratch, name: &str, audio: bool) -> PathBuf {
+    let mut args = vec!["-f", "lavfi", "-i", "testsrc2=size=64x48:rate=25"];
+    if audio {
+        args.extend(["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"]);
+        args.extend(["-c:a", "aac", "-shortest"]);
+    }
+    args.extend([
+        "-frames:v",
+        "6",
+        "-c:v",
+        "mpeg4",
+        "-pix_fmt",
+        "yuv420p",
+        name,
+    ]);
+    ffmpeg(dir, &args);
+    dir.path(name)
+}
+
 fn probe(source: &Path) -> Event {
     let (mut worker, rx) = spawn();
     let sent = worker.send(
         7,
         Command::Probe {
             source: WirePath::from_path(source),
+            video_stream: None,
         },
     );
     assert!(sent.is_ok(), "{sent:?}");
@@ -177,14 +226,36 @@ fn settings(output: OutputKind) -> EncoderSettings {
     }
 }
 
+fn facts(source: &Path) -> SourceFacts {
+    match probe(source) {
+        Event::Probed { facts } => facts,
+        other => unreachable!("probe of {} failed: {other:?}", source.display()),
+    }
+}
+
+/// Starts a job built, as the app builds it, from a fresh probe of `source`.
 fn start(
     source: &Path,
+    destination: &Path,
+    settings: EncoderSettings,
+) -> (Worker, Receiver<Delivery>) {
+    let facts = facts(source);
+    start_with(source, &facts, false, destination, settings)
+}
+
+fn start_with(
+    source: &Path,
+    facts: &SourceFacts,
+    omissions_acknowledged: bool,
     destination: &Path,
     settings: EncoderSettings,
 ) -> (Worker, Receiver<Delivery>) {
     let (mut worker, rx) = spawn();
     let job = JobSpec {
         source: WirePath::from_path(source),
+        fingerprint: facts.fingerprint,
+        video_stream: facts.video_stream,
+        omissions_acknowledged,
         destination: WirePath::from_path(destination),
         settings,
     };
@@ -219,14 +290,24 @@ fn hello_reports_what_the_engine_can_encode() {
     assert!(worker.send(0, Command::Hello { client }).is_ok());
     worker.close_input();
     let status = EngineStatus::from_hello(next(&rx, ANSWER_TIMEOUT));
-    let EngineStatus::Ready { encode_outputs, .. } = &status else {
+    let EngineStatus::Ready { capabilities, .. } = &status else {
         unreachable!("{status:?}")
     };
     assert!(
-        encode_outputs.contains(&OutputKind::Ivf)
-            && encode_outputs.contains(&OutputKind::Av2AnnexB),
+        capabilities.encode_outputs.contains(&OutputKind::Ivf)
+            && capabilities.encode_outputs.contains(&OutputKind::Av2AnnexB),
         "{status:?}"
     );
+    // Cargo sets SPLOT_STUDIO_SYSTEM_FFMPEG=1, so the engine uses the FFmpeg
+    // on PATH and says so.
+    let tool = capabilities.media_tool.as_ref().unwrap_or_else(|| {
+        unreachable!(
+            "the engine found no FFmpeg: install it so that `ffmpeg` and `ffprobe` are on \
+             PATH ({status:?})"
+        )
+    });
+    assert_eq!(tool.origin, MediaToolOrigin::System, "{status:?}");
+    assert!(!tool.version.trim().is_empty(), "{status:?}");
     expect_clean_end(&rx);
 }
 
@@ -236,9 +317,9 @@ fn probe_reads_the_header_at_both_depths() {
     for ten_bit in [false, true] {
         let source = dir.path(if ten_bit { "ten.y4m" } else { "eight.y4m" });
         write_y4m(&source, 64, 36, 3, ten_bit);
-        let Event::Probed { facts } = probe(&source) else {
-            unreachable!("probe of {} failed", source.display())
-        };
+        let facts = facts(&source);
+        assert_eq!(facts.reader, SourceReader::Y4m);
+        assert!(!facts.omissions.any(), "{facts:?}");
         let SourceFacts {
             width,
             height,
@@ -266,13 +347,16 @@ fn probe_reads_the_header_at_both_depths() {
 }
 
 #[test]
-fn probe_rejects_a_file_that_is_not_y4m() {
+fn probe_refuses_a_file_that_is_not_video() {
     let dir = Scratch::new("garbage");
+    // A truncated WAV header: not Y4M, and nothing FFmpeg is allowed to read
+    // as video. Invalid or unsupported, it is refused either way.
     let source = dir.path("garbage.y4m");
     fs::write(&source, b"RIFF\0\0\0\0WAVEfmt ").unwrap_or_else(|e| unreachable!("{e}"));
     let answer = probe(&source);
     assert!(
-        matches!(&answer, Event::Failed { failure } if failure.code == FailureCode::InvalidSource),
+        matches!(&answer, Event::Failed { failure }
+            if matches!(failure.code, FailureCode::InvalidSource | FailureCode::UnsupportedSource)),
         "{answer:?}"
     );
     let missing = probe(&dir.path("missing.y4m"));
@@ -287,7 +371,7 @@ fn encodes_both_depths_to_both_outputs_and_publishes_only_the_result() {
         write_y4m(&source, 64, 36, 4, ten_bit);
         let destination = dir.path(&format!("clip.{}", output.extension()));
         let (mut worker, rx) = start(&source, &destination, settings(output));
-        let mut activity = Activity::new(destination.clone(), Some(4), Instant::now());
+        let mut activity = Activity::new(destination.clone(), Some(4), false, Instant::now());
         let events = run_to_end(&rx, &mut activity);
 
         let Phase::Completed(report) = activity.phase() else {
@@ -343,7 +427,7 @@ fn an_existing_destination_is_refused_and_left_alone() {
     let destination = dir.path("clip.ivf");
     fs::write(&destination, b"precious").unwrap_or_else(|e| unreachable!("{e}"));
     let (mut worker, rx) = start(&source, &destination, settings(OutputKind::Ivf));
-    let mut activity = Activity::new(destination.clone(), Some(2), Instant::now());
+    let mut activity = Activity::new(destination.clone(), Some(2), false, Instant::now());
     let events = run_to_end(&rx, &mut activity);
     assert!(
         matches!(activity.phase(), Phase::Failed(f) if f.code == FailureCode::DestinationExists),
@@ -387,7 +471,7 @@ fn cancel_is_acknowledged_then_ends_with_nothing_published() {
     let dir = Scratch::new("cancel");
     let (source, destination) = long_job(&dir);
     let (mut worker, rx) = start(&source, &destination, slow());
-    let mut activity = Activity::new(destination.clone(), None, Instant::now());
+    let mut activity = Activity::new(destination.clone(), None, false, Instant::now());
     wait_until_running(&rx);
     activity.apply(Input::CancelPressed, Instant::now());
     assert!(worker.send(1, Command::Cancel).is_ok());
@@ -411,7 +495,7 @@ fn closing_the_input_mid_job_cancels_it() {
     let dir = Scratch::new("eof");
     let (source, destination) = long_job(&dir);
     let (mut worker, rx) = start(&source, &destination, slow());
-    let mut activity = Activity::new(destination.clone(), None, Instant::now());
+    let mut activity = Activity::new(destination.clone(), None, false, Instant::now());
     wait_until_running(&rx);
     worker.close_input();
     let events = run_to_end(&rx, &mut activity);
@@ -452,7 +536,7 @@ fn a_killed_worker_ends_without_a_terminal_event() {
     let dir = Scratch::new("kill");
     let (source, destination) = long_job(&dir);
     let (worker, rx) = start(&source, &destination, slow());
-    let mut activity = Activity::new(destination.clone(), None, Instant::now());
+    let mut activity = Activity::new(destination.clone(), None, false, Instant::now());
     wait_until_running(&rx);
     worker.kill();
     let deadline = Instant::now() + ANSWER_TIMEOUT;
@@ -479,4 +563,109 @@ fn a_killed_worker_ends_without_a_terminal_event() {
     }
     assert!(matches!(activity.phase(), Phase::Lost(_)));
     assert!(!destination.exists());
+}
+
+#[test]
+fn probe_inventories_an_ordinary_file() {
+    let dir = Scratch::new("probe-mp4");
+    let source = write_mp4(&dir, "clip.mp4", true);
+    let facts = facts(&source);
+    assert_eq!(facts.reader, SourceReader::Ffmpeg, "{facts:?}");
+    assert_eq!((facts.width, facts.height), (64, 48));
+    assert_eq!(facts.frame_rate, Rational { num: 25, den: 1 });
+    assert_eq!(facts.bit_depth, 8);
+    assert_eq!(facts.chroma, ChromaLayout::Yuv420);
+    assert!(facts.frame_count.is_none_or(|n| n == 6), "{facts:?}");
+    let selected = facts
+        .video_tracks
+        .iter()
+        .find(|t| t.stream == facts.video_stream);
+    assert!(
+        selected.is_some_and(|t| !t.attached_picture && t.codec == "mpeg4"),
+        "{facts:?}"
+    );
+    assert_eq!(facts.omissions.audio, 1, "{facts:?}");
+    assert_eq!(facts.omissions.other_video, 0, "{facts:?}");
+    assert!(facts.omissions.any());
+    assert_eq!(dir.entries(), ["clip.mp4"], "a probe writes nothing");
+}
+
+#[test]
+fn an_ordinary_file_with_audio_converts_only_once_acknowledged() {
+    let dir = Scratch::new("mp4-ack");
+    let source = write_mp4(&dir, "clip.mp4", true);
+    let facts = facts(&source);
+    assert!(facts.omissions.any(), "{facts:?}");
+    let destination = dir.path("clip.ivf");
+    let fast = settings(OutputKind::Ivf);
+
+    // Not acknowledged: refused, nothing written.
+    let (mut worker, rx) = start_with(&source, &facts, false, &destination, fast);
+    let mut activity = Activity::new(destination.clone(), facts.frame_count, true, Instant::now());
+    let events = run_to_end(&rx, &mut activity);
+    assert!(
+        matches!(activity.phase(), Phase::Failed(f) if f.code == FailureCode::OmissionsNotAcknowledged),
+        "{events:?}"
+    );
+    worker.close_input();
+    expect_clean_end(&rx);
+    assert_eq!(dir.entries(), ["clip.mp4"]);
+
+    // Acknowledged: video only, every frame.
+    let (mut worker, rx) = start_with(&source, &facts, true, &destination, fast);
+    let mut activity = Activity::new(destination.clone(), facts.frame_count, true, Instant::now());
+    let events = run_to_end(&rx, &mut activity);
+    let Phase::Completed(report) = activity.phase() else {
+        unreachable!("{events:?}")
+    };
+    assert_eq!(report.frames, 6, "{events:?}");
+    assert_eq!(
+        fs::metadata(&destination).map_or(0, |m| m.len()),
+        report.bytes
+    );
+    worker.close_input();
+    expect_clean_end(&rx);
+    assert_eq!(dir.entries(), ["clip.ivf", "clip.mp4"]);
+}
+
+#[test]
+fn a_video_only_file_needs_no_acknowledgement() {
+    let dir = Scratch::new("mp4-video-only");
+    let source = write_mp4(&dir, "silent.mp4", false);
+    let facts = facts(&source);
+    assert_eq!(facts.reader, SourceReader::Ffmpeg);
+    assert!(!facts.omissions.any(), "{facts:?}");
+    let destination = dir.path("silent.obu");
+    let output = settings(OutputKind::Av2AnnexB);
+    let (mut worker, rx) = start_with(&source, &facts, false, &destination, output);
+    let mut activity = Activity::new(destination.clone(), facts.frame_count, true, Instant::now());
+    let events = run_to_end(&rx, &mut activity);
+    assert!(
+        matches!(activity.phase(), Phase::Completed(r) if r.frames == 6),
+        "{events:?}"
+    );
+    worker.close_input();
+    expect_clean_end(&rx);
+}
+
+#[test]
+fn a_source_that_changed_since_its_probe_is_refused() {
+    let dir = Scratch::new("changed");
+    let source = dir.path("clip.y4m");
+    write_y4m(&source, 64, 36, 2, false);
+    let facts = facts(&source);
+    // Same name, different length: another file as far as the job knows.
+    write_y4m(&source, 64, 36, 3, false);
+    let destination = dir.path("clip.ivf");
+    let output = settings(OutputKind::Ivf);
+    let (mut worker, rx) = start_with(&source, &facts, false, &destination, output);
+    let mut activity = Activity::new(destination.clone(), Some(2), false, Instant::now());
+    let events = run_to_end(&rx, &mut activity);
+    assert!(
+        matches!(activity.phase(), Phase::Failed(f) if f.code == FailureCode::SourceChanged),
+        "{events:?}"
+    );
+    worker.close_input();
+    expect_clean_end(&rx);
+    assert_eq!(dir.entries(), ["clip.y4m"]);
 }

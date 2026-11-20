@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
-//! Command-line parsing. Two subcommands with three optional flags do not
+//! Command-line parsing. Two subcommands with a few optional flags do not
 //! justify a parser dependency; unknown input is an error, never ignored.
 
 use std::ffi::OsString;
@@ -12,6 +12,7 @@ use studio_domain::settings::{Crf, EncoderSettings, OutputKind, SpeedPreset};
 use thiserror::Error;
 
 use crate::ENGINE_NAME;
+use crate::media::SYSTEM_OPT_IN;
 
 /// The preset `encode` uses without `--preset`: the codec's default.
 pub const DEFAULT_PRESET: SpeedPreset = match SpeedPreset::new(6) {
@@ -35,12 +36,16 @@ pub enum Cli {
     Worker,
     /// Run one job in this process and print its events as text.
     Encode {
-        /// The Y4M source.
+        /// The source: Y4M, or a media file `FFmpeg` reads.
         source: PathBuf,
         /// The file to create.
         destination: PathBuf,
         /// The encoder settings.
         settings: EncoderSettings,
+        /// The video stream; `None` picks the default one.
+        video_stream: Option<u32>,
+        /// Leave out the source's other streams and chapters.
+        acknowledge_omissions: bool,
     },
 }
 
@@ -97,11 +102,18 @@ fn parse_encode(mut args: impl Iterator<Item = OsString>) -> Result<Cli, UsageEr
         preset: DEFAULT_PRESET,
         crf: DEFAULT_CRF,
     };
+    let mut video_stream = None;
+    let mut acknowledge_omissions = false;
     while let Some(flag) = args.next() {
         let flag = match flag.to_str() {
+            Some("--acknowledge-omissions") => {
+                acknowledge_omissions = true;
+                continue;
+            }
             Some("--output") => "--output",
             Some("--preset") => "--preset",
             Some("--crf") => "--crf",
+            Some("--stream") => "--stream",
             _ => return Err(UsageError::Unknown(flag)),
         };
         let value = args.next().ok_or(UsageError::MissingValue(flag))?;
@@ -124,6 +136,9 @@ fn parse_encode(mut args: impl Iterator<Item = OsString>) -> Result<Cli, UsageEr
                     .and_then(|n| SpeedPreset::new(n).ok())
                     .ok_or_else(invalid)?;
             }
+            "--stream" => {
+                video_stream = Some(text.parse().map_err(|_| invalid())?);
+            }
             _ => {
                 settings.crf = text
                     .parse()
@@ -137,6 +152,8 @@ fn parse_encode(mut args: impl Iterator<Item = OsString>) -> Result<Cli, UsageEr
         source: source.into(),
         destination: destination.into(),
         settings,
+        video_stream,
+        acknowledge_omissions,
     })
 }
 
@@ -149,15 +166,24 @@ pub fn help_text() -> String {
 
 USAGE:
     {ENGINE_NAME} worker       serve the framed control protocol on stdin/stdout
-    {ENGINE_NAME} encode <source.y4m> <destination> [--output ivf|obu] [--preset 0-10] [--crf 1-63]
-                              run one job here and print its events
+    {ENGINE_NAME} encode <source> <destination> [--output ivf|obu] [--preset 0-10] [--crf 1-63]
+                       [--stream N] [--acknowledge-omissions]
+                              print the source's inventory, run one job here and
+                              print its events
     {ENGINE_NAME} --version    print build and protocol identity
     {ENGINE_NAME} --help       print this help
 
-Input is progressive 8-bit or 10-bit Y4M. Output is AV2 IVF (ivf, the default)
-or an AV2 Annex B length-delimited OBU stream (obu), video only. The destination
-must not exist; it appears only after the output is verified. 'encode' defaults
-to preset {} and crf {}.
+Input is one progressive, constant-frame-rate, 8-bit or 10-bit SDR video: a Y4M
+file, or an MP4, MOV, Matroska (MKV, WebM), MPEG-TS or AVI file decoded by FFmpeg.
+--stream picks the video stream (default: the first one that is not cover art).
+Output is AV2 IVF (ivf, the default) or an AV2 Annex B length-delimited OBU
+stream (obu), video only: a source with audio, subtitles, other streams or
+chapters needs --acknowledge-omissions. The destination must not exist; it
+appears only after the output is verified. 'encode' defaults to preset {} and
+crf {}.
+
+FFmpeg is looked for beside this executable and in its ffmpeg/ directory; with
+{SYSTEM_OPT_IN}=1 set, also on PATH.
 
 'worker' reads length-prefixed JSON commands until end of input; stdout carries
 protocol frames only, diagnostics go to stderr.
@@ -174,11 +200,20 @@ pub fn version_text() -> String {
         "\
 {ENGINE_NAME} {}
 protocol version: {PROTOCOL_VERSION}
-encoding: {} and {}, from 8-bit or 10-bit Y4M
+encoding: {} and {}, from 8-bit or 10-bit Y4M{}
 ",
         env!("CARGO_PKG_VERSION"),
         OutputKind::Ivf.label(),
-        OutputKind::Av2AnnexB.label()
+        OutputKind::Av2AnnexB.label(),
+        match crate::media::tool() {
+            Ok(tool) => format!(
+                "\nmedia files: FFmpeg {} ({:?}, {})",
+                tool.identity.version,
+                tool.identity.origin,
+                tool.ffmpeg.display()
+            ),
+            Err(stop) => format!(" only\nmedia files: not readable: {stop}"),
+        }
     )
 }
 
@@ -202,10 +237,35 @@ mod tests {
         let got = parse(args(&[
             "encode", "in.y4m", "out.obu", "--crf", "30", "--output", "obu", "--preset", "10",
         ]));
-        let Ok(Cli::Encode { settings, .. }) = got else {
+        let Ok(Cli::Encode {
+            settings,
+            video_stream: None,
+            acknowledge_omissions: false,
+            ..
+        }) = got
+        else {
             unreachable!("{got:?}");
         };
         assert_eq!(settings.output, OutputKind::Av2AnnexB);
+        let got = parse(args(&[
+            "encode",
+            "in.mkv",
+            "out.ivf",
+            "--acknowledge-omissions",
+            "--stream",
+            "3",
+        ]));
+        assert!(
+            matches!(
+                got,
+                Ok(Cli::Encode {
+                    video_stream: Some(3),
+                    acknowledge_omissions: true,
+                    ..
+                })
+            ),
+            "{got:?}"
+        );
         assert_eq!((settings.preset.get(), settings.crf.get()), (10, 30));
         let Ok(Cli::Encode { settings, .. }) = parse(args(&["encode", "a", "b"])) else {
             unreachable!("defaults");
@@ -233,6 +293,7 @@ mod tests {
             &["encode", "a", "b", "--crf", "0"][..],
             &["encode", "a", "b", "--preset", "11"],
             &["encode", "a", "b", "--output", "mkv"],
+            &["encode", "a", "b", "--stream", "-1"],
         ] {
             assert!(
                 matches!(parse(args(bad)), Err(UsageError::Invalid { .. })),

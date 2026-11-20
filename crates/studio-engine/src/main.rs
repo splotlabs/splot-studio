@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
-use studio_domain::job::{CheckOutcome, JobSpec, WirePath};
+use studio_domain::job::{CheckOutcome, JobSpec, SourceFacts, SourceReader, WirePath};
 use studio_domain::protocol::Event;
 use studio_domain::settings::EncoderSettings;
 use studio_engine::cli::{self, Cli};
@@ -32,7 +32,15 @@ fn main() -> ExitCode {
             source,
             destination,
             settings,
-        }) => encode(&source, &destination, settings),
+            video_stream,
+            acknowledge_omissions,
+        }) => encode(
+            &source,
+            &destination,
+            settings,
+            video_stream,
+            acknowledge_omissions,
+        ),
         Err(error) => {
             let hint = format!("{error}\n\n{}", cli::help_text());
             fail(&hint, USAGE)
@@ -40,15 +48,37 @@ fn main() -> ExitCode {
     }
 }
 
-/// Runs one job on a job thread, the same path the worker takes, and prints
-/// its events as lines: progress at most once a second, everything else.
-fn encode(source: &Path, destination: &Path, settings: EncoderSettings) -> ExitCode {
+/// Probes the source and prints its inventory, then runs one job on a job
+/// thread, the same path the worker takes, and prints its events as lines:
+/// progress at most once a second, everything else.
+fn encode(
+    source: &Path,
+    destination: &Path,
+    settings: EncoderSettings,
+    video_stream: Option<u32>,
+    omissions_acknowledged: bool,
+) -> ExitCode {
+    let started = Instant::now();
+    let facts = match studio_engine::source::probe(source, video_stream) {
+        Ok(facts) => facts,
+        Err(stop) => {
+            let end = match stop {
+                job::Stop::Failed(failure) => Event::Failed { failure },
+                job::Stop::Cancelled => Event::Cancelled,
+            };
+            line(&end, started);
+            return ExitCode::from(FAILURE);
+        }
+    };
+    print_inventory(&facts, started, omissions_acknowledged);
     let spec = JobSpec {
         source: WirePath::from_path(source),
+        fingerprint: facts.fingerprint,
+        video_stream: facts.video_stream,
+        omissions_acknowledged,
         destination: WirePath::from_path(destination),
         settings,
     };
-    let started = Instant::now();
     let thread = job::spawn(move || {
         let mut last_progress: Option<Instant> = None;
         let mut report = |event: Event| {
@@ -74,6 +104,78 @@ fn encode(source: &Path, destination: &Path, settings: EncoderSettings) -> ExitC
         Event::Completed { .. } => ExitCode::SUCCESS,
         _ => ExitCode::from(FAILURE),
     }
+}
+
+/// What the probe found, as the app would show it before a job.
+fn print_inventory(facts: &SourceFacts, started: Instant, acknowledged: bool) {
+    let at = started.elapsed().as_secs_f64();
+    let mut text = match facts.reader {
+        SourceReader::Y4m => format!("{at:8.3}s source: Y4M"),
+        SourceReader::Ffmpeg => match studio_engine::media::identity() {
+            Some(tool) => format!(
+                "{at:8.3}s source: decoded by FFmpeg {} ({:?})",
+                tool.version, tool.origin
+            ),
+            None => format!("{at:8.3}s source: decoded by FFmpeg"),
+        },
+    };
+    for track in &facts.video_tracks {
+        let _ = write!(
+            text,
+            "\n          video stream {}: {} {}x{}{}{}",
+            track.stream,
+            track.codec,
+            track.width,
+            track.height,
+            if track.attached_picture {
+                " (attached picture)"
+            } else {
+                ""
+            },
+            if track.stream == facts.video_stream {
+                " <- encoded"
+            } else {
+                ""
+            }
+        );
+    }
+    let _ = write!(
+        text,
+        "\n          {}x{} {}-bit {:?}, {}/{} fps, pixel aspect {}, frames {}",
+        facts.width,
+        facts.height,
+        facts.bit_depth,
+        facts.chroma,
+        facts.frame_rate.num,
+        facts.frame_rate.den,
+        facts
+            .pixel_aspect
+            .map_or_else(|| "unstated".to_owned(), |r| format!("{}:{}", r.num, r.den)),
+        facts
+            .frame_count
+            .map_or_else(|| "counted when encoding".to_owned(), |n| n.to_string())
+    );
+    let o = facts.omissions;
+    if o.any() {
+        let _ = write!(
+            text,
+            "\n          left out (video-only output): {} other video, {} audio, {} subtitle, \
+             {} attachment, {} other stream(s), {} chapter(s){}",
+            o.other_video,
+            o.audio,
+            o.subtitles,
+            o.attachments,
+            o.other,
+            o.chapters,
+            if acknowledged {
+                ", acknowledged"
+            } else {
+                "; pass --acknowledge-omissions to encode without them"
+            }
+        );
+    }
+    let _ = write!(text, "\n          disclosures: {:?}", facts.disclosures);
+    let _ = writeln!(io::stdout(), "{text}");
 }
 
 /// One event as a line on stdout.

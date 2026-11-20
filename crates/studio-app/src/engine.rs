@@ -20,8 +20,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use studio_domain::protocol::{
-    BuildIdentity, Command, Envelope, Event, PROTOCOL_VERSION, ProtocolError, read_message,
-    write_message,
+    BuildIdentity, Capabilities, Command, Envelope, Event, PROTOCOL_VERSION, ProtocolError,
+    read_message, write_message,
 };
 use studio_domain::settings::OutputKind;
 
@@ -271,8 +271,8 @@ pub enum EngineStatus {
     Ready {
         /// Who built the engine.
         engine: BuildIdentity,
-        /// The output kinds it says it can encode.
-        encode_outputs: Vec<OutputKind>,
+        /// What it says it can do.
+        capabilities: Capabilities,
     },
     /// No engine executable at the expected place.
     NotFound(PathBuf),
@@ -293,7 +293,7 @@ impl EngineStatus {
                     capabilities,
                 } => Self::Ready {
                     engine,
-                    encode_outputs: capabilities.encode_outputs,
+                    capabilities,
                 },
                 Event::Error { message, .. } => Self::Failed(message),
                 other => Self::Failed(format!("answered Hello with {other:?}")),
@@ -317,7 +317,7 @@ impl EngineStatus {
     #[must_use]
     pub fn encode_outputs(&self) -> &[OutputKind] {
         match self {
-            Self::Ready { encode_outputs, .. } => encode_outputs,
+            Self::Ready { capabilities, .. } => &capabilities.encode_outputs,
             _ => &[],
         }
     }
@@ -328,8 +328,9 @@ impl EngineStatus {
         match self {
             Self::Ready {
                 engine,
-                encode_outputs,
+                capabilities,
             } => {
+                let encode_outputs = &capabilities.encode_outputs;
                 let encoding = if encode_outputs.is_empty() {
                     "encoding not available".to_owned()
                 } else {
@@ -379,7 +380,7 @@ mod tests {
                 name: ENGINE_NAME.into(),
                 version: "0.0.0".into(),
             },
-            encode_outputs: Vec::new(),
+            capabilities: Capabilities::default(),
         };
         assert_eq!(
             ready.summary(),
@@ -392,7 +393,10 @@ mod tests {
                 name: ENGINE_NAME.into(),
                 version: "9".into(),
             },
-            encode_outputs: vec![OutputKind::Ivf],
+            capabilities: Capabilities {
+                encode_outputs: vec![OutputKind::Ivf],
+                media_tool: None,
+            },
         };
         assert!(capable.summary().ends_with("encodes AV2 IVF"));
         assert_eq!(capable.encode_outputs(), [OutputKind::Ivf]);

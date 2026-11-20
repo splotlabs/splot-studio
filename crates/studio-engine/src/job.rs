@@ -16,13 +16,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use splot_encode::{BitDepth, Config, Encoder, Preset, RateControlMode, SourceFrame};
-use studio_domain::job::{CheckOutcome, Failure, FailureCode, JobReport, JobSpec, Progress, Stage};
+use studio_domain::job::{
+    CheckOutcome, Failure, FailureCode, JobReport, JobSpec, Progress, SourceReader, Stage,
+};
 use studio_domain::protocol::Event;
 use studio_domain::settings::{EncoderSettings, OutputKind};
 use thiserror::Error;
 
 use crate::output::{self, PacketSink};
-use crate::source::{self, Source};
+use crate::source::{self, Selection, Source};
 use crate::verify;
 use splot_encode::y4m::Y4mHeader;
 
@@ -122,7 +124,20 @@ fn execute(
         .destination
         .to_path_buf()
         .map_err(|e| output::output(e.to_string()))?;
-    let mut source = source::open(&source_path)?;
+    let mut source = source::open(
+        &source_path,
+        Selection {
+            fingerprint: Some(job.fingerprint),
+            video_stream: Some(job.video_stream),
+        },
+    )?;
+    if source.facts.omissions.any() && !job.omissions_acknowledged {
+        return Err(Stop::failed(
+            FailureCode::OmissionsNotAcknowledged,
+            "the output is video only, and the job does not acknowledge the streams and \
+             chapters it leaves out",
+        ));
+    }
     let config = config(&source.header, job.settings)?;
     if job.settings.output == OutputKind::Ivf
         && (u16::try_from(config.width).is_err() || u16::try_from(config.height).is_err())
@@ -135,6 +150,18 @@ fn execute(
             ),
         ));
     }
+    output::check_destination(&destination, &source.id)?;
+    // A decoded source is scanned first; that can take a while and writes
+    // nothing.
+    if source.facts.reader == SourceReader::Ffmpeg {
+        report(Event::Stage {
+            stage: Stage::Checking,
+        });
+    }
+    source.start(cancel)?;
+    report(Event::Stage {
+        stage: Stage::Encoding,
+    });
     let mut prepared = None;
     control.hold_temp(&mut || {
         let made = output::prepare(&destination, &source.id);
@@ -144,9 +171,6 @@ fn execute(
     });
     let temp =
         prepared.unwrap_or_else(|| Err(output::output("the temporary file was not created")))?;
-    report(Event::Stage {
-        stage: Stage::Encoding,
-    });
     let frames = encode(
         &mut source,
         &config,
@@ -242,7 +266,7 @@ fn encode(
     let mut progress = Progress::default();
     loop {
         stop_if(cancel)?;
-        let Some(planes) = source.reader.read_frame().map_err(source::read_error)? else {
+        let Some(planes) = source.read_frame()? else {
             break;
         };
         let frame = SourceFrame::new(config, progress.frames_read, planes).map_err(|e| {

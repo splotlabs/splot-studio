@@ -1,41 +1,63 @@
 # Status
 
-**Phase:** STUDIO-02 complete on Linux x86_64.
-**Updated:** 2026-11-20.
-**Next prompt:** `docs/planning/studio-v1/prompts/03-FFMPEG-INPUT.md`, with the
-deviations below (run only on the owner's go).
+**Phase:** STUDIO-03 complete on Linux x86_64.
+**Updated:** 2026-11-21.
+**Next prompt:** `docs/planning/studio-v1/prompts/04-PERSISTENCE-AND-RECOVERY.md`,
+with the deviations below.
 
 ## What works
 
-- **Convert progressive 8-bit or 10-bit Y4M to AV2** as IVF or an Annex B `.obu`
-  stream, with real codec calls in an isolated worker process.
-- **App (`splot-studio [FILE]`):** one compact window. Open a file → the engine
-  probes it → pick Quality (4 steps) and Priority (3 steps) → Convert → real
-  stage, counters and elapsed time → Cancel, or a result with each verification
-  check and Show in Folder. Advanced holds output format, rate factor, speed
-  preset, destination and the full source facts.
-- **Engine (`splot-studio-engine`):** `worker` (one job per process, protocol v2)
-  and `encode <in> <out>` for the command line. Chroma 4:2:0, 4:2:2, 4:4:4 and
-  monochrome at both depths are tested end to end.
-- **Safety:** source opened read-only; source ≠ destination by file identity;
-  exclusive `.partial` file beside the destination; verified before publishing;
-  published without replacing an existing file. Cancel removes the partial file.
-- **Verification per job:** Structure (framing and frame count, plus
-  `splot-validate`) and Splot decode. The independent AVM check is reported as
-  **not run** — no AVM decoder is installed. Splot decoding its own output is not
-  independent proof.
+- **Convert ordinary local video files** (MP4/MOV, MKV/WebM, MPEG-TS, AVI) and
+  Y4M to video-only AV2, as IVF or an Annex B `.obu` stream.
+- **How files are read:** Y4M directly; everything else by `ffprobe` (inventory,
+  JSON) and `ffmpeg` (decode) as child processes of the worker, piped into the
+  same reader. No in-process FFmpeg, no unsafe code. Inputs are limited to local
+  files and four demuxer families; playlists, concat scripts and image
+  sequences are refused.
+- **Accepted video:** progressive, constant frame rate, SDR, limited range,
+  square pixels, no rotation; planar 8/10-bit 4:2:0, 4:2:2, 4:4:4 and gray, plus
+  `nv12`/`p010le` repacked to planar without changing a value (disclosed).
+- **Checked before anything is written:** the job decodes the source once
+  (`Stage::Checking`) and requires every frame to keep the probed size, format
+  and colour and to sit exactly on the declared frame period (within one
+  time-base tick). The decode that feeds the encoder must then deliver exactly
+  that many frames.
+- **Nothing dropped silently:** the probe inventories every stream and chapter.
+  A source with audio, subtitles, attachments, chapters or extra video needs an
+  explicit acknowledgement per job; the engine refuses the job without it, and
+  the app asks with a confirmation whose default is Cancel. The acknowledgement
+  is never remembered.
+- **Stale sources:** a job carries the fingerprint (size, mtime) of the file the
+  user looked at; a changed file is refused and re-read.
+- **App:** unchanged Simple window, plus the omission summary, the confirmation,
+  a video-track picker and the FFmpeg identity under Advanced.
+- Everything from STUDIO-02 (safe publish, verification, bounded cancel) applies
+  to both routes. Cancel, forced cancel and a killed worker leave no `ffmpeg`
+  child (Linux).
 
 ## Not supported (rejected with a reason)
 
-MP4/MKV/MOV and every non-Y4M input; interlaced; bit depths other than 8 and 10;
-non-square pixel aspect; `XCOLORRANGE=FULL`; frames over the encoder or IVF size
-limits or the 8 GiB memory bound (5K/8K). No audio, subtitles, HDR, VFR, resize,
-target size, preview, queue or background continuation: closing the window stops
-the job.
+Variable frame rate; interlaced; HDR (PQ, HLG, Dolby Vision or HDR side data);
+full range (`yuvj*`, `color_range=pc` — gray files made by FFmpeg 8 are tagged
+full range and therefore refused); non-square pixels; rotation, cropping, stereo
+or spherical side data; RGB, alpha, other bit depths; size, format or colour
+changing mid-stream; encrypted streams; network or playlist inputs; frames over
+the size or 8 GiB memory limits. No audio, subtitles, resize, target size,
+preview, queue or background continuation.
 
-Y4M states no colour model and the pinned encoder writes none, so the output
-carries no primaries, transfer, matrix, range, chroma siting, aspect or timing
-(`.obu` has no frame rate at all). The app discloses this per source.
+The pinned encoder writes no colour description, so the output never says how to
+interpret its samples (splotlabs/splot#1777); the app discloses this per source.
+
+## FFmpeg
+
+- **Development:** commands run through Cargo opt in to the machine's FFmpeg
+  (`SPLOT_STUDIO_SYSTEM_FFMPEG=1` in `.cargo/config.toml`); the app labels it as
+  a development setup. Tested with 8.0.1 only. The test suite needs it and fails
+  clearly without it.
+- **Release:** the engine otherwise uses only `ffmpeg`/`ffprobe` beside itself.
+  **That controlled LGPL build does not exist yet** — a STUDIO-06 release
+  blocker, see `native/ffmpeg/README.md`. Without any FFmpeg the app reads Y4M
+  only and says so.
 
 ## Deliberate deviations from the pack (owner decisions, 2026-11-20)
 
@@ -66,33 +88,41 @@ The speed is the codec's: Studio's wrapper adds nothing measurable. A one-off
 x86-64-v3 build of the engine was 1.32× faster with byte-identical output; the
 committed build stays portable. Encoding uses under two cores.
 
+Ordinary files (320×180, 30 frames, preset 10, release): 8.5–8.7 s, 75–80 MB peak;
+probe 0.08 s, frame check plus decoder start about 0.07 s. A 600-frame 720p H.264
+check took 0.20 s.
+
 Cancel: acknowledged in under 1 ms; finished in 9 ms between frames, otherwise
 500 ms (the engine abandons the codec call, removes its file and exits).
 
 ## Checks run (Linux x86_64, Wayland)
 
-- `cargo xtask ci` — pass, about 8.5 min cold: fmt, SPDX headers, dependency
-  direction, clippy `-D warnings`, 115 tests (domain 10, engine 12 + 14 + 21,
-  app 46 + 9 against the real engine, xtask 3).
-- App launched with a clip: window sized to content (464×529 logical), clean
-  stderr, engine children reaped.
-- Evidence: `docs/evidence/studio-02/` — 22 Slint renderer snapshots and one
-  real window capture (X11 backend under XWayland).
+- `cargo xtask ci` — pass: fmt, SPDX headers, dependency direction, clippy
+  `-D warnings`, 186 tests (domain 10, engine 22 + 14 + 15 + 27, app 66 + 1 + 13
+  against the real engine, xtask 3, plus doc tests). Clippy is also clean for
+  `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`.
+- Real conversions through `encode`: H.264+AAC MP4 → IVF (refused without the
+  acknowledgement, completed with it) and 10-bit HEVC MKV → `.obu`; structure and
+  Splot decode passed, AVM not run, no `ffmpeg` left running.
+- Evidence: `docs/evidence/studio-03/` (Slint renderer snapshots).
 
 ## Not tested / open
 
-- **Clicking through the real window** (Convert, Cancel, Show in Folder, Open and
-  Save dialogs, closing mid-job): synthetic input does not reach the window on
-  this host. Covered only by the worker-client tests against the real engine.
-- Windows and macOS: never run locally; CI is the first execution. Removing the
-  open `.partial` file on forced cancel is untested on Windows.
-- AVM differential check; disk-full; screen readers; keyboard walk-through.
-- OS file drag-and-drop is not possible with Slint 1.19's winit backend.
-- A killed worker (`kill -9`, crash) leaves its `.partial` file behind.
-- Quality and Priority mappings are provisional (CRF 36/28/20/12, preset 8/6/3)
-  and not yet calibrated; preset 3 is impractically slow at these speeds.
-- Chroma siting is neither signalled nor disclosed.
-- Memory bound is calibrated at 720p only.
+- **Clicking through the real window** is still unexercised on this host. The
+  confirmation's keyboard behaviour is tested against the real compiled window
+  running headless.
+- Windows and macOS runtime, and FFmpeg versions other than 8.0.1 (Ubuntu 24.04
+  CI ships 6.1). Several checks read ffprobe field and side-data names that may
+  differ between versions.
+- AVM differential check; disk-full; screen readers; Matroska encryption.
+- The tools open the source by path, so a file swapped between checks is caught
+  by fingerprint re-checks, not prevented.
+- Scan and decode have no whole-file timeout; they stop on cancel.
+- A killed worker leaves its `.partial` file behind.
+- Quality and Priority mappings are provisional and uncalibrated.
+- OS drag-and-drop is not possible with Slint 1.19's winit backend.
+- Studio's 500 ms worker exit on cancel is a guard until splotlabs/splot#1783
+  (encoder cancel token) is merged and adopted.
 
 ## Provenance and dependencies
 

@@ -59,6 +59,33 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev
 
+      # The engine tests read media through the FFmpeg on PATH (development
+      # opt-in SPLOT_STUDIO_SYSTEM_FFMPEG=1, set for every Cargo command by
+      # .cargo/config.toml) and make their fixtures with it. These builds are
+      # test tools only; nothing here is shipped. Doctor fails if they lack
+      # the tools or fixture encoders.
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+
+      # Chocolatey puts launcher shims in its bin directory; killing a shim
+      # may not kill the real ffmpeg, so the package's own bin directory goes
+      # first on PATH.
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install ffmpeg -y --no-progress
+          $exe = Get-ChildItem (Join-Path $env:ChocolateyInstall "lib\ffmpeg") -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $exe) { throw "ffmpeg.exe not found under the Chocolatey package" }
+          if (-not (Test-Path (Join-Path $exe.DirectoryName 'ffprobe.exe'))) { throw "ffprobe.exe is not beside $($exe.FullName)" }
+          Add-Content -Path $env:GITHUB_PATH -Value $exe.DirectoryName
+          & $exe.FullName -hide_banner -version | Select-Object -First 1
+
       # actions/cache v6.1.0
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:

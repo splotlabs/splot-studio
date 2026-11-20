@@ -21,7 +21,7 @@ pub mod simple;
 pub mod state;
 
 use std::cell::{Cell, RefCell};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
@@ -32,7 +32,7 @@ use studio_domain::settings::{Crf, OutputKind, SpeedPreset};
 use crate::activity::{Changed, Phase};
 use crate::engine::{Delivery, Ending, EngineStatus, Worker};
 use crate::simple::{Priority, Quality};
-use crate::state::{AppState, Effect, Intent, Severity, Source};
+use crate::state::{AppState, Effect, Intent, ProbeFailure, ProbeRequest, Severity, Source};
 
 pub use ui::{AppWindow, CheckRow, Fact, JobView, Palette, SourceView, Tone};
 
@@ -151,6 +151,7 @@ pub fn build(source: Option<PathBuf>) -> Result<Studio, slint::PlatformError> {
     window.on_quality_selected(on(Intent::QualitySelected));
     window.on_priority_selected(on(Intent::PrioritySelected));
     window.on_output_selected(on(Intent::OutputSelected));
+    window.on_track_selected(on(Intent::VideoTrackSelected));
     window.on_preset_edited(on(Intent::PresetEdited));
     window.on_crf_edited(on(Intent::CrfEdited));
     let on = |intent: fn() -> Intent| {
@@ -160,6 +161,8 @@ pub fn build(source: Option<PathBuf>) -> Result<Studio, slint::PlatformError> {
     window.on_open_requested(on(|| Intent::OpenRequested));
     window.on_choose_destination_requested(on(|| Intent::ChooseDestinationRequested));
     window.on_encode_requested(on(|| Intent::EncodeRequested));
+    window.on_omissions_confirmed(on(|| Intent::OmissionsConfirmed));
+    window.on_omissions_declined(on(|| Intent::OmissionsDeclined));
     window.on_reset_requested(on(|| Intent::ResetRequested));
     window.on_cancel_requested({
         let ctl = Rc::downgrade(&ctl);
@@ -208,6 +211,9 @@ pub fn new_window() -> Result<AppWindow, slint::PlatformError> {
     window.set_preset_max(i32::from(SpeedPreset::MAX));
     window.set_crf_min(i32::from(Crf::MIN));
     window.set_crf_max(i32::from(Crf::MAX));
+    // Windows puts the confirming button first; macOS and Linux desktops
+    // put it last, next to the window edge.
+    window.set_confirm_first(cfg!(windows));
     Ok(window)
 }
 
@@ -251,20 +257,23 @@ impl Controller {
                 self.show_save_dialog(&window, directory, &file_name, output);
                 Changed::Phase
             }
-            Effect::Probe { id, path } => {
-                // One metadata read for the file card; the engine reads the rest.
-                let size = std::fs::metadata(&path).ok().map(|m| m.len());
-                self.state.borrow_mut().note_source_size(size);
-                self.start_probe(id, &path);
+            Effect::Probe(request) => {
+                self.start_probe(request);
                 Changed::Phase
             }
             Effect::Start { id, job } => {
                 self.start_job(id, Command::Start { job });
                 Changed::Phase
             }
-            Effect::Job { id, step } => {
+            Effect::Job { id, step, reprobe } => {
                 self.job_effect(id, step.effect);
-                step.changed
+                match reprobe {
+                    Some(request) => {
+                        self.start_probe(request);
+                        Changed::Phase
+                    }
+                    None => step.changed,
+                }
             }
         };
         let now = Instant::now();
@@ -336,7 +345,7 @@ impl Controller {
         // The dispatch needs an Rc; the controller is always held by one.
         if let Some(ctl) = CONTROLLER.with(|c| c.borrow().upgrade()) {
             let answer = match status {
-                EngineStatus::Ready { encode_outputs, .. } => Ok(encode_outputs.clone()),
+                EngineStatus::Ready { capabilities, .. } => Ok(capabilities.clone()),
                 EngineStatus::NotFound(path) => Err(format!(
                     "The encoding engine is missing ({}). Reinstall Splot Studio.",
                     path.display()
@@ -352,12 +361,26 @@ impl Controller {
         }
     }
 
-    fn start_probe(self: &Rc<Self>, id: u64, path: &Path) {
+    fn start_probe(self: &Rc<Self>, request: ProbeRequest) {
+        let ProbeRequest {
+            id,
+            path,
+            video_stream,
+        } = request;
+        // One metadata read for the file card; the engine reads the rest.
+        let size = std::fs::metadata(&path).ok().map(|m| m.len());
+        self.state.borrow_mut().note_source_size(size);
         // Replacing an older probe drops its worker, which then exits.
         let started = self.spawn(Route::Probe(id)).and_then(|mut worker| {
-            let source = studio_domain::job::WirePath::from_path(path);
+            let source = studio_domain::job::WirePath::from_path(&path);
             worker
-                .send(id, Command::Probe { source })
+                .send(
+                    id,
+                    Command::Probe {
+                        source,
+                        video_stream,
+                    },
+                )
                 .map_err(|e| format!("could not ask the engine: {e}"))?;
             worker.close_input();
             Ok(worker)
@@ -368,7 +391,7 @@ impl Controller {
                 *self.probe.borrow_mut() = None;
                 self.dispatch(Intent::ProbeAnswered {
                     id,
-                    result: Err(message),
+                    result: Err(ProbeFailure::other(message)),
                 });
             }
         }
@@ -487,11 +510,15 @@ impl Controller {
         let dialog = rfd::AsyncFileDialog::new()
             .set_title("Open Source")
             .set_parent(&window.window().window_handle());
-        // macOS merges all filters into one allow-list, where "All files"
-        // would not widen it; leave that panel unfiltered.
+        // A convenience, not a capability claim: the engine decides what it
+        // can read. macOS merges all filters into one allow-list, where
+        // "All files" would not widen it; leave that panel unfiltered.
         #[cfg(not(target_os = "macos"))]
         let dialog = dialog
-            .add_filter("Y4M video", &["y4m"])
+            .add_filter(
+                "Video files",
+                &["mp4", "m4v", "mov", "mkv", "webm", "ts", "avi", "y4m"],
+            )
             .add_filter("All files", &["*"]);
         let picked = dialog.pick_file();
         let weak = Rc::downgrade(self);
@@ -572,8 +599,10 @@ fn deliver(route: Route, delivery: Delivery) {
                 Delivery::Event(e) if e.request_id != id => return,
                 Delivery::Event(e) => match e.body {
                     Event::Probed { facts } => Ok(facts),
-                    Event::Failed { failure } => Err(failure.message),
-                    Event::Error { message, .. } => Err(format!("The engine refused: {message}")),
+                    Event::Failed { failure } => Err(ProbeFailure::from(failure)),
+                    Event::Error { message, .. } => Err(ProbeFailure::other(format!(
+                        "The engine refused: {message}"
+                    ))),
                     _ => return,
                 },
                 Delivery::Ended(ending) => {
@@ -581,10 +610,10 @@ fn deliver(route: Route, delivery: Delivery) {
                     if probe.as_ref().is_some_and(|(current, _)| *current == id) {
                         *probe = None;
                     }
-                    Err(format!(
+                    Err(ProbeFailure::other(format!(
                         "The engine stopped without answering ({}).",
                         ending_text(&ending)
-                    ))
+                    )))
                 }
             };
             // A probe that already answered ignores this one.
@@ -669,7 +698,10 @@ pub fn render(window: &AppWindow, state: &AppState, now: Instant) {
     );
     window.set_locked(state.job_running());
 
-    render_source(window, state.source(), state.source_size());
+    render_source(window, state);
+    window.set_empty_caption(present::empty_caption(state.capabilities()).into());
+    window.set_media_tool_line(present::media_tool(state.capabilities()).into());
+    render_confirmation(window, state);
 
     let destination = state.destination();
     window.set_has_destination(destination.is_some());
@@ -732,47 +764,99 @@ pub fn render(window: &AppWindow, state: &AppState, now: Instant) {
     }
 }
 
-fn render_source(window: &AppWindow, source: &Source, size: Option<u64>) {
+fn render_source(window: &AppWindow, state: &AppState) {
+    let source = state.source();
     let (name, path) = source.path().map_or_else(Default::default, |p| {
         (present::file_name(p), p.display().to_string())
     });
     window.set_source_name(name.into());
     window.set_source_path(path.into());
-    let facts = match source {
-        Source::Ready { facts, .. } => Some(facts),
-        _ => None,
-    };
-    window.set_source_line(present::source_line(facts, size).into());
-    let (view, facts, disclosures, message) = match source {
-        Source::None => (SourceView::None, Vec::new(), Vec::new(), String::new()),
-        Source::Probing { .. } => (SourceView::Probing, Vec::new(), Vec::new(), String::new()),
-        Source::Unreadable { message, .. } => (
-            SourceView::Unreadable,
-            Vec::new(),
-            Vec::new(),
-            message.clone(),
+    // While the same file is read again, its last facts stay in place so the
+    // window does not jump; Convert waits for the new ones.
+    let shown = source.shown_facts();
+    window.set_source_line(present::source_line(shown, state.source_size()).into());
+    window.set_source_view(match source {
+        Source::None => SourceView::None,
+        Source::Probing { .. } => SourceView::Probing,
+        Source::Ready { .. } => SourceView::Ready,
+        Source::Unreadable { .. } => SourceView::Unreadable,
+    });
+    let (problem, problem_tone) = match source {
+        Source::Unreadable { failure, .. } => (
+            present::probe_problem(failure),
+            if failure.code == Some(studio_domain::job::FailureCode::MediaToolMissing) {
+                Tone::Warning
+            } else {
+                Tone::Error
+            },
         ),
-        Source::Ready { facts, .. } => (
-            SourceView::Ready,
-            present::facts(facts)
-                .into_iter()
-                .map(|(label, value)| Fact {
-                    label: label.into(),
-                    value: value.into(),
-                })
-                .collect(),
-            facts
-                .disclosures
-                .iter()
-                .map(|&d| SharedString::from(present::disclosure(d)))
-                .collect(),
-            String::new(),
-        ),
+        _ => (String::new(), Tone::Neutral),
     };
-    window.set_source_view(view);
-    window.set_source_facts(model(facts));
+    window.set_source_problem(problem.into());
+    window.set_source_problem_tone(problem_tone);
+    window.set_has_source_facts(shown.is_some());
+    let rows: Vec<Fact> = shown
+        .map_or_else(Vec::new, present::facts)
+        .into_iter()
+        .map(|(label, value)| Fact {
+            label: label.into(),
+            value: value.into(),
+        })
+        .collect();
+    window.set_source_facts(model(rows));
+    let disclosures: Vec<SharedString> = shown
+        .map_or(&[][..], |f| f.disclosures.as_slice())
+        .iter()
+        .map(|&d| SharedString::from(present::disclosure(d)))
+        .collect();
     window.set_source_disclosures(model(disclosures));
-    window.set_source_message(message.into());
+    window.set_omission_summary(
+        shown
+            .map_or_else(String::new, |f| {
+                present::omission_summary(&f.omissions, state::attached_pictures(f))
+            })
+            .into(),
+    );
+
+    let picker = state.track_picker();
+    window.set_has_track_picker(picker.is_some());
+    let (labels, index, note) = picker.map_or_else(
+        || (Vec::new(), -1, String::new()),
+        |p| {
+            (
+                p.tracks
+                    .iter()
+                    .map(|t| SharedString::from(present::track(t)))
+                    .collect(),
+                p.selected.and_then(|i| i32::try_from(i).ok()).unwrap_or(-1),
+                present::attached_note(&p.attached),
+            )
+        },
+    );
+    window.set_track_labels(model(labels));
+    window.set_track_index(index);
+    window.set_track_note(note.into());
+}
+
+/// Shows or closes the video-only confirmation to match the state.
+fn render_confirmation(window: &AppWindow, state: &AppState) {
+    match state.confirmation() {
+        Some(c) => {
+            window.set_sheet_body(
+                present::omission_question(
+                    &c.omissions,
+                    c.attached_pictures,
+                    c.job.settings.output,
+                )
+                .into(),
+            );
+            if !window.get_sheet_open() {
+                window.invoke_show_sheet();
+            }
+        }
+        None if window.get_sheet_open() => window.invoke_close_sheet(),
+        None => {}
+    }
 }
 
 fn render_job(window: &AppWindow, activity: &activity::Activity, now: Instant) {
@@ -814,12 +898,17 @@ fn render_job(window: &AppWindow, activity: &activity::Activity, now: Instant) {
 
 /// Updates only the counters, the progress bar and the elapsed time.
 pub fn render_counters(window: &AppWindow, activity: &activity::Activity, now: Instant) {
-    let progress = activity.progress();
     let fraction = activity.fraction();
     window.set_progress_known(fraction.is_some());
     window.set_progress_fraction(fraction.unwrap_or(0.0));
-    window.set_progress_text(present::progress_text(activity).into());
-    window.set_frames_read_text(present::count(progress.frames_read).into());
-    window.set_bytes_written_text(present::bytes(progress.bytes_written).into());
+    window.set_progress_text(
+        if activity.before_first_frame() {
+            "Waiting for the first frame".to_owned()
+        } else {
+            present::progress_text(activity)
+        }
+        .into(),
+    );
+    window.set_progress_line(present::counters(activity).into());
     window.set_elapsed_text(present::elapsed(activity.elapsed(now)).into());
 }
