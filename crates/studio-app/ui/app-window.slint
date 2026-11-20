@@ -1,0 +1,515 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+// The main window. Values come from Rust; every callback is an intent that Rust
+// validates and answers by setting properties back. Nothing here touches files,
+// processes or the codec.
+
+import { AboutSlint, Button, ComboBox, Palette, SpinBox } from "std-widgets.slint";
+import { Tokens } from "tokens.slint";
+
+// Re-exported so Rust can pin the appearance for renderer snapshots.
+export { Palette }
+
+// How a status line should read; the text always says the same thing in words.
+export enum Tone { neutral, success, warning, error }
+
+// Static desktop adaptation of the Splot wordmark (docs/assets/hero.svg in
+// Splot, PolyForm Noncommercial 1.0.0, same owner): gradient "splot" in the OS
+// font, followed by the product word. No font or SVG animation is bundled.
+component Wordmark inherits HorizontalLayout {
+    in property <length> size: Tokens.type-title * 1rem;
+    spacing: 0.3 * root.size;
+    accessible-role: text;
+    accessible-label: "Splot Studio";
+
+    Text {
+        text: "splot";
+        color: Tokens.brand;
+        font-size: root.size;
+        font-weight: Tokens.weight-bold;
+        accessible-role: none;
+        vertical-alignment: center;
+    }
+
+    Text {
+        text: "studio";
+        color: Tokens.text-secondary;
+        font-size: root.size;
+        font-weight: Tokens.weight-regular;
+        accessible-role: none;
+        vertical-alignment: center;
+    }
+}
+
+component Rule inherits Rectangle {
+    background: Tokens.border;
+}
+
+component SectionTitle inherits Text {
+    color: Tokens.text-secondary;
+    font-size: Tokens.type-caption * 1rem;
+    font-weight: Tokens.weight-semibold;
+}
+
+component HelpText inherits Text {
+    color: Tokens.text-secondary;
+    font-size: Tokens.type-caption * 1rem;
+    wrap: word-wrap;
+}
+
+// A labelled field: label above the control, plain help text below it.
+component Field inherits VerticalLayout {
+    in property <string> label;
+    in property <string> help;
+    spacing: Tokens.space-1;
+
+    Text {
+        text: root.label;
+        color: Tokens.text;
+        font-size: Tokens.type-body * 1rem;
+        font-weight: Tokens.weight-semibold;
+    }
+
+    @children
+
+    HelpText {
+        text: root.help;
+    }
+}
+
+component StatusDot inherits Rectangle {
+    in property <Tone> tone;
+    width: 8px;
+    height: 8px;
+    border-radius: 4px;
+    background: root.tone == Tone.success ? Tokens.success
+        : root.tone == Tone.warning ? Tokens.warning
+        : root.tone == Tone.error ? Tokens.error
+        : Tokens.text-disabled;
+}
+
+export component AppWindow inherits Window {
+    // Identity
+    in property <string> app-version;
+
+    // Source selection. `source-path` is a display string; Rust keeps the path.
+    in property <bool> has-source;
+    in property <string> source-name;
+    in property <string> source-path;
+
+    // Encoder settings, ranges and labels from studio-domain.
+    in property <[string]> output-labels;
+    in-out property <int> output-index;
+    in property <int> preset-min;
+    in property <int> preset-max;
+    in-out property <int> preset;
+    in property <int> crf-min;
+    in property <int> crf-max;
+    in-out property <int> crf;
+
+    // Engine handshake result.
+    in property <string> engine-text: "Checking engine…";
+    in property <Tone> engine-tone: Tone.neutral;
+
+    callback open-requested();
+    callback quit-requested();
+    callback output-selected(int);
+    callback preset-edited(int);
+    callback crf-edited(int);
+
+    // Also used by the renderer-snapshot example to capture the dialog.
+    public function show-about() {
+        about.show();
+    }
+
+    property <keys> open-keys: @keys(Control + O);
+    property <string> encode-unavailable: "Encoding is not available in this build yet.";
+
+    title: root.has-source ? root.source-name + " — Splot Studio" : "Splot Studio";
+    preferred-width: 1120px;
+    preferred-height: 720px;
+    min-width: 880px;
+    min-height: 540px;
+    background: Tokens.background;
+    forward-focus: empty-open;
+
+    MenuBar {
+        Menu {
+            title: "File";
+            MenuItem {
+                title: "Open…";
+                shortcut: root.open-keys;
+                activated => {
+                    root.open-requested();
+                }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Quit";
+                role: MenuItemRole.quit;
+                shortcut: @keys(Control + Q);
+                activated => {
+                    root.quit-requested();
+                }
+            }
+        }
+
+        Menu {
+            title: "Help";
+            MenuItem {
+                title: "About Splot Studio";
+                role: MenuItemRole.about;
+                activated => {
+                    root.show-about();
+                }
+            }
+        }
+    }
+
+    VerticalLayout {
+        // Toolbar
+        Rectangle {
+            background: Tokens.surface;
+            accessible-role: banner;
+            accessible-label: "Toolbar";
+
+            HorizontalLayout {
+                padding-left: Tokens.space-4;
+                padding-right: Tokens.space-4;
+                padding-top: Tokens.space-2;
+                padding-bottom: Tokens.space-2;
+                spacing: Tokens.space-3;
+
+                Wordmark { }
+
+                Rectangle {
+                    width: 1px;
+                    background: Tokens.border;
+                }
+
+                Button {
+                    text: "Open…";
+                    accessible-description: "Choose a source file (" + root.open-keys.to-string() + ")";
+                    clicked => {
+                        root.open-requested();
+                    }
+                }
+
+                Text {
+                    horizontal-stretch: 1;
+                    // Empty until a file is chosen; the sidebar and centre say so.
+                    text: root.source-name;
+                    color: Tokens.text;
+                    font-size: Tokens.type-body * 1rem;
+                    font-weight: Tokens.weight-semibold;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                Text {
+                    text: root.encode-unavailable;
+                    color: Tokens.text-secondary;
+                    font-size: Tokens.type-caption * 1rem;
+                    vertical-alignment: center;
+                }
+
+                Button {
+                    text: "Encode";
+                    enabled: false;
+                    accessible-description: root.encode-unavailable;
+                }
+            }
+        }
+
+        Rule {
+            height: 1px;
+        }
+
+        HorizontalLayout {
+            vertical-stretch: 1;
+
+            // Source sidebar
+            Rectangle {
+                width: 248px;
+                background: Tokens.surface;
+                accessible-role: navigation;
+                accessible-label: "Source";
+
+                VerticalLayout {
+                    padding: Tokens.space-4;
+                    spacing: Tokens.space-2;
+                    alignment: start;
+
+                    SectionTitle {
+                        text: "SOURCE";
+                        accessible-role: none;
+                    }
+
+                    if !root.has-source: Text {
+                        text: "No file selected.";
+                        color: Tokens.text-secondary;
+                        font-size: Tokens.type-body * 1rem;
+                    }
+
+                    if root.has-source: VerticalLayout {
+                        spacing: Tokens.space-1;
+
+                        Text {
+                            text: root.source-name;
+                            color: Tokens.text;
+                            font-size: Tokens.type-body * 1rem;
+                            font-weight: Tokens.weight-semibold;
+                            wrap: word-wrap;
+                        }
+
+                        Text {
+                            text: root.source-path;
+                            color: Tokens.text-secondary;
+                            font-size: Tokens.type-caption * 1rem;
+                            wrap: char-wrap;
+                            accessible-label: "Full path: " + root.source-path;
+                        }
+                    }
+                }
+            }
+
+            Rule {
+                width: 1px;
+            }
+
+            // Centre: the intentional empty state, or the selected source.
+            Rectangle {
+                horizontal-stretch: 1;
+                accessible-role: main;
+                accessible-label: "Workspace";
+
+                VerticalLayout {
+                    alignment: center;
+                    padding: Tokens.space-8;
+                    spacing: Tokens.space-3;
+
+                    Text {
+                        text: root.has-source ? "Source selected" : "Open a source to begin";
+                        color: Tokens.text;
+                        font-size: Tokens.type-display * 1rem;
+                        font-weight: Tokens.weight-semibold;
+                        horizontal-alignment: center;
+                        overflow: elide;
+                    }
+
+                    Text {
+                        text: root.has-source
+                            ? "The file has not been opened or inspected yet. Inspection arrives in a later build."
+                            : "Choose a video file, then review the settings on the right.";
+                        color: Tokens.text-secondary;
+                        font-size: Tokens.type-body * 1rem;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+
+                    HorizontalLayout {
+                        alignment: center;
+                        padding-top: Tokens.space-2;
+
+                        empty-open := Button {
+                            text: root.has-source ? "Choose Another File…" : "Open…";
+                            primary: true;
+                            accessible-description: "Choose a source file (" + root.open-keys.to-string() + ")";
+                            clicked => {
+                                root.open-requested();
+                            }
+                        }
+                    }
+
+                    Text {
+                        text: root.open-keys.to-string();
+                        color: Tokens.text-secondary;
+                        font-size: Tokens.type-caption * 1rem;
+                        horizontal-alignment: center;
+                        accessible-role: none;
+                    }
+                }
+            }
+
+            Rule {
+                width: 1px;
+            }
+
+            // Settings inspector
+            Rectangle {
+                width: 300px;
+                background: Tokens.surface;
+                accessible-role: complementary;
+                accessible-label: "Settings";
+
+                VerticalLayout {
+                    padding: Tokens.space-4;
+                    spacing: Tokens.space-4;
+                    alignment: start;
+
+                    SectionTitle {
+                        text: "SETTINGS";
+                        accessible-role: none;
+                    }
+
+                    Field {
+                        label: "Output format";
+                        help: "Video only. Audio and subtitles are not written.";
+
+                        ComboBox {
+                            model: root.output-labels;
+                            current-index <=> root.output-index;
+                            accessible-label: "Output format";
+                            selected => {
+                                root.output-selected(self.current-index);
+                            }
+                        }
+                    }
+
+                    Field {
+                        label: "Speed preset";
+                        help: root.preset-min + "–" + root.preset-max + ". Higher is faster.";
+
+                        SpinBox {
+                            minimum: root.preset-min;
+                            maximum: root.preset-max;
+                            value <=> root.preset;
+                            accessible-label: "Speed preset";
+                            accessible-description: "Higher is faster.";
+                            edited(value) => {
+                                root.preset-edited(value);
+                            }
+                        }
+                    }
+
+                    Field {
+                        label: "Rate factor";
+                        help: root.crf-min + "–" + root.crf-max + ". Higher means fewer bits.";
+
+                        SpinBox {
+                            minimum: root.crf-min;
+                            maximum: root.crf-max;
+                            value <=> root.crf;
+                            accessible-label: "Rate factor";
+                            accessible-description: "Higher means fewer bits.";
+                            edited(value) => {
+                                root.crf-edited(value);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rule {
+            height: 1px;
+        }
+
+        // Status bar
+        Rectangle {
+            background: Tokens.surface;
+            accessible-role: content-info;
+            accessible-label: "Status";
+
+            HorizontalLayout {
+                padding-left: Tokens.space-4;
+                padding-right: Tokens.space-4;
+                padding-top: Tokens.space-1 + 2px;
+                padding-bottom: Tokens.space-1 + 2px;
+                spacing: Tokens.space-2;
+
+                StatusDot {
+                    tone: root.engine-tone;
+                    y: (parent.height - self.height) / 2;
+                    accessible-role: none;
+                }
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.engine-text;
+                    color: Tokens.text-secondary;
+                    font-size: Tokens.type-caption * 1rem;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    accessible-live-region: polite;
+                }
+
+                Text {
+                    text: "Video-only output";
+                    color: Tokens.text-secondary;
+                    font-size: Tokens.type-caption * 1rem;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    about := PopupWindow {
+        close-policy: close-on-click-outside;
+        width: 440px;
+        x: (root.width - self.width) / 2;
+        y: max(0px, (root.height - self.height) / 3);
+
+        Rectangle {
+            background: Tokens.surface;
+            border-color: Tokens.border;
+            border-width: 1px;
+            border-radius: Tokens.radius-medium;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #0000004d;
+            drop-shadow-offset-y: 8px;
+            accessible-role: groupbox;
+            accessible-label: "About Splot Studio";
+
+            VerticalLayout {
+                padding: Tokens.space-6;
+                spacing: Tokens.space-3;
+
+                Wordmark {
+                    size: Tokens.type-display * 1rem;
+                    alignment: center;
+                }
+
+                Text {
+                    text: "Splot Studio " + root.app-version;
+                    color: Tokens.text;
+                    font-size: Tokens.type-body * 1rem;
+                    font-weight: Tokens.weight-semibold;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "Copyright © 2026 Bartosz Tomczyk. Licensed under the PolyForm Noncommercial License 1.0.0 (polyformproject.org/licenses/noncommercial/1.0.0). Source-available, not open source. Commercial use requires a separate written commercial license from Bartosz Tomczyk.";
+                    color: Tokens.text-secondary;
+                    font-size: Tokens.type-caption * 1rem;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+
+                Text {
+                    text: "Third-party components keep their own licenses.";
+                    color: Tokens.text-secondary;
+                    font-size: Tokens.type-caption * 1rem;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+
+                AboutSlint {
+                    preferred-height: self.min-height;
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+
+                    Button {
+                        text: "Close";
+                        clicked => {
+                            about.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

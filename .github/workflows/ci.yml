@@ -1,0 +1,78 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+#
+# Full gate on the three supported desktop targets: `cargo xtask ci`.
+#
+# Cost: in a private repository, GitHub bills macOS and Windows minutes at a
+# multiplier over Linux minutes. Runners are pinned to specific images rather
+# than `-latest` so the OS floor changes only when this file does.
+#
+# No secrets, no release or signing steps, read-only token.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  gate:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-x86_64, runner: ubuntu-24.04 }
+          - { name: windows-x86_64, runner: windows-2025 }
+          - { name: macos-arm64, runner: macos-15 }
+    steps:
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      # The runner's preinstalled rustup installs exactly what rust-toolchain.toml
+      # pins (channel, profile, components). rustup >= 1.28 needs this explicit step.
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+
+      # Slint's font stack (yeslogic-fontconfig-sys) needs fontconfig.pc at build
+      # time. Wayland, X11, xkbcommon and GL are dlopen'd and need no -dev packages
+      # (verified with only a dummy fontconfig.pc visible to pkg-config).
+      - name: Install Linux build packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev
+
+      # actions/cache v6.1.0
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ matrix.name }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ matrix.name }}-
+
+      - name: Doctor
+        run: cargo xtask doctor
+
+      - name: Gate
+        run: cargo xtask ci

@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+// Semantic design tokens. Colours adapt the Splot brand (docs/assets/hero.svg in
+// Splot: cyan #5ee7ff, violet #a78bfa, pink #ff7ab6, background #05050a, text
+// #f5f5f7, muted #a1a1aa) and follow the system light/dark appearance through
+// the widget style's palette.
+//
+// WCAG 2 contrast, measured on background / surface:
+//   light: text 17.1/15.8, secondary 6.3/5.8, disabled 3.1/2.9 (exempt, never
+//          used for information), accent 6.2/5.7, focus 5.1/4.7, warning
+//          5.3/4.9, error 5.6/5.1, success 5.2/4.8
+//   dark:  text 17.9/16.7, secondary 7.6/7.1, disabled 3.9/3.6, accent 7.2/6.7,
+//          focus 13.3/12.4, warning 11.1/10.3, error 8.1/7.5, success 10.7/9.9
+// Borders (1.3-1.4) only separate panels; controls draw their own outlines.
+
+import { Palette } from "std-widgets.slint";
+
+export global Tokens {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+
+    // Surfaces
+    out property <color> background: dark ? #0c0c12 : #fbfbfc;
+    out property <color> surface: dark ? #15151d : #f2f2f5;
+    out property <color> border: dark ? #2c2c38 : #d6d6de;
+
+    // Text
+    out property <color> text: dark ? #f5f5f7 : #18181d;
+    out property <color> text-secondary: dark ? #a1a1aa : #5d5d68;
+    out property <color> text-disabled: dark ? #6e6e78 : #8e8e99;
+
+    // Accent and states. The standard widgets draw their own accent and focus
+    // ring (the style's, or the OS accent where the platform reports one), so
+    // primary actions stay native. `accent` and `focus-ring` are for future
+    // Splot-drawn elements only; nothing in this build draws one.
+    out property <color> accent: dark ? #a78bfa : #6342d6;
+    out property <color> focus-ring: dark ? #5ee7ff : #0b72a8;
+    out property <color> warning: dark ? #f5b94a : #9a5b00;
+    out property <color> error: dark ? #ff7ab6 : #c0245f;
+    out property <color> success: dark ? #5fd68a : #1d7a3c;
+
+    // The wordmark gradient, for branding only. The original stops are tuned
+    // for a dark ground; light mode uses deeper stops of the same hues so the
+    // mark stays legible (about 4:1 or better against `surface`).
+    out property <brush> brand: dark
+        ? @linear-gradient(90deg, #5ee7ff 0%, #a78bfa 45%, #ff7ab6 100%)
+        : @linear-gradient(90deg, #0e7490 0%, #6d28d9 45%, #be185d 100%);
+
+    // Spacing on a 4px rhythm.
+    out property <length> space-1: 4px;
+    out property <length> space-2: 8px;
+    out property <length> space-3: 12px;
+    out property <length> space-4: 16px;
+    out property <length> space-6: 24px;
+    out property <length> space-8: 32px;
+
+    // Type scale as multiples of the OS default font size (use `* 1rem`): a
+    // global cannot know that size, and platform text scaling must hold.
+    out property <float> type-caption: 0.85;
+    out property <float> type-body: 1;
+    out property <float> type-title: 1.15;
+    out property <float> type-display: 1.5;
+    out property <int> weight-regular: 400;
+    out property <int> weight-semibold: 600;
+    out property <int> weight-bold: 700;
+
+    // Radius
+    out property <length> radius-small: 4px;
+    out property <length> radius-medium: 8px;
+
+    // Motion: nothing in this build animates; transitions must use this.
+    out property <duration> motion-short: 120ms;
+}
