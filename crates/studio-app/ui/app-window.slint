@@ -136,7 +136,7 @@ component PrimaryButton inherits KeyboardFocus {
     callback clicked();
 
     min-height: Tokens.primary-height;
-    min-width: 120px;
+    min-width: max(120px, label.preferred-width + 2 * Tokens.space-4);
     horizontal-stretch: 1;
     accessible-role: button;
     accessible-label: root.text;
@@ -174,7 +174,7 @@ component PrimaryButton inherits KeyboardFocus {
         border-color: Tokens.border;
         animate background { duration: Tokens.motion-short; }
 
-        Text {
+        label := Text {
             text: root.text;
             color: root.enabled ? Tokens.on-accent : Tokens.text-disabled;
             font-size: Tokens.type-body * 1rem;
@@ -450,8 +450,27 @@ export component AppWindow inherits Window {
     in property <string> source-line;
     in property <[Fact]> source-facts;
     in property <[string]> source-disclosures;
-    // The probe failure.
-    in property <string> source-message;
+    // Facts are shown (also the last ones while the same file is read again).
+    in property <bool> has-source-facts;
+    // Why the source cannot be converted, and how serious that reads.
+    in property <string> source-problem;
+    in property <Tone> source-problem-tone;
+    // "Video only — 2 audio tracks … will not be included.", or empty.
+    in property <string> omission-summary;
+    // The empty state's caption.
+    in property <string> empty-caption;
+
+    // The Video track choice, only when there is more than one.
+    in property <bool> has-track-picker;
+    in property <[string]> track-labels;
+    in-out property <int> track-index;
+    in property <string> track-note;
+
+    // The video-only confirmation. Rust shows and closes it from the state.
+    in property <string> sheet-body;
+    // Platform button order: Windows puts the confirming button first.
+    in property <bool> confirm-first;
+    out property <bool> sheet-open;
 
     // Simple controls: views of the same settings as the raw fields.
     in property <[string]> quality-labels;
@@ -492,14 +511,15 @@ export component AppWindow inherits Window {
     in property <bool> progress-known;
     in property <float> progress-fraction;
     in property <string> progress-text;
-    in property <string> frames-read-text;
-    in property <string> bytes-written-text;
+    // Counters under the bar, or that no frame has arrived yet.
+    in property <string> progress-line;
     in property <string> elapsed-text;
     in property <[CheckRow]> job-checks;
     in property <string> reveal-error;
 
-    // Who built the engine, for Advanced.
+    // Who built the engine, and the FFmpeg it reads ordinary files with.
     in property <string> engine-identity: "Not known yet.";
+    in property <string> media-tool-line;
 
     // View state. In-out so renderer snapshots can open it.
     in-out property <bool> advanced-open;
@@ -509,6 +529,7 @@ export component AppWindow inherits Window {
     callback quality-selected(int);
     callback priority-selected(int);
     callback output-selected(int);
+    callback track-selected(int);
     callback preset-edited(int);
     callback crf-edited(int);
     callback choose-destination-requested();
@@ -516,10 +537,22 @@ export component AppWindow inherits Window {
     callback cancel-requested();
     callback reveal-requested();
     callback reset-requested();
+    callback omissions-confirmed();
+    callback omissions-declined();
 
     // Also used by the renderer-snapshot example to capture the dialog.
     public function show-about() {
         about.show();
+    }
+
+    public function show-sheet() {
+        root.sheet-open = true;
+        sheet.show();
+    }
+
+    public function close-sheet() {
+        root.sheet-open = false;
+        sheet.close();
     }
 
     property <keys> open-keys: @keys(Control + O);
@@ -565,7 +598,7 @@ export component AppWindow inherits Window {
             MenuItem {
                 title: "Open…";
                 shortcut: root.open-keys;
-                enabled: !root.locked;
+                enabled: !root.locked && !root.sheet-open;
                 activated => {
                     root.open-requested();
                 }
@@ -646,7 +679,7 @@ export component AppWindow inherits Window {
                                 }
 
                                 Caption {
-                                    text: "Progressive Y4M, 8 or 10 bit.";
+                                    text: root.empty-caption;
                                     horizontal-alignment: center;
                                 }
 
@@ -666,77 +699,87 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        if root.has-source: Rectangle {
-                            border-radius: Tokens.radius-medium + 2px;
-                            background: Tokens.track;
-                            border-width: 1px;
-                            border-color: root.source-view == SourceView.unreadable ? Tokens.error : Tokens.border;
-
-                            VerticalLayout {
-                                padding-left: Tokens.space-4;
-                                padding-right: Tokens.space-2;
-                                padding-top: Tokens.space-2 + 2px;
-                                padding-bottom: Tokens.space-2 + 2px;
+                        if root.has-source: VerticalLayout {
                                 spacing: Tokens.space-2;
 
-                                HorizontalLayout {
-                                    spacing: Tokens.space-3;
+                            Rectangle {
+                                border-radius: Tokens.radius-medium + 2px;
+                                background: Tokens.track;
+                                border-width: 1px;
+                                border-color: root.source-view == SourceView.unreadable ? Tones.color(root.source-problem-tone) : Tokens.border;
+
+                                VerticalLayout {
+                                    padding-left: Tokens.space-4;
+                                    padding-right: Tokens.space-2;
+                                    padding-top: Tokens.space-2 + 2px;
+                                    padding-bottom: Tokens.space-2 + 2px;
+                                    spacing: Tokens.space-2;
 
                                     HorizontalLayout {
-                                        horizontal-stretch: 1;
-                                        spacing: Tokens.space-2;
-                                        accessible-role: text;
-                                        accessible-label: "Source: " + root.source-name + (root.source-line != "" ? ", " + root.source-line : "") + ". Full path: " + root.source-path;
+                                        spacing: Tokens.space-3;
 
-                                        Text {
+                                        HorizontalLayout {
                                             horizontal-stretch: 1;
-                                            max-width: self.preferred-width;
-                                            min-width: 48px;
-                                            text: root.source-name;
-                                            color: Tokens.text;
-                                            font-size: Tokens.type-body * 1rem;
-                                            font-weight: Tokens.weight-semibold;
-                                            vertical-alignment: center;
-                                            overflow: elide;
-                                            accessible-role: none;
+                                            spacing: Tokens.space-2;
+                                            accessible-role: text;
+                                            accessible-label: "Source: " + root.source-name + (root.source-line != "" ? ", " + root.source-line : "") + ". Full path: " + root.source-path;
+
+                                            Text {
+                                                horizontal-stretch: 1;
+                                                max-width: self.preferred-width;
+                                                min-width: 48px;
+                                                text: root.source-name;
+                                                color: Tokens.text;
+                                                font-size: Tokens.type-body * 1rem;
+                                                font-weight: Tokens.weight-semibold;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                                accessible-role: none;
+                                            }
+
+                                            Text {
+                                                horizontal-stretch: 0;
+                                                min-width: self.preferred-width;
+                                                text: root.source-line != "" ? "•  " + root.source-line : "";
+                                                color: Tokens.text-secondary;
+                                                font-size: Tokens.type-body * 1rem;
+                                                vertical-alignment: center;
+                                                accessible-role: none;
+                                            }
+
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                            }
                                         }
 
-                                        Text {
-                                            horizontal-stretch: 0;
-                                            min-width: self.preferred-width;
-                                            text: root.source-line != "" ? "•  " + root.source-line : "";
-                                            color: Tokens.text-secondary;
-                                            font-size: Tokens.type-body * 1rem;
-                                            vertical-alignment: center;
-                                            accessible-role: none;
-                                        }
-
-                                        Rectangle {
-                                            horizontal-stretch: 1;
+                                        LinkButton {
+                                            text: "Change…";
+                                            enabled: !root.locked;
+                                            description: "Choose another video (" + root.open-keys.to-string() + ")";
+                                            clicked => {
+                                                root.open-requested();
+                                            }
                                         }
                                     }
 
-                                    LinkButton {
-                                        text: "Change…";
-                                        enabled: !root.locked;
-                                        description: "Choose another video (" + root.open-keys.to-string() + ")";
-                                        clicked => {
-                                            root.open-requested();
-                                        }
+                                    if root.source-view == SourceView.probing: Caption {
+                                        text: "Reading the file header…";
+                                    }
+
+                                    if root.source-view == SourceView.unreadable: Text {
+                                        text: root.source-problem;
+                                        color: Tones.color(root.source-problem-tone);
+                                        font-size: Tokens.type-caption * 1rem;
+                                        wrap: word-wrap;
+                                        accessible-label: "Cannot be converted: " + root.source-problem;
                                     }
                                 }
+                            }
 
-                                if root.source-view == SourceView.probing: Caption {
-                                    text: "Reading the file header…";
-                                }
-
-                                if root.source-view == SourceView.unreadable: Text {
-                                    text: root.source-message;
-                                    color: Tokens.error;
-                                    font-size: Tokens.type-caption * 1rem;
-                                    wrap: word-wrap;
-                                    accessible-label: "Cannot be converted: " + root.source-message;
-                                }
+                            // Always visible, in words: what a video-only output leaves out.
+                            if root.omission-summary != "" && root.source-view != SourceView.unreadable: Caption {
+                                text: root.omission-summary;
+                                color: Tokens.text;
                             }
                         }
 
@@ -917,7 +960,7 @@ export component AppWindow inherits Window {
                                 }
 
                                 Caption {
-                                    text: root.progress-text + " · " + root.frames-read-text + " read · " + root.bytes-written-text + " written";
+                                    text: root.progress-line;
                                     wrap: no-wrap;
                                     overflow: elide;
                                 }
@@ -1177,7 +1220,30 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                if root.source-view == SourceView.ready: VerticalLayout {
+                                if root.has-track-picker: VerticalLayout {
+                                    spacing: Tokens.space-1;
+
+                                    Label {
+                                        text: "Video track";
+                                    }
+
+                                    ComboBox {
+                                        model: root.track-labels;
+                                        current-index <=> root.track-index;
+                                        enabled: !root.locked && root.advanced-open && root.source-view != SourceView.probing;
+                                        accessible-label: "Video track";
+                                        accessible-description: "The one video track that is converted";
+                                        selected => {
+                                            root.track-selected(self.current-index);
+                                        }
+                                    }
+
+                                    if root.track-note != "": Caption {
+                                        text: root.track-note;
+                                    }
+                                }
+
+                                if root.has-source-facts: VerticalLayout {
                                     spacing: Tokens.space-1;
 
                                     SectionTitle {
@@ -1191,18 +1257,130 @@ export component AppWindow inherits Window {
 
                                     for disclosure in root.source-disclosures: Text {
                                         text: disclosure;
-                                        color: Tokens.warning;
+                                        color: Tokens.text;
                                         font-size: Tokens.type-caption * 1rem;
                                         wrap: word-wrap;
                                     }
                                 }
 
-                                Caption {
-                                    text: "Engine: " + root.engine-identity;
+                                VerticalLayout {
+                                    spacing: Tokens.space-1;
+
+                                    Caption {
+                                        text: "Engine: " + root.engine-identity;
+                                    }
+
+                                    Caption {
+                                        text: root.media-tool-line;
+                                    }
                                 }
                             }
                     }
                 }
+    }
+
+    // The video-only confirmation. Modal: clicks outside it reach nothing,
+    // Tab stays inside it, Escape is Cancel. Cancel has the initial focus, so
+    // Enter or Space never converts by accident; converting takes a
+    // deliberate Tab or click.
+    sheet := PopupWindow {
+        close-policy: no-auto-close;
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+
+        Rectangle {
+            background: Tokens.dark ? #00000080 : #18181d40;
+
+            // Absorbs clicks on the scrim.
+            TouchArea { }
+
+            // Only catches Escape bubbling up from the buttons; never a Tab stop.
+            FocusScope {
+                focus-on-tab-navigation: false;
+                focus-on-click: false;
+                key-pressed(event) => {
+                    if event.text == Key.Escape {
+                        root.omissions-declined();
+                        return accept;
+                    }
+                    reject
+                }
+
+                Rectangle {
+                    width: min(392px, root.width - 2 * Tokens.space-6);
+                    height: card.preferred-height;
+                    x: (parent.width - self.width) / 2;
+                    y: max(Tokens.space-3, (parent.height - self.height) / 2.5);
+                    background: Tokens.raised;
+                    border-color: Tokens.border;
+                    border-width: 1px;
+                    border-radius: Tokens.radius-large;
+                    drop-shadow-blur: 24px;
+                    drop-shadow-color: #0000004d;
+                    drop-shadow-offset-y: 8px;
+                    accessible-role: groupbox;
+                    accessible-label: "Convert video only?";
+                    accessible-description: root.sheet-body;
+
+                    card := VerticalLayout {
+                        padding: Tokens.space-6;
+                        spacing: Tokens.space-3;
+
+                        Text {
+                            text: "Convert video only?";
+                            color: Tokens.text;
+                            font-size: Tokens.type-title * 1rem;
+                            font-weight: Tokens.weight-semibold;
+                            wrap: word-wrap;
+                        }
+
+                        Text {
+                            text: root.sheet-body;
+                            color: Tokens.text;
+                            font-size: Tokens.type-body * 1rem;
+                            wrap: word-wrap;
+                        }
+
+                        HorizontalLayout {
+                            alignment: end;
+                            spacing: Tokens.space-2;
+                            padding-top: Tokens.space-2;
+
+                            if root.confirm-first: PrimaryButton {
+                                horizontal-stretch: 0;
+                                text: "Convert Video Only";
+                                description: root.sheet-body;
+                                clicked => {
+                                    root.omissions-confirmed();
+                                }
+                            }
+
+                            cancel-sheet := Button {
+                                text: "Cancel";
+                                accessible-description: "Do not convert";
+                                init => {
+                                    self.focus();
+                                }
+                                clicked => {
+                                    root.omissions-declined();
+                                }
+                            }
+
+                            if !root.confirm-first: PrimaryButton {
+                                horizontal-stretch: 0;
+                                text: "Convert Video Only";
+                                description: root.sheet-body;
+                                clicked => {
+                                    root.omissions-confirmed();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     about := PopupWindow {

@@ -7,9 +7,9 @@ use std::fs;
 
 use crate::run::{capture, root};
 
-/// Checks the pinned toolchain and, on Linux, the native packages the GUI
-/// build script probes. Reports everything, then fails if anything required
-/// is missing.
+/// Checks the pinned toolchain, on Linux the native packages the GUI build
+/// script probes, and the `FFmpeg` the engine tests need. Reports everything,
+/// then fails if anything required is missing.
 pub fn run() -> Result<(), String> {
     let mut problems = 0_usize;
     let mut report = |ok: bool, line: String| {
@@ -55,6 +55,8 @@ pub fn run() -> Result<(), String> {
         println!("no extra native build prerequisites are checked on this OS");
     }
 
+    ffmpeg(&mut report);
+
     if problems == 0 {
         Ok(())
     } else {
@@ -76,4 +78,77 @@ fn pinned_channel() -> Result<String, String> {
             Some(value.trim().trim_matches('"').to_owned())
         })
         .ok_or_else(|| "rust-toolchain.toml has no channel".into())
+}
+
+/// The opt-in the engine tests run with (`.cargo/config.toml` sets it for
+/// every Cargo command).
+const SYSTEM_OPT_IN: &str = "SPLOT_STUDIO_SYSTEM_FFMPEG";
+
+/// Encoders the engine tests make their fixtures with.
+const FIXTURE_ENCODERS: [&str; 8] = [
+    "libx264",
+    "libvpx-vp9",
+    "ffv1",
+    "prores",
+    "rawvideo",
+    "flac",
+    "png",
+    "srt",
+];
+
+/// `ffmpeg` and `ffprobe` on `PATH`, at one version, with the fixture
+/// encoders. The engine tests fail without them; they never skip.
+fn ffmpeg(report: &mut impl FnMut(bool, String)) {
+    let install = "Debian/Ubuntu: apt install ffmpeg; macOS: brew install ffmpeg; \
+                   Windows: choco install ffmpeg";
+    let opt_in = std::env::var(SYSTEM_OPT_IN).ok();
+    report(
+        opt_in.as_deref() == Some("1"),
+        format!(
+            "{SYSTEM_OPT_IN}={} (the engine tests use the FFmpeg on PATH; set in .cargo/config.toml)",
+            opt_in.as_deref().unwrap_or("<unset>")
+        ),
+    );
+    let mut versions = Vec::new();
+    for tool in ["ffmpeg", "ffprobe"] {
+        match capture(tool, &["-version"]) {
+            Ok(out) => {
+                let line = out.lines().next().unwrap_or_default().to_owned();
+                let version = line
+                    .strip_prefix(tool)
+                    .and_then(|rest| rest.strip_prefix(" version "))
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .unwrap_or("?")
+                    .to_owned();
+                report(
+                    true,
+                    format!(
+                        "{tool} {version} on PATH (engine tests; development only, never shipped)"
+                    ),
+                );
+                versions.push(version);
+            }
+            Err(e) => report(
+                false,
+                format!("{tool} on PATH, needed by the engine tests ({install}): {e}"),
+            ),
+        }
+    }
+    if let [ffmpeg, ffprobe] = versions.as_slice() {
+        report(
+            ffmpeg == ffprobe,
+            format!("ffmpeg and ffprobe report the same version ({ffmpeg}, {ffprobe})"),
+        );
+        match capture("ffmpeg", &["-hide_banner", "-encoders"]) {
+            Ok(list) => {
+                for encoder in FIXTURE_ENCODERS {
+                    let found = list
+                        .lines()
+                        .any(|line| line.split_whitespace().nth(1) == Some(encoder));
+                    report(found, format!("ffmpeg encoder {encoder} (test fixtures)"));
+                }
+            }
+            Err(e) => report(false, format!("ffmpeg -encoders: {e}")),
+        }
+    }
 }

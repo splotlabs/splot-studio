@@ -11,3 +11,9 @@ git-fetch-with-cli = true
 
 [alias]
 xtask = "run --package xtask --"
+
+# Development opt-in: commands run through Cargo (`cargo run`, `cargo test`)
+# may use the FFmpeg installed on this machine. A packaged engine started
+# directly never sees this and uses only the FFmpeg shipped beside it.
+[env]
+SPLOT_STUDIO_SYSTEM_FFMPEG = "1"

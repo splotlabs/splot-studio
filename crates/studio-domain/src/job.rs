@@ -103,14 +103,92 @@ pub enum ChromaLayout {
     Yuv444,
 }
 
-/// What the engine read from a source's header. Nothing here is inferred.
+/// How the engine reads a source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceReader {
+    /// Splot's own Y4M reader, straight from the file.
+    Y4m,
+    /// Decoded by an `FFmpeg` child process and piped to the same reader.
+    Ffmpeg,
+}
+
+/// Identifies the exact file a probe looked at, so a job can refuse a source
+/// that was replaced or edited since. Not a content hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SourceFingerprint {
+    /// File length in bytes.
+    pub len: u64,
+    /// Modification time as seconds and nanoseconds since the Unix epoch;
+    /// `None` when the filesystem reports none.
+    pub modified: Option<(i64, u32)>,
+}
+
+/// One video stream of a source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VideoTrack {
+    /// The stream index inside the container.
+    pub stream: u32,
+    /// The codec name as the reader reports it, for display only.
+    pub codec: String,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Cover art or another still attached to the file, not a movie track.
+    pub attached_picture: bool,
+}
+
+/// Everything in the source that a video-only output leaves out.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Omissions {
+    /// Video streams other than the selected one, attached pictures included.
+    pub other_video: u32,
+    /// Audio streams.
+    pub audio: u32,
+    /// Subtitle streams.
+    pub subtitles: u32,
+    /// Attachments such as fonts.
+    pub attachments: u32,
+    /// Data and other streams.
+    pub other: u32,
+    /// Chapters.
+    pub chapters: u32,
+}
+
+impl Omissions {
+    /// Whether the output would leave anything out.
+    #[must_use]
+    pub const fn any(&self) -> bool {
+        self.other_video > 0
+            || self.audio > 0
+            || self.subtitles > 0
+            || self.attachments > 0
+            || self.other > 0
+            || self.chapters > 0
+    }
+}
+
+/// What the engine read from a source. Nothing here is inferred; the video
+/// fields describe the selected stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceFacts {
+    /// How the source is read.
+    pub reader: SourceReader,
+    /// The file the probe saw.
+    pub fingerprint: SourceFingerprint,
+    /// The selected video stream; `0` for Y4M.
+    pub video_stream: u32,
+    /// Every video stream, the selected one included.
+    pub video_tracks: Vec<VideoTrack>,
+    /// What a video-only output of the selected stream leaves out.
+    pub omissions: Omissions,
     /// Luma width in pixels.
     pub width: u32,
     /// Luma height in pixels.
     pub height: u32,
-    /// The constant frame rate.
+    /// The constant frame rate the source declares. A job checks the real
+    /// timestamps before encoding.
     pub frame_rate: Rational,
     /// The pixel aspect ratio; `None` when the source does not state one.
     pub pixel_aspect: Option<Rational>,
@@ -135,6 +213,16 @@ pub enum Disclosure {
     /// The source does not say whether it is progressive or interlaced. It is
     /// encoded as progressive frames.
     ScanUnspecified,
+    /// The source states its colour (primaries, transfer, matrix or range),
+    /// but the encoder cannot write a colour description. Samples are encoded
+    /// unchanged and the output does not say how to interpret them.
+    ColorNotCarried,
+    /// The video starts at a non-zero time in the source. The output starts
+    /// at zero.
+    StartOffsetDropped,
+    /// Samples were moved from a semi-planar layout to separate planes at the
+    /// same bit depth and subsampling. No value changed.
+    LayoutRepacked,
 }
 
 /// One immutable encode request.
@@ -142,6 +230,15 @@ pub enum Disclosure {
 pub struct JobSpec {
     /// The file to read. It is never modified.
     pub source: WirePath,
+    /// The file the user looked at, from [`SourceFacts::fingerprint`]. The
+    /// engine refuses the job when the file no longer matches.
+    pub fingerprint: SourceFingerprint,
+    /// The video stream to encode, from [`SourceFacts::video_stream`].
+    pub video_stream: u32,
+    /// The user confirmed that everything in [`SourceFacts::omissions`] is
+    /// left out. Required when there is anything to leave out; it belongs to
+    /// this source, stream and output, and to no other job.
+    pub omissions_acknowledged: bool,
     /// The file to create. An existing file is never replaced.
     pub destination: WirePath,
     /// The requested encoder settings, including the output kind.
@@ -152,6 +249,10 @@ pub struct JobSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
+    /// Decoding the source once to prove every frame has the same size,
+    /// format and constant timing. Only for sources read through `FFmpeg`.
+    /// Nothing is written and no [`Progress`] is reported.
+    Checking,
     /// Reading frames and writing packets.
     Encoding,
     /// Flushing the encoder and finishing the temporary file.
@@ -236,6 +337,13 @@ pub enum FailureCode {
     InvalidSource,
     /// The source is valid but outside what this build encodes.
     UnsupportedSource,
+    /// The source needs `FFmpeg` and this build has no usable one.
+    MediaToolMissing,
+    /// The file changed since it was probed. Probe it again.
+    SourceChanged,
+    /// The source has streams a video-only output leaves out and the job
+    /// does not acknowledge that.
+    OmissionsNotAcknowledged,
     /// The frame size or memory needed exceeds the engine's limits.
     TooLarge,
     /// The settings are not accepted by the encoder.

@@ -4,10 +4,11 @@
 //! `studio-engine` — the Splot Studio engine executable's library.
 //!
 //! The [`worker`] serves the framed control protocol from `studio-domain`:
-//! it probes Y4M [`source`]s and runs one [`job`] that encodes 8-bit or
-//! 10-bit Y4M with the pinned Splot encoder into AV2 IVF or an AV2 Annex B
-//! length-delimited OBU stream, [`verify`]s the result, and publishes it
-//! through a no-clobber [`output`] transaction.
+//! it probes [`source`]s (Y4M directly, other media files through the
+//! [`media`] tools) and runs one [`job`] that encodes the 8-bit or 10-bit
+//! frames of one video stream with the pinned Splot encoder into AV2 IVF or
+//! an AV2 Annex B length-delimited OBU stream, [`verify`]s the result, and
+//! publishes it through a no-clobber [`output`] transaction.
 //!
 //! Licensed under `PolyForm` Noncommercial 1.0.0; commercial use requires a
 //! separate written license from Bartosz Tomczyk.
@@ -16,6 +17,7 @@
 
 pub mod cli;
 pub mod job;
+pub mod media;
 pub mod output;
 pub mod source;
 pub mod verify;
@@ -36,10 +38,12 @@ pub fn build_identity() -> BuildIdentity {
     }
 }
 
-/// What this build can do: both output kinds.
+/// What this build can do: both output kinds, and ordinary media files
+/// when a usable `FFmpeg` is found ([`media::tool`]).
 #[must_use]
 pub fn capabilities() -> Capabilities {
     Capabilities {
         encode_outputs: OutputKind::ALL.to_vec(),
+        media_tool: media::identity(),
     }
 }

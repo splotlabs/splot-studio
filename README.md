@@ -13,10 +13,11 @@ Windows, macOS and Linux. Processing is local; there is no web or browser target
 
 ## Status
 
-First usable slice (milestone STUDIO-02): it converts **progressive 8-bit or 10-bit Y4M** to
-AV2. Ordinary files (MP4, MKV, MOV) are not read yet. Encoding is slow: the codec is young.
+Milestone STUDIO-03: it converts **ordinary local video files** (MP4, MOV, MKV, WebM, TS, AVI)
+and Y4M to video-only AV2. Sources must be progressive, constant frame rate and SDR; anything
+else is refused with a reason. Encoding is slow: the codec is young.
 
-- `studio-app` (`splot-studio`): the Slint desktop app. Open a Y4M file, pick Quality and
+- `studio-app` (`splot-studio`): the Slint desktop app. Open a video, pick Quality and
   Priority, press Convert, watch real progress, cancel, reveal the result.
 - `studio-engine` (`splot-studio-engine`): the headless engine. `worker` runs one job per
   process over the versioned, length-prefixed JSON control protocol from `studio-domain`;
@@ -31,7 +32,8 @@ What has actually been run, and what has not, is recorded in `STATUS.md`.
 
 Rust is pinned by `rust-toolchain.toml` (1.100.0); rustup installs it on first use. On Linux the
 GUI build needs `pkg-config` and the fontconfig development files (`libfontconfig-dev` on
-Debian/Ubuntu).
+Debian/Ubuntu). Reading files other than Y4M, and the test suite, need `ffmpeg` and `ffprobe`
+on `PATH`; no FFmpeg is shipped yet (see `native/ffmpeg/README.md`).
 
 ```sh
 cargo xtask doctor                 # toolchain and native prerequisites; read-only

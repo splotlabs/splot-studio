@@ -16,7 +16,8 @@
 //! `receive_packet`), so after [`CANCEL_GRACE`] the reader finishes the
 //! cancellation itself: it removes the job's temporary file, emits
 //! `Cancelled`, waits for the writer and exits the process while the job
-//! thread is still inside the codec. Both happen under the lock that orders
+//! thread is still inside the codec, after killing every `FFmpeg` child
+//! ([`crate::media::kill_all`]). Both happen under the lock that orders
 //! the terminal event and the publication claim, so a forced cancel never
 //! follows a claimed publication and nothing is published after it.
 
@@ -102,6 +103,9 @@ pub fn run(input: &mut impl Read, output: impl Write + Send) -> Result<(), Sessi
             if let Err(error) = &result {
                 let _ = writeln!(std::io::stderr(), "{}: {error}", crate::ENGINE_NAME);
             }
+            // Exiting runs no destructors: the job's FFmpeg child would
+            // outlive the worker.
+            crate::media::kill_all();
             std::process::exit(i32::from(result.is_err()));
         }
         result
@@ -143,9 +147,14 @@ fn serve<'scope>(
                     capabilities: capabilities(),
                 },
             ),
-            Command::Probe { source } => {
+            // A probe runs here, in order with the other replies, bounded by
+            // the media tools' timeout; the end of input is seen after it.
+            Command::Probe {
+                source,
+                video_stream,
+            } => {
                 let event = match source.to_path_buf() {
-                    Ok(path) => match source::probe(&path) {
+                    Ok(path) => match source::probe(&path, video_stream) {
                         Ok(facts) => Event::Probed { facts },
                         Err(stop) => failed(stop),
                     },
@@ -528,7 +537,7 @@ mod tests {
 
     #[test]
     fn bad_message_is_answered_and_session_continues() {
-        let bad = br#"{"protocol_version":2,"request_id":8,"body":{"type":"encode"}}"#;
+        let bad = br#"{"protocol_version":3,"request_id":8,"body":{"type":"encode"}}"#;
         let mut input = Vec::new();
         input.extend_from_slice(&u32::try_from(bad.len()).unwrap_or(0).to_le_bytes());
         input.extend_from_slice(bad);
