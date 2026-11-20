@@ -1,0 +1,4 @@
+# Check out LF on every platform: rustfmt.toml sets newline_style = "Unix",
+# and Windows Git would otherwise convert to CRLF and fail `cargo fmt --check`.
+* text=auto eol=lf
+*.png binary
