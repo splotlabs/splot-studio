@@ -823,7 +823,15 @@ fn damaged(dir: &Path) -> Fallible<PathBuf> {
         ..Clip::new(64, 48, "420", 30)
     };
     let src = dir.join("damaged.mkv");
-    make(&clip, dir, &["-c:v", "libx264", "-g", "10"], &src)?;
+    // FFV1 slices carry a CRC, so the decoder reports the damage whatever
+    // build made the file. A codec without checksums can decode damaged data
+    // as valid garbage, which nothing downstream can detect.
+    make(
+        &clip,
+        dir,
+        &["-c:v", "ffv1", "-level", "3", "-slicecrc", "1"],
+        &src,
+    )?;
     let mut bytes = fs::read(&src)?;
     let middle = bytes.len() / 2;
     for byte in &mut bytes[middle..middle + 300] {
@@ -961,13 +969,14 @@ fn odd_file_names_reach_the_tools_intact() -> TestResult {
         &["-c:v", "ffv1"],
         &made,
     )?;
-    #[cfg_attr(not(unix), allow(unused_mut))]
+    #[cfg_attr(any(not(unix), target_os = "macos"), allow(unused_mut))]
     let mut names: Vec<PathBuf> = vec![
         nested.join("clip 01 – ünïcödé.mkv"),
         nested.join("-i x.mkv"),
     ];
     // Windows names cannot hold a colon or non-Unicode units here.
-    #[cfg(unix)]
+    // macOS file systems refuse names that are not valid Unicode.
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         use std::os::unix::ffi::OsStrExt;
         names.push(nested.join("-i: x.mkv"));

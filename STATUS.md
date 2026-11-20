@@ -118,6 +118,8 @@ Cancel: acknowledged in under 1 ms; finished in 9 ms between frames, otherwise
 - The tools open the source by path, so a file swapped between checks is caught
   by fingerprint re-checks, not prevented.
 - Scan and decode have no whole-file timeout; they stop on cancel.
+- Damage is caught only when FFmpeg reports it. A codec without checksums can
+  decode damaged data as valid frames; nothing downstream can tell.
 - A killed worker leaves its `.partial` file behind.
 - Quality and Priority mappings are provisional and uncalibrated.
 - OS drag-and-drop is not possible with Slint 1.19's winit backend.
