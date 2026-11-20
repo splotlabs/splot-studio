@@ -1,4 +1,11 @@
-# Splot Studio
+<p align="center">
+  <img src="./docs/assets/hero.svg" alt="splot studio — The AV2 encoder workbench." width="100%">
+</p>
+
+<p align="center">
+  <b>Native Rust AV2 encoder workbench.</b><br>
+  Slint UI. Local processing.
+</p>
 
 A native desktop workbench for encoding video to AV2, built on the
 [Splot](https://github.com/splotlabs/splot) codec. Rust and [Slint](https://slint.dev), for
