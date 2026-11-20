@@ -463,6 +463,8 @@ fn a_killed_worker_ends_without_a_terminal_event() {
                 activity.apply(Input::Event(e.body), Instant::now());
             }
             Ok(Delivery::Ended(ending)) => {
+                // Windows reports a killed process as a plain exit code.
+                #[cfg(unix)]
                 assert!(ending.exit.contains("signal"), "{ending:?}");
                 activity.apply(
                     Input::WorkerEnded {
