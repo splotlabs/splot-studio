@@ -38,7 +38,7 @@ impl FileId {
     ///
     /// # Errors
     /// Any error from reading its metadata or canonicalizing `path`.
-    #[cfg_attr(unix, allow(unused_variables))]
+    #[allow(unused_variables)] // each platform reads one of the two arguments
     pub fn of_file(file: &File, path: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         {

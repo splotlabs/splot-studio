@@ -31,6 +31,8 @@ pub fn show_in_folder(file: &Path) -> io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
+// Fallible only on Linux; one signature keeps the caller platform-free.
+#[allow(clippy::unnecessary_wraps)]
 fn command(file: &Path) -> io::Result<Command> {
     let mut command = Command::new("open");
     command.arg("-R").arg(file);
@@ -38,6 +40,8 @@ fn command(file: &Path) -> io::Result<Command> {
 }
 
 #[cfg(windows)]
+// Fallible only on Linux; one signature keeps the caller platform-free.
+#[allow(clippy::unnecessary_wraps)]
 fn command(file: &Path) -> io::Result<Command> {
     use std::os::windows::process::CommandExt;
     // Explorer parses its own command line: `/select,"C:\a b\c.ivf"`.
@@ -60,11 +64,10 @@ fn command(file: &Path) -> io::Result<Command> {
     Ok(command)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(any(windows, target_os = "macos"))))]
 mod tests {
     use super::*;
 
-    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn linux_opens_the_containing_folder() {
         let command =
@@ -75,7 +78,6 @@ mod tests {
         assert!(command_has_no_folder_error());
     }
 
-    #[cfg(not(any(windows, target_os = "macos")))]
     fn command_has_no_folder_error() -> bool {
         command(Path::new("clip.ivf")).is_err()
     }

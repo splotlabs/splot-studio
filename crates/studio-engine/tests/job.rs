@@ -343,12 +343,20 @@ fn the_source_is_never_the_destination() -> TestResult {
     clip.write(&src)?;
     let hard = dir.path().join("hard.ivf");
     fs::hard_link(&src, &hard)?;
-    let mut aliases = vec![src.clone(), hard, dir.path().join(".").join("in.y4m")];
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut aliases = vec![src.clone(), dir.path().join(".").join("in.y4m")];
     #[cfg(unix)]
     {
         let soft = dir.path().join("soft.ivf");
         std::os::unix::fs::symlink(&src, &soft)?;
-        aliases.push(soft);
+        aliases.extend([hard, soft]);
+    }
+    // Without inode identity a hard link is not recognized as the source; it
+    // is still refused, as an existing destination.
+    #[cfg(not(unix))]
+    {
+        let (_, end) = run_job(spec(&src, &hard, OutputKind::Ivf), |_, _| {});
+        assert_eq!(code(&end), Some(FailureCode::DestinationExists), "{end:?}");
     }
     for dst in &aliases {
         let (_, end) = run_job(spec(&src, dst, OutputKind::Ivf), |_, _| {});
