@@ -18,6 +18,7 @@ use studio_domain::protocol::{
     read_message, write_message,
 };
 use studio_domain::settings::OutputKind;
+use studio_engine::worker::CANCEL_GRACE;
 
 const BIN: &str = env!("CARGO_BIN_EXE_splot-studio-engine");
 
@@ -45,12 +46,16 @@ fn frame(request_id: u64, command: Command) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(bytes)
 }
 
-fn hello_frame(request_id: u64) -> Result<Vec<u8>, Box<dyn Error>> {
+fn hello() -> Command {
     let client = BuildIdentity {
         name: "test".into(),
         version: "0".into(),
     };
-    frame(request_id, Command::Hello { client })
+    Command::Hello { client }
+}
+
+fn hello_frame(request_id: u64) -> Result<Vec<u8>, Box<dyn Error>> {
+    frame(request_id, hello())
 }
 
 fn raw_frame(body: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -632,7 +637,7 @@ fn rest_after_exit(live: &mut Live) -> Result<Vec<Envelope<Event>>, Box<dyn Erro
     Ok(rest)
 }
 
-/// Waits for the worker to exit by itself, with its input still open.
+/// Waits for the worker to exit, killing it after `limit`.
 fn exits_within(live: &mut Live, limit: Duration) -> Result<Option<i32>, Box<dyn Error>> {
     let deadline = Instant::now() + limit;
     loop {
@@ -641,16 +646,17 @@ fn exits_within(live: &mut Live, limit: Duration) -> Result<Option<i32>, Box<dyn
         }
         if Instant::now() > deadline {
             live.child.kill()?;
-            return Err("the worker did not exit after an abandoned job".into());
+            return Err("the worker did not exit in time".into());
         }
         std::thread::sleep(Duration::from_millis(10));
     }
 }
 
 /// A cancel during one long codec call (a whole mini-GOP of 640x360 frames)
-/// cannot finish cooperatively within the grace, so the worker abandons the
-/// job: `Cancelled` soon, the temporary file removed, exit 0 with its input
-/// still open. The same through the end of input.
+/// stops it cooperatively through the encoder's token: `Cancelled` well
+/// before [`CANCEL_GRACE`] (the forced path cannot emit it earlier), the
+/// temporary file removed, and the worker still serving until the end of
+/// its input. The same through the end of input.
 #[test]
 fn a_cancel_inside_a_long_codec_call_is_bounded() -> TestResult {
     for by_eof in [false, true] {
@@ -679,14 +685,27 @@ fn a_cancel_inside_a_long_codec_call_is_bounded() -> TestResult {
         };
         let got = live.read_until(terminal)?;
         let latency = asked.elapsed();
-        eprintln!("forced cancel (eof: {by_eof}) after {latency:?}");
-        assert!(latency < Duration::from_secs(3), "{latency:?}");
+        eprintln!("cooperative cancel (eof: {by_eof}) after {latency:?}");
+        assert!(latency < CANCEL_GRACE / 2, "{latency:?}");
         assert!(
             matches!(got.last().map(|e| &e.body), Some(Event::Cancelled)),
             "{got:?}"
         );
+        assert!(!dst.exists());
+        assert_eq!(
+            leftovers(dir.path(), &[&src]),
+            Vec::<std::path::PathBuf>::new()
+        );
+        if let Some(stdin) = stdin {
+            // Not abandoned: the reader still answers, and the worker exits
+            // only once its input ends.
+            live.stdin = Some(stdin);
+            live.send(3, hello())?;
+            assert!(matches!(live.next()?.body, Event::Hello { .. }));
+            assert_eq!(live.child.try_wait()?, None);
+            drop(live.stdin.take());
+        }
         assert_eq!(exits_within(&mut live, Duration::from_secs(3))?, Some(0));
-        drop(stdin);
         assert_eq!(rest_after_exit(&mut live)?, Vec::new());
         assert!(!dst.exists());
         assert_eq!(
@@ -905,10 +924,11 @@ fn tools_of(live: &Live, needle: &Path) -> Vec<u32> {
     common::tool_children(live.child.id(), &needle.to_string_lossy())
 }
 
-/// A forced cancel (the worker exits without unwinding) inside a long codec
-/// call kills the decoding `ffmpeg` too; nothing is published or left.
+/// A cancel inside a long codec call on the `FFmpeg` route stops
+/// cooperatively and reaps the decoding `ffmpeg` before `Cancelled`;
+/// nothing is published or left, and the worker exits on the end of input.
 #[test]
-fn a_forced_cancel_leaves_no_ffmpeg_behind() -> TestResult {
+fn a_cancel_leaves_no_ffmpeg_behind() -> TestResult {
     let dir = tempfile::tempdir()?;
     let src = mp4(dir.path(), 640, 360, 12)?;
     let dst = dir.path().join("out.ivf");
@@ -924,17 +944,21 @@ fn a_forced_cancel_leaves_no_ffmpeg_behind() -> TestResult {
     let decoders = tools_of(&live, &src);
     #[cfg(target_os = "linux")]
     assert_eq!(decoders.len(), 1, "one ffmpeg decodes: {decoders:?}");
+    let asked = Instant::now();
     live.send(2, Command::Cancel)?;
     let got = live.read_until(terminal)?;
+    assert!(asked.elapsed() < CANCEL_GRACE / 2, "{:?}", asked.elapsed());
     assert!(
         matches!(got.last().map(|e| &e.body), Some(Event::Cancelled)),
         "{got:?}"
     );
-    assert_eq!(exits_within(&mut live, Duration::from_secs(3))?, Some(0));
     #[cfg(target_os = "linux")]
     for pid in decoders {
-        assert!(!common::alive_tool(pid), "ffmpeg {pid} outlived the worker");
+        assert!(!common::alive_tool(pid), "ffmpeg {pid} outlived its job");
     }
+    assert_eq!(live.child.try_wait()?, None);
+    drop(live.stdin.take());
+    assert_eq!(exits_within(&mut live, Duration::from_secs(3))?, Some(0));
     assert!(!dst.exists());
     assert_eq!(
         leftovers(dir.path(), &[&src]),

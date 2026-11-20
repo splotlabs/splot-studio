@@ -32,7 +32,7 @@ with the deviations below.
 - **App:** unchanged Simple window, plus the omission summary, the confirmation,
   a video-track picker and the FFmpeg identity under Advanced.
 - Everything from STUDIO-02 (safe publish, verification, bounded cancel) applies
-  to both routes. Cancel, forced cancel and a killed worker leave no `ffmpeg`
+  to both routes. Cancel and a killed worker leave no `ffmpeg`
   child (Linux).
 
 ## Not supported (rejected with a reason)
@@ -92,13 +92,15 @@ Ordinary files (320×180, 30 frames, preset 10, release): 8.5–8.7 s, 75–80 M
 probe 0.08 s, frame check plus decoder start about 0.07 s. A 600-frame 720p H.264
 check took 0.20 s.
 
-Cancel: acknowledged in under 1 ms; finished in 9 ms between frames, otherwise
-500 ms (the engine abandons the codec call, removes its file and exits).
+Cancel (release, over the worker pipes, sent mid-mini-GOP): `Cancelled` after
+3–5 ms at 720p 8-bit preset 6 and 720p 10-bit preset 10, 4–7 ms at 1080p preset
+10, 12–14 ms for a 720p H.264 MP4 (`ffmpeg` reaped first); always cooperative,
+the worker kept serving until its input closed.
 
 ## Checks run (Linux x86_64, Wayland)
 
 - `cargo xtask ci` — pass: fmt, SPDX headers, dependency direction, clippy
-  `-D warnings`, 186 tests (domain 10, engine 22 + 14 + 15 + 27, app 66 + 1 + 13
+  `-D warnings`, 187 tests (domain 10, engine 23 + 14 + 15 + 27, app 66 + 1 + 13
   against the real engine, xtask 3, plus doc tests). Clippy is also clean for
   `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`.
 - Real conversions through `encode`: H.264+AAC MP4 → IVF (refused without the
@@ -123,12 +125,13 @@ Cancel: acknowledged in under 1 ms; finished in 9 ms between frames, otherwise
 - A killed worker leaves its `.partial` file behind.
 - Quality and Priority mappings are provisional and uncalibrated.
 - OS drag-and-drop is not possible with Slint 1.19's winit backend.
-- Studio's 500 ms worker exit on cancel is a guard until splotlabs/splot#1783
-  (encoder cancel token) is merged and adopted.
+- Cancel reaches a running codec call through the encoder's `CancelToken`
+  (measured 3–14 ms). The forced worker exit is only a backstop after 3 s
+  (`CANCEL_GRACE`); it is unit-tested, not exercised end to end.
 
 ## Provenance and dependencies
 
-Splot `main` at `529f3ee673c83b2469701953d0c0d13f44c517da` (in `Cargo.lock`) for
+Splot `main` at `e05a86fe866f35f891e8d7fa17454af27922106c` (in `Cargo.lock`) for
 `splot-encode`, `-decode`, `-validate`, `-core` (dev profile builds them at
 `opt-level = 2`). The measurements above were taken at `c1183fec`. `slint` 1.19.0,
 `rfd` 0.18.0, `tempfile` 3.27.0, `serde`, `serde_json`, `thiserror`. Linux build

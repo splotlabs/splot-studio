@@ -16,8 +16,10 @@ use studio_domain::job::{Failure, JobReport, Progress, Stage};
 use studio_domain::protocol::Event;
 
 /// How long a job may take to stop after Cancel before its worker is killed.
-/// A backstop only: the engine itself gives up on a codec call after its own
-/// short grace, removes its temporary file and exits.
+/// A backstop only: the engine stops the codec call cooperatively, normally
+/// well within a second, and abandons a job that ignores that after its own
+/// grace (`studio_engine::worker::CANCEL_GRACE`, 3 s), so this stays above
+/// that with margin.
 pub const CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Where a job is.
