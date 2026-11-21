@@ -151,7 +151,9 @@ the worker kept serving until its input closed.
   journal still says running; recovery then reports that a file exists at the
   destination but cannot prove it is this job's. Closing that needs an engine
   handshake.
-- The worker-kill and app-crash tests are Unix only. Directory fsync, the lock
+- The worker-kill tests are Linux only and the app-crash test is skipped on
+  Windows (its helper process never reports ready on the CI runner; not yet
+  investigated on a real machine), so crash recovery is unproven on Windows. Directory fsync, the lock
   file and rename-over-existing on Windows/macOS are first exercised by CI.
 - Disk full and a read-only data folder are unit-tested only.
 - Keyboard handling of the list and screen readers are untested by hand.
