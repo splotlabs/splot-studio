@@ -21,7 +21,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::Value;
-use splot_encode::y4m::Y4mHeader;
+use splot_encode::y4m::{Y4mColorRange, Y4mHeader};
 use splot_encode::{MAX_FRAME_DIMENSION, PixelFormat};
 use studio_domain::job::{
     ChromaLayout, Disclosure, FailureCode, Omissions, Rational, SourceFacts, SourceFingerprint,
@@ -403,7 +403,16 @@ fn stated(value: Option<&str>) -> Option<&str> {
     value.filter(|v| !matches!(*v, "" | "unknown" | "unspecified" | "reserved"))
 }
 
-/// The sample format, range, transfer and marks of the selected stream.
+/// The sample range the stream states.
+fn color_range(stream: &Stream) -> Option<Y4mColorRange> {
+    match stated(stream.color_range.as_deref())? {
+        "pc" => Some(Y4mColorRange::Full),
+        "tv" => Some(Y4mColorRange::Limited),
+        _ => None,
+    }
+}
+
+/// The sample format, transfer and marks of the selected stream.
 fn samples(
     stream: &Stream,
     diagnostics: &str,
@@ -425,11 +434,6 @@ fn samples(
     };
     let (format, bit_depth, repack) =
         pixel_format(pix_fmt).ok_or_else(|| unsupported(pixel_format_refusal(pix_fmt)))?;
-    if stated(stream.color_range.as_deref()) == Some("pc") {
-        return Err(unsupported(
-            "full-range samples cannot be signalled by this encoder",
-        ));
-    }
     if let Some(transfer) = stated(stream.color_transfer.as_deref()) {
         hdr_transfer(transfer)?;
     }
@@ -525,8 +529,10 @@ fn contract(stream: &Stream, diagnostics: &str) -> Result<Accepted, Stop> {
         interlace,
         format,
         bit_depth,
+        color_range: color_range(stream),
+        chroma_siting: None,
     };
-    source::check_contract(&header, false)?;
+    source::check_contract(&header)?;
     let colour = [
         &stream.color_range,
         &stream.color_space,

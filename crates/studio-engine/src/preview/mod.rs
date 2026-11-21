@@ -532,7 +532,7 @@ enum Decoded {
         bit_depth: u8,
     },
     /// A Splot decoder picture.
-    Picture(splot_decode::Picture),
+    Picture(Box<splot_decode::Picture>),
 }
 
 impl Decoded {

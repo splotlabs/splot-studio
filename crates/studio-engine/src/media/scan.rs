@@ -315,6 +315,8 @@ mod tests {
                 interlace: 'p',
                 format: PixelFormat::Yuv420,
                 bit_depth: 8,
+                color_range: None,
+                chroma_siting: None,
             },
             pix_fmt: "yuv420p".into(),
             repack: None,
