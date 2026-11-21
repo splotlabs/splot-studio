@@ -2264,9 +2264,12 @@ export component AppWindow inherits Window {
     }
 }
 
-// Shown instead of the main window when another Splot Studio already owns
-// the list of files: only one may run, so that list is never written twice.
-export component AlreadyOpenWindow inherits Window {
+// Shown instead of the main window when the app cannot start: another Splot
+// Studio already owns the list of files (only one may run, so that list is
+// never written twice), or this processor is below the release CPU floor.
+export component NoticeWindow inherits Window {
+    in property <string> heading;
+    in property <string> message;
     callback quit-requested();
 
     title: "Splot Studio";
@@ -2287,7 +2290,7 @@ export component AlreadyOpenWindow inherits Window {
         }
 
         Text {
-            text: "Splot Studio is already open";
+            text: root.heading;
             color: Tokens.text;
             font-size: Tokens.type-title * 1rem;
             font-weight: Tokens.weight-semibold;
@@ -2296,7 +2299,7 @@ export component AlreadyOpenWindow inherits Window {
         }
 
         Caption {
-            text: "Use the window that is already open. Only one can run at a time, so the list of files is kept in one place.";
+            text: root.message;
         }
 
         HorizontalLayout {

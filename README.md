@@ -34,7 +34,8 @@ What has actually been run, and what has not, is recorded in `STATUS.md`.
 Rust is pinned by `rust-toolchain.toml` (1.100.0); rustup installs it on first use. On Linux the
 GUI build needs `pkg-config` and the fontconfig development files (`libfontconfig-dev` on
 Debian/Ubuntu). Reading files other than Y4M, and the test suite, need `ffmpeg` and `ffprobe`
-on `PATH`; no FFmpeg is shipped yet (see `native/ffmpeg/README.md`).
+on `PATH` during development; packages ship their own LGPL build instead (see
+`native/ffmpeg/README.md`).
 
 ```sh
 cargo xtask doctor                 # toolchain and native prerequisites; read-only
@@ -43,7 +44,14 @@ cargo xtask ci                     # full gate, as CI runs it
 cargo xtask run --release          # the desktop app, with its engine built to match
 cargo run -p studio-engine -- --help
 cargo run --release -p studio-engine -- encode in.y4m out.ivf
+cargo xtask package --smoke        # unsigned test package for this OS in target/package/
 ```
+
+`cargo xtask package` needs the FFmpeg pair from `native/ffmpeg/build.sh <target>`; it builds
+the app for plain x86-64 and the engine for x86-64-v3 (the app refuses older processors
+before starting it), writes `BUILD.json` and the notices, and archives a `.tar.gz` (Linux) or
+`.zip` (Windows, and macOS with a `.app` bundle). `cargo xtask smoke` unpacks it and runs it
+with an emptied environment. Packages are unsigned test builds; see `docs/release/`.
 
 `cargo run -p studio-app` rebuilds only the app, not the engine it starts; use `cargo xtask run`.
 

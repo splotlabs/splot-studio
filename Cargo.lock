@@ -4348,7 +4348,7 @@ dependencies = [
 
 [[package]]
 name = "studio-app"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "directories",
  "rfd",
@@ -4361,7 +4361,7 @@ dependencies = [
 
 [[package]]
 name = "studio-domain"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4370,7 +4370,7 @@ dependencies = [
 
 [[package]]
 name = "studio-engine"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5665,7 +5665,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "serde_json",
 ]

@@ -49,7 +49,7 @@ use studio_app::preview::{self, Preview};
 use studio_app::recovery::{Disk, Kind};
 use studio_app::source::ProbeFailure;
 use studio_app::state::{AppState, Effect, Intent, Startup};
-use studio_app::{AlreadyOpenWindow, Palette};
+use studio_app::{NoticeWindow, Palette};
 use studio_domain::job::{
     Check, CheckKind, CheckOutcome, ChromaLayout, Disclosure, Failure, FailureCode, JobReport,
     JobSpec, Omissions, Progress, Rational, SourceFacts, SourceFingerprint, SourceReader, Stage,
@@ -704,7 +704,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if name == "already-open" {
-        let window = AlreadyOpenWindow::new()?;
+        let window = NoticeWindow::new()?;
+        window.set_heading(studio_app::ALREADY_OPEN.0.into());
+        window.set_message(studio_app::ALREADY_OPEN.1.into());
         window.global::<Palette>().set_color_scheme(scheme);
         window.show()?;
         return capture(&window, out);
