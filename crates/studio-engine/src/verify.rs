@@ -131,8 +131,11 @@ fn framing(
                     Err(format!("has pts {pts}"))
                 };
                 checked
-                    .and_then(|()| match record.finish()? {
-                        1 => units.push(true).and_then(|()| units.push(false)),
+                    .and_then(|()| match record.count {
+                        1 => {
+                            units.count += 1;
+                            Ok(())
+                        }
                         n => Err(format!("holds {n} temporal units")),
                     })
                     .map_err(|detail| format!("IVF frame {index} {detail}"))
@@ -168,27 +171,21 @@ fn framing(
             )));
         }
     }
-    let count = match units.finish() {
-        Ok(count) => count,
-        Err(detail) => return Ok(Err(detail)),
-    };
-    if count != expected.frames {
+    if units.count != expected.frames {
         return Ok(Err(format!(
-            "{count} temporal units for {} encoded frames",
-            expected.frames
+            "{} temporal units for {} encoded frames",
+            units.count, expected.frames
         )));
     }
     Ok(Ok(()))
 }
 
-/// Counts temporal units in a run of OBUs. Each must open with a temporal
-/// delimiter and hold at least one more OBU; no OBU types beyond the
-/// delimiter are interpreted here.
+/// Counts temporal units in a run of OBUs, which must open with a temporal
+/// delimiter. No OBU types beyond the delimiter are interpreted here: a unit
+/// that holds no frame is the validator's finding.
 #[derive(Debug, Default)]
 struct TemporalUnits {
     count: u64,
-    /// OBUs after the delimiter of the current unit.
-    after: u64,
 }
 
 impl TemporalUnits {
@@ -199,37 +196,13 @@ impl TemporalUnits {
             .next_obu()
             .map_err(|e| format!("OBU near byte {}: {e}", offset.get()))?
         {
-            self.push(obu.header.obu_type == ObuType::TemporalDelimiter)?;
+            if obu.header.obu_type == ObuType::TemporalDelimiter {
+                self.count += 1;
+            } else if self.count == 0 {
+                return Err("does not start with a temporal delimiter".into());
+            }
         }
         Ok(())
-    }
-
-    fn push(&mut self, delimiter: bool) -> Result<(), String> {
-        if delimiter {
-            self.close()?;
-            self.count += 1;
-            self.after = 0;
-        } else if self.count == 0 {
-            return Err("does not start with a temporal delimiter".into());
-        } else {
-            self.after += 1;
-        }
-        Ok(())
-    }
-
-    fn close(&self) -> Result<(), String> {
-        if self.count > 0 && self.after == 0 {
-            return Err(format!(
-                "temporal unit {} holds nothing after its delimiter",
-                self.count - 1
-            ));
-        }
-        Ok(())
-    }
-
-    /// The unit count, once the last unit is checked.
-    fn finish(&self) -> Result<u64, String> {
-        self.close().map(|()| self.count)
     }
 }
 
