@@ -18,7 +18,7 @@ use std::process::ChildStdout;
 use std::sync::atomic::AtomicBool;
 use std::time::UNIX_EPOCH;
 
-use splot_encode::y4m::{Y4mError, Y4mHeader, Y4mReader};
+use splot_encode::y4m::{Y4mColorRange, Y4mError, Y4mHeader, Y4mReader};
 use splot_encode::{MAX_FRAME_DIMENSION, PixelFormat};
 use studio_domain::job::{
     ChromaLayout, Disclosure, FailureCode, Omissions, Rational, SourceFacts, SourceFingerprint,
@@ -195,8 +195,8 @@ pub fn open(path: &Path, selection: Selection) -> Result<Source, Stop> {
     if selection.video_stream.is_some_and(|stream| stream != 0) {
         return Err(unsupported("a Y4M file has one video stream, stream 0"));
     }
-    let (line, header, tags) = read_header(&mut buffered)?;
-    let frame_bytes = check_header(&header, &tags)?;
+    let (line, header) = read_header(&mut buffered)?;
+    let frame_bytes = check_contract(&header)?;
     let frame_count = frame_count(
         &mut buffered,
         metadata.len(),
@@ -228,7 +228,7 @@ pub fn open(path: &Path, selection: Selection) -> Result<Source, Stop> {
         bit_depth: header.bit_depth,
         chroma: chroma(header.format),
         frame_count,
-        disclosures: disclosures(&tags),
+        disclosures: disclosures(&header),
     };
     let seek = Y4mSeek {
         line: line.clone(),
@@ -503,8 +503,8 @@ impl Decoding {
     ) -> Result<Self, Stop> {
         let (decoder, stdout) = media::decode::start(tool, path, probed, start)?;
         let mut buffered = BufReader::new(Input::Pipe(stdout));
-        let checked = read_header(&mut buffered).and_then(|(line, header, tags)| {
-            check_header(&header, &tags)?;
+        let checked = read_header(&mut buffered).and_then(|(line, header)| {
+            check_contract(&header)?;
             // A decode that starts later (by count or with `-copyts` by
             // time) can make the muxer guess another rate from the frames
             // it passes, or none; it is checked for everything else.
@@ -562,7 +562,7 @@ pub fn fingerprint(metadata: &Metadata) -> SourceFingerprint {
 }
 
 /// Reads and parses one stream header line, keeping its bytes.
-fn read_header(reader: &mut BufReader<Input>) -> Result<(Vec<u8>, Y4mHeader, Tags), Stop> {
+fn read_header(reader: &mut BufReader<Input>) -> Result<(Vec<u8>, Y4mHeader), Stop> {
     let mut line = Vec::new();
     (&mut *reader)
         .take(HEADER_SCAN_BYTES)
@@ -571,8 +571,7 @@ fn read_header(reader: &mut BufReader<Input>) -> Result<(Vec<u8>, Y4mHeader, Tag
     let header = *Y4mReader::new(line.as_slice())
         .map_err(header_error)?
         .header();
-    let tags = tags(&line);
-    Ok((line, header, tags))
+    Ok((line, header))
 }
 
 /// The decoder's header must say what the probe said.
@@ -612,43 +611,13 @@ pub fn read_error(error: Y4mError) -> Stop {
     }
 }
 
-/// The interlace and colour-range tags of the header line, which the parsed
-/// [`Y4mHeader`] cannot tell apart from their defaults.
-#[derive(Debug, Default)]
-struct Tags {
-    interlace: Option<Vec<u8>>,
-    color_range: Option<Vec<u8>>,
-}
-
-fn tags(line: &[u8]) -> Tags {
-    let line = line.strip_suffix(b"\n").unwrap_or(line);
-    let mut tags = Tags::default();
-    // Later tags win, as in the upstream parser.
-    for token in line.split(|&byte| byte == b' ').skip(1) {
-        if let Some(value) = token.strip_prefix(b"I") {
-            tags.interlace = Some(value.to_vec());
-        } else if let Some(value) = token.strip_prefix(b"XCOLORRANGE=") {
-            tags.color_range = Some(value.to_vec());
-        }
-    }
-    tags
-}
-
-fn check_header(header: &Y4mHeader, tags: &Tags) -> Result<u64, Stop> {
-    let full_range = tags
-        .color_range
-        .as_deref()
-        .is_some_and(|value| value.eq_ignore_ascii_case(b"FULL"));
-    check_contract(header, full_range)
-}
-
 /// Applies the input contract to a stream header and returns the bytes of
 /// one frame's samples.
 ///
 /// # Errors
 /// [`FailureCode::UnsupportedSource`], [`FailureCode::InvalidSource`] for an
 /// invalid aspect ratio, or [`FailureCode::TooLarge`].
-pub fn check_contract(header: &Y4mHeader, full_range: bool) -> Result<u64, Stop> {
+pub fn check_contract(header: &Y4mHeader) -> Result<u64, Stop> {
     if !matches!(header.bit_depth, 8 | 10) {
         return Err(unsupported(format!(
             "{}-bit samples are not supported; use 8-bit or 10-bit input",
@@ -670,7 +639,7 @@ pub fn check_contract(header: &Y4mHeader, full_range: bool) -> Result<u64, Stop>
         }
         _ => {}
     }
-    if full_range {
+    if header.color_range == Some(Y4mColorRange::Full) {
         return Err(unsupported(
             "full-range samples cannot be signalled by this encoder",
         ));
@@ -748,11 +717,11 @@ fn chroma(format: PixelFormat) -> ChromaLayout {
     }
 }
 
-fn disclosures(tags: &Tags) -> Vec<Disclosure> {
+fn disclosures(header: &Y4mHeader) -> Vec<Disclosure> {
     // Y4M has no field for primaries, transfer or matrix, and the pinned
     // encoder writes no colour description, so this always applies.
     let mut disclosures = vec![Disclosure::ColorUnspecified];
-    if tags.interlace.as_deref().is_none_or(|value| value == b"?") {
+    if header.interlace == '?' {
         disclosures.push(Disclosure::ScanUnspecified);
     }
     disclosures

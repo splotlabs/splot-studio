@@ -214,7 +214,7 @@ impl ResultPictures {
         context.check()?;
         Ok(self
             .picture()?
-            .map(|(index, picture)| (index, Decoded::Picture(picture))))
+            .map(|(index, picture)| (index, Decoded::Picture(Box::new(picture)))))
     }
 
     /// The session's next picture in display order; `None` at the end.
