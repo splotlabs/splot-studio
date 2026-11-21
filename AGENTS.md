@@ -3,7 +3,6 @@
 Canonical rules for humans and coding agents. CLAUDE.md and Copilot instructions
 point here. Adapted from Splot AGENTS, blob
 `daf08ea45c6386223f791b1d2046179a357c92bd`, inspected 2026-11-20.
-See `docs/planning/studio-v1/07-AGENT-RULES-MAPPING.md` for the adaptation record.
 
 ## Behaviour
 
@@ -34,8 +33,9 @@ excluded with acknowledgement. MKV/audio/subtitle output is a later gated phase.
 Eight-bit and ten-bit SDR are equal targets. HDR/HLG, unproven VFR, live capture,
 network sources, and partial-bitstream resume are not silently implemented.
 
-Use the current phase and accepted pack under `docs/planning/studio-v1/`.
-Do not implement all phases in one pass. Do not reopen the Slint/toolkit choice.
+Planned work and known defects are GitHub issues; release blockers are in
+`docs/release/CHECKLIST.md`. Do one issue per change. Do not reopen the
+Slint/toolkit choice.
 
 ## Before editing
 
@@ -71,8 +71,8 @@ with the full gate. No other moving branch dependency, uncommitted path patch,
 random prebuilt FFmpeg, or generated latest-version guess. Codec limitations are
 reported and fixed in the Splot repository, not worked around here.
 
-Add only used, phase-approved dependencies from the pack. Other dependencies or
-crate-graph changes require justification and maintainer approval. Candidate
+Add only dependencies that are used. New dependencies or crate-graph changes
+require justification and maintainer approval. Candidate
 selection includes compatibility/licence review; “approved candidate” does not
 mean every feature or future release is approved. Never weaken licence checks to
 silence an unfamiliar LicenseRef.
@@ -163,8 +163,9 @@ errors, worker death, cancellation, file failures, and actual UI behaviour.
 Record host/target/renderer/build. Cross-compile is not runtime testing; configured
 CI is not executed CI; missing independent tests are not passes.
 
-Update one concise STATUS.md with implemented facts, exact checks/results, remaining
-risks, and next phase. Do not add generated status matrices, repetitive progress
+Report exact checks and results in the pull request. File remaining risks as GitHub
+issues. Keep documentation for people: no agent plans, prompts, status reports or
+evidence dumps in the repository. Do not add generated status matrices, repetitive progress
 reports, fake screenshots, or unrun benchmark numbers.
 
 ## Licences and approvals

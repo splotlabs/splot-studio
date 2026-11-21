@@ -29,8 +29,7 @@ is missing or not among the reviewed identifiers in `xtask/src/notices.rs`.
 
 Splot Studio uses Slint under the **Slint Royalty-free License 2.0** option, which requires
 attribution. Project policy is to show the official `AboutSlint` widget in an About screen
-reachable from the top-level menu; `STATUS.md` records whether that has been verified in the
-running app. The licence terms are Slint's; read them rather than any summary here:
+reachable from the top-level menu. The licence terms are Slint's; read them rather than any summary here:
 
 - <https://github.com/slint-ui/slint/blob/v1.19.0/LICENSES/LicenseRef-Slint-Royalty-free-2.0.md>
 - <https://slint.dev>

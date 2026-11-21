@@ -36,8 +36,8 @@ rfd = { version = "=0.18.0", default-features = false }
 directories = "6.0.0"
 
 [workspace.lints.rust]
-# Deny, not forbid: a reviewed FFI module must be able to opt out later
-# (docs/planning/studio-v1/02-REPOSITORY-SETUP.md). Wholly safe crates add
+# Deny, not forbid: a reviewed FFI module must be able to opt out later.
+# Wholly safe crates add
 # `#![forbid(unsafe_code)]` themselves.
 unsafe_code = "deny"
 missing_docs = "warn"
