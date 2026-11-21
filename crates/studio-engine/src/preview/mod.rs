@@ -856,9 +856,18 @@ impl Previews {
         open.seek(context, from)?;
         let started = Instant::now();
         let mut shown = started;
+        // The newest frame that was skipped as late. Playback must still end
+        // on the stream's last frame, so it is sent if nothing follows it.
+        let mut skipped = None;
         loop {
             context.check()?;
             let Some((index, decoded)) = open.next(context)? else {
+                if let Some((index, decoded)) = skipped.take() {
+                    let (rendered, frame_size, basis) = render(open, &decoded, view, size)?;
+                    let header = header_of(generation, open, index, &rendered, frame_size, basis);
+                    context.picture(header, rendered.pixels);
+                    *last = Some(index);
+                }
                 if last.is_none() {
                     return Err(out_of_range(from, open.frame_count()));
                 }
@@ -870,30 +879,44 @@ impl Previews {
             // Late: the next frame is already due. Skipped, unless nothing
             // was shown for a while.
             if last.is_some() && now >= next_due && now < shown + MIN_PLAYBACK_INTERVAL {
+                skipped = Some((index, decoded));
                 continue;
             }
+            skipped = None;
             let (rendered, frame_size, basis) = render(open, &decoded, view, size)?;
             drop(decoded);
             if !context.wait_until(due) {
                 return Err(Stopped::Superseded);
             }
-            let header = PictureHeader {
-                generation,
-                origin: open.origin(),
-                frame: index,
-                time: open.time(index),
-                frame_count: open.frame_count(),
-                width: rendered.width,
-                height: rendered.height,
-                frame_width: frame_size.0,
-                frame_height: frame_size.1,
-                view: rendered.view,
-                basis,
-            };
+            let header = header_of(generation, open, index, &rendered, frame_size, basis);
             context.picture(header, rendered.pixels);
             *last = Some(index);
             shown = Instant::now();
         }
+    }
+}
+
+/// The header of a played picture.
+fn header_of(
+    generation: u64,
+    open: &Target,
+    index: u64,
+    rendered: &Rendered,
+    frame_size: (u32, u32),
+    basis: ColorBasis,
+) -> PictureHeader {
+    PictureHeader {
+        generation,
+        origin: open.origin(),
+        frame: index,
+        time: open.time(index),
+        frame_count: open.frame_count(),
+        width: rendered.width,
+        height: rendered.height,
+        frame_width: frame_size.0,
+        frame_height: frame_size.1,
+        view: rendered.view,
+        basis,
     }
 }
 
