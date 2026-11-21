@@ -20,7 +20,7 @@ use crate::job::{Failure, JobReport, JobSpec, Progress, SourceFacts, Stage, Wire
 use crate::settings::OutputKind;
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -154,6 +154,14 @@ pub enum Event {
     Probed {
         /// What the source's header says.
         facts: SourceFacts,
+    },
+    /// The job created its temporary file, beside the destination. Sent once,
+    /// before any output is written. If the worker dies without a terminal
+    /// event, this file is what it leaves behind; after any terminal event it
+    /// is gone.
+    Working {
+        /// The temporary file.
+        partial: WirePath,
     },
     /// The job entered a stage.
     Stage {

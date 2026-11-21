@@ -367,3 +367,89 @@ pub fn decode(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
         Err(_) => Err("the decode thread panicked".into()),
     }
 }
+
+/// The path `Working` announced, asserting it came exactly once, after
+/// `Stage::Encoding` and before the first `Progress` or later stage, and
+/// that it lies in `dir`. `None` when no `Working` was sent.
+pub fn announced(events: &[Event], dir: &Path) -> Option<PathBuf> {
+    use studio_domain::job::Stage;
+    let at: Vec<usize> = (0..events.len())
+        .filter(|&i| matches!(events[i], Event::Working { .. }))
+        .collect();
+    let [at] = at.as_slice() else {
+        assert!(at.is_empty(), "Working sent {} times", at.len());
+        return None;
+    };
+    let before = |f: fn(&Event) -> bool| events.iter().position(f).is_none_or(|i| *at < i);
+    assert!(
+        events[..*at].iter().any(|e| matches!(
+            e,
+            Event::Stage {
+                stage: Stage::Encoding
+            }
+        )),
+        "Working before Stage::Encoding"
+    );
+    assert!(
+        before(|e| matches!(e, Event::Progress { .. })),
+        "Working after Progress"
+    );
+    assert!(
+        before(
+            |e| matches!(e, Event::Stage { stage } if *stage != Stage::Encoding && *stage != Stage::Checking)
+        ),
+        "Working after a later stage"
+    );
+    let Event::Working { partial } = &events[*at] else {
+        return None;
+    };
+    let path = partial.to_path_buf().ok()?;
+    assert_eq!(
+        path.parent(),
+        Some(dir),
+        "{} is not beside the destination",
+        path.display()
+    );
+    Some(path)
+}
+
+/// Like [`run_job`], also checking while the job runs that the announced
+/// file is an existing regular file. Returns the events, the end and the
+/// announced path.
+pub fn run_announced(
+    job: JobSpec,
+    mut hook: impl FnMut(&Event, &AtomicBool) + Send + 'static,
+) -> (Vec<Event>, Event, Option<PathBuf>) {
+    let destination = job.destination.to_path_buf().unwrap_or_default();
+    let dir = destination.parent().map_or_default(Path::to_path_buf);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&seen);
+    let (events, end) = run_job(job, move |event, cancel| {
+        if let Event::Working { partial } = event {
+            let live = partial
+                .to_path_buf()
+                .ok()
+                .and_then(|p| fs::symlink_metadata(p).ok())
+                .is_some_and(|m| m.is_file());
+            if let Ok(mut seen) = sink.lock() {
+                seen.push(live);
+            }
+        }
+        hook(event, cancel);
+    });
+    let seen = seen.lock().map_or_default(|s| s.clone());
+    let path = announced(&events, &dir);
+    assert_eq!(seen.is_empty(), path.is_none());
+    assert!(
+        seen.iter().all(|live| *live),
+        "the announced file did not exist"
+    );
+    if let Some(path) = &path {
+        assert!(
+            !path.exists(),
+            "{} remains after the terminal event",
+            path.display()
+        );
+    }
+    (events, end, path)
+}

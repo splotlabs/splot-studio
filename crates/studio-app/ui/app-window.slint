@@ -7,7 +7,7 @@
 // Nothing here touches files, processes or the codec. The only state kept here
 // is view state: whether Advanced is open.
 
-import { AboutSlint, Button, ComboBox, Palette, SpinBox } from "std-widgets.slint";
+import { AboutSlint, Button, ComboBox, Palette, ScrollView, SpinBox } from "std-widgets.slint";
 import { Tokens } from "tokens.slint";
 
 // Re-exported so Rust can pin the appearance for renderer snapshots.
@@ -20,7 +20,35 @@ export enum Tone { neutral, success, warning, error }
 export enum SourceView { none, probing, ready, unreadable }
 
 // Where the current or last job is. `none` shows the Convert button.
-export enum JobView { none, running, cancelling, completed, cancelled, failed, lost }
+export enum JobView { none, running, cancelling, completed, cancelled, failed, lost, interrupted }
+
+// How the queue is shown: the empty state, the one-file card, or a list.
+export enum ViewMode { empty, single, list }
+
+// A row's state, for its icon; `state-text` always says it in words.
+export enum RowState { probing, waiting, unreadable, converting, done, failed, cancelled, interrupted }
+
+// One file of the list.
+export struct QueueRow {
+    name: string,
+    // "1080p  •  412 MB", or what is known so far.
+    line: string,
+    state: RowState,
+    state-text: string,
+    // "Remove", "Cancel", "Retry", "Show in Folder".
+    action: string,
+    action-description: string,
+    progress-known: bool,
+    progress: float,
+    // Name, facts and state for screen readers.
+    accessible: string,
+}
+
+// A one-line notice under the wordmark.
+export struct Notice {
+    text: string,
+    tone: Tone,
+}
 
 // One fact the engine read from the source header.
 export struct Fact {
@@ -195,9 +223,14 @@ component PrimaryButton inherits KeyboardFocus {
 }
 
 // A quiet text action ("Change…", "Advanced"). Enter or Space activates it.
+// `quiet` makes it smaller and grey until pointed at, for the many rows of
+// the file list.
 component LinkButton inherits KeyboardFocus {
     in property <string> text;
     in property <string> description;
+    in property <bool> quiet;
+    // A quiet action in the accent colour: the selected row's.
+    in property <bool> highlighted;
     callback clicked();
 
     min-height: Tokens.control-height;
@@ -231,8 +264,11 @@ component LinkButton inherits KeyboardFocus {
     HorizontalLayout {
         Text {
             text: root.text;
-            color: !root.enabled ? Tokens.text-disabled : touch.has-hover ? Tokens.accent-hover : Tokens.accent;
-            font-size: Tokens.type-body * 1rem;
+            color: !root.enabled ? Tokens.text-disabled
+                : touch.has-hover ? Tokens.accent-hover
+                : root.quiet && !root.highlighted ? Tokens.text-secondary
+                : Tokens.accent;
+            font-size: (root.quiet ? Tokens.type-caption : Tokens.type-body) * 1rem;
             font-weight: Tokens.weight-semibold;
             vertical-alignment: center;
             accessible-role: none;
@@ -438,6 +474,334 @@ component FactRow inherits HorizontalLayout {
     }
 }
 
+
+// A row's state as a small drawn icon. Never alone: the row says the same
+// in words next to it.
+component StateIcon inherits Rectangle {
+    in property <RowState> state;
+    property <color> ink: state == RowState.done ? Tokens.success
+        : state == RowState.failed || state == RowState.unreadable ? Tokens.error
+        : state == RowState.interrupted ? Tokens.warning
+        : state == RowState.converting ? Tokens.accent
+        : Tokens.text-secondary;
+    property <bool> filled: state == RowState.done || state == RowState.failed || state == RowState.interrupted;
+    width: 16px;
+    height: 16px;
+    border-radius: 8px;
+    background: self.filled ? self.ink : transparent;
+    border-width: self.filled ? 0px : 1.5px;
+    border-color: state == RowState.probing ? Tokens.text-disabled : self.ink;
+    accessible-role: none;
+
+    if root.state == RowState.converting: Rectangle {
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: root.ink;
+    }
+
+    if root.state == RowState.done: Path {
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M 4.5 8.3 L 7 10.8 L 11.6 5.6";
+        stroke: Tokens.on-accent;
+        stroke-width: 1.8px;
+        fill: transparent;
+    }
+
+    if root.state == RowState.failed || root.state == RowState.unreadable: Path {
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M 5.4 5.4 L 10.6 10.6 M 10.6 5.4 L 5.4 10.6";
+        stroke: root.state == RowState.failed ? Tokens.on-accent : root.ink;
+        stroke-width: 1.7px;
+        fill: transparent;
+    }
+
+    if root.state == RowState.interrupted: Path {
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M 8 4.4 L 8 9 M 8 11.2 L 8 11.9";
+        stroke: Tokens.on-accent;
+        stroke-width: 1.8px;
+        fill: transparent;
+    }
+
+    if root.state == RowState.cancelled: Path {
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: "M 5 8 L 11 8";
+        stroke: root.ink;
+        stroke-width: 1.6px;
+        fill: transparent;
+    }
+}
+
+// One row of the file list: icon, name, facts and state in words, and the
+// one quiet action that fits the state. Selecting it shows its details
+// under Advanced.
+component FileRow inherits Rectangle {
+    in property <QueueRow> file;
+    in property <bool> selected;
+    // The list has keyboard focus and this is the selected row.
+    in property <bool> ring;
+    in property <bool> last;
+    in property <int> index;
+    in property <int> count;
+    in property <bool> actions-enabled;
+    callback select();
+    callback act();
+
+    background: root.selected ? Tokens.row-selected : touch.has-hover ? Tokens.row-hover : transparent;
+    animate background { duration: Tokens.motion-short; }
+    accessible-role: list-item;
+    accessible-label: root.file.accessible;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.selected;
+    accessible-item-index: root.index;
+    accessible-item-count: root.count;
+    accessible-action-default => {
+        root.select();
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.select();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: Tokens.space-3;
+        padding-right: Tokens.space-2;
+        spacing: Tokens.space-3;
+
+        StateIcon {
+            state: root.file.state;
+            y: (parent.height - self.height) / 2;
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 1px;
+
+            Text {
+                text: root.file.name;
+                color: Tokens.text;
+                font-size: Tokens.type-body * 1rem;
+                font-weight: Tokens.weight-semibold;
+                overflow: elide;
+                accessible-role: none;
+            }
+
+            HorizontalLayout {
+                spacing: Tokens.space-2;
+
+                if root.file.line != "": Text {
+                    horizontal-stretch: 0;
+                    text: root.file.line + "  •";
+                    color: Tokens.text-secondary;
+                    font-size: Tokens.type-caption * 1rem;
+                    accessible-role: none;
+                }
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.file.state-text;
+                    color: root.file.state == RowState.failed || root.file.state == RowState.unreadable ? Tokens.error
+                        : root.file.state == RowState.interrupted ? Tokens.warning
+                        : root.file.state == RowState.done ? Tokens.success
+                        : Tokens.text-secondary;
+                    font-size: Tokens.type-caption * 1rem;
+                    font-weight: root.file.state == RowState.failed || root.file.state == RowState.unreadable || root.file.state == RowState.interrupted ? Tokens.weight-semibold : Tokens.weight-regular;
+                    overflow: elide;
+                    accessible-role: none;
+                }
+            }
+        }
+
+        if root.file.action != "": LinkButton {
+            text: root.file.action;
+            quiet: true;
+            highlighted: root.selected;
+            description: root.file.action-description + " (" + root.file.name + ")";
+            enabled: root.actions-enabled;
+            // The list is one Tab stop; Enter acts on its selected row.
+            focus-on-tab-navigation: false;
+            clicked => {
+                root.act();
+            }
+        }
+    }
+
+    // A thin progress line along the bottom of the converting row.
+    if root.file.state == RowState.converting: Rectangle {
+        x: Tokens.space-3;
+        y: parent.height - 4px;
+        width: parent.width - 2 * Tokens.space-3;
+        height: 2px;
+        border-radius: 1px;
+        background: Tokens.border;
+        clip: true;
+
+        if root.file.progress-known: Rectangle {
+            x: 0;
+            width: parent.width * max(0, min(1, root.file.progress));
+            height: parent.height;
+            background: Tokens.accent;
+            animate width { duration: Tokens.motion-medium; }
+        }
+
+        if !root.file.progress-known: Rectangle {
+            property <bool> started;
+            width: parent.width * 0.3;
+            height: parent.height;
+            background: Tokens.accent;
+            x: self.started ? parent.width * 0.7 : 0;
+            init => {
+                self.started = true;
+            }
+            animate x {
+                duration: 1100ms;
+                easing: ease-in-out;
+                iteration-count: -1;
+                direction: alternate;
+            }
+        }
+    }
+
+    if !root.last && root.file.state != RowState.converting: Rectangle {
+        x: Tokens.space-3 + 16px + Tokens.space-3;
+        y: parent.height - 1px;
+        width: parent.width - self.x;
+        height: 1px;
+        background: Tokens.border;
+    }
+
+    FocusRing {
+        shown: root.ring;
+        x: 2px;
+        y: 2px;
+        width: root.width - 4px;
+        height: root.height - 4px;
+        radius: Tokens.radius-small;
+    }
+}
+
+// The file list: one Tab stop. Up and Down (Home, End) choose a row,
+// Enter or Space performs its action, Delete removes a file that has not
+// run. At most `visible-rows` are shown; the rest scroll inside the list.
+component FileList inherits KeyboardFocus {
+    in property <[QueueRow]> rows;
+    in property <int> selected;
+    in property <bool> actions-enabled;
+    in property <int> visible-rows: 5;
+    callback row-selected(int);
+    callback row-action(int);
+    callback remove-requested(int);
+
+    property <length> row-height: 48px;
+    property <int> count: root.rows.length;
+    height: min(root.count, root.visible-rows) * root.row-height;
+    accessible-role: list;
+    accessible-label: "Files";
+    accessible-description: "Up and Down choose a file. Enter: " + (root.selected >= 0 && root.selected < root.count ? root.rows[root.selected].action : "") + ". Delete removes a file that has not converted.";
+
+    function reveal(i: int) {
+        if i * root.row-height < -scroll.content-y {
+            scroll.content-y = -i * root.row-height;
+        } else if (i + 1) * root.row-height > -scroll.content-y + scroll.visible-height {
+            scroll.content-y = -((i + 1) * root.row-height - scroll.visible-height);
+        }
+    }
+
+    function choose(i: int) {
+        root.keyboard-used();
+        root.row-selected(i);
+        root.reveal(i);
+    }
+
+    changed selected => {
+        if root.selected >= 0 {
+            root.reveal(root.selected);
+        }
+    }
+
+    key-pressed(event) => {
+        if root.count == 0 {
+            return reject;
+        }
+        if event.text == Key.DownArrow {
+            root.choose(root.selected < 0 ? 0 : min(root.count - 1, root.selected + 1));
+            return accept;
+        }
+        if event.text == Key.UpArrow {
+            root.choose(root.selected < 0 ? 0 : max(0, root.selected - 1));
+            return accept;
+        }
+        if event.text == Key.Home {
+            root.choose(0);
+            return accept;
+        }
+        if event.text == Key.End {
+            root.choose(root.count - 1);
+            return accept;
+        }
+        if root.selected >= 0 && (event.text == Key.Return || event.text == " ") {
+            root.keyboard-used();
+            if root.actions-enabled {
+                root.row-action(root.selected);
+            }
+            return accept;
+        }
+        if root.selected >= 0 && (event.text == Key.Delete || event.text == Key.Backspace) {
+            root.keyboard-used();
+            if root.actions-enabled {
+                root.remove-requested(root.selected);
+            }
+            return accept;
+        }
+        reject
+    }
+
+    scroll := ScrollView {
+        width: root.width;
+        height: root.height;
+        content-width: self.visible-width;
+        content-height: root.count * root.row-height;
+
+        for row[i] in root.rows: FileRow {
+            x: 0;
+            y: i * root.row-height;
+            width: scroll.visible-width;
+            height: root.row-height;
+            file: row;
+            index: i;
+            count: root.count;
+            last: i == root.count - 1;
+            selected: i == root.selected;
+            ring: root.ring && i == root.selected;
+            actions-enabled: root.actions-enabled;
+            select => {
+                root.focus();
+                root.row-selected(i);
+            }
+            act => {
+                root.row-action(i);
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     // Identity
     in property <string> app-version;
@@ -460,6 +824,21 @@ export component AppWindow inherits Window {
     // The empty state's caption.
     in property <string> empty-caption;
 
+    // How the queue is shown, its rows and which one is selected. In the
+    // list, the source properties above describe the selected row.
+    in property <ViewMode> view-mode;
+    in property <[QueueRow]> rows;
+    in property <int> selected-row: -1;
+    // "4 files".
+    in property <string> list-title;
+    // Files can be added now (no question is open).
+    in property <bool> can-add: true;
+    // The one-file card's link replaces the file (Change…) or, while it
+    // converts, adds another (Add…).
+    in property <bool> card-replaces: true;
+    // Calm one-line notices: a restored list, a journal problem, saving.
+    in property <[Notice]> notices;
+
     // The Video track choice, only when there is more than one.
     in property <bool> has-track-picker;
     in property <[string]> track-labels;
@@ -468,6 +847,8 @@ export component AppWindow inherits Window {
 
     // The video-only confirmation. Rust shows and closes it from the state.
     in property <string> sheet-body;
+    // One line per file when several files are asked about.
+    in property <[string]> sheet-items;
     // Platform button order: Windows puts the confirming button first.
     in property <bool> confirm-first;
     out property <bool> sheet-open;
@@ -496,12 +877,30 @@ export component AppWindow inherits Window {
     in property <int> crf-max;
     in-out property <int> crf;
 
-    // A job is running: source, destination and settings are locked.
+    // The settings shown are a file's own (it is converting or converted)
+    // and cannot be changed.
     in property <bool> locked;
     in property <bool> can-encode;
     in property <string> encode-status;
     // Neutral for a next step; warning or error when something needs fixing.
     in property <Tone> encode-status-tone;
+    // "Convert", "Convert 3 Files" or "Continue", when anything can start.
+    in property <string> primary-text: "Convert";
+    in property <bool> show-primary: true;
+    // "2 of 5" while a run converts several files.
+    in property <string> run-position;
+    // "4 converted, 1 failed" once files have finished in the list.
+    in property <string> summary-text;
+    in property <bool> can-clear-finished;
+    // Above the settings when they show a file's own settings, read-only.
+    in property <string> settings-note;
+    // The selected file's destination and video track can be changed.
+    in property <bool> destination-editable;
+    // The selected file's result, under Advanced in the list.
+    in property <string> detail-headline;
+    in property <Tone> detail-tone;
+    in property <string> detail-text;
+    in property <[CheckRow]> detail-checks;
 
     // The current or last job.
     in property <JobView> job-view;
@@ -525,6 +924,11 @@ export component AppWindow inherits Window {
     in-out property <bool> advanced-open;
 
     callback open-requested();
+    callback change-requested();
+    callback row-selected(int);
+    callback row-action(int);
+    callback remove-requested(int);
+    callback clear-finished();
     callback quit-requested();
     callback quality-selected(int);
     callback priority-selected(int);
@@ -556,13 +960,14 @@ export component AppWindow inherits Window {
     }
 
     property <keys> open-keys: @keys(Control + O);
-    property <bool> has-source: root.source-view != SourceView.none;
+    property <bool> has-source: root.view-mode != ViewMode.empty;
     property <bool> job-active: root.job-view == JobView.running || root.job-view == JobView.cancelling;
     property <length> main-width: 416px;
     property <length> advanced-width: 312px;
     property <length> card-padding: Tokens.space-6;
 
-    title: root.has-source ? root.source-name + " — Splot Studio" : "Splot Studio";
+    title: root.view-mode == ViewMode.list ? root.list-title + " — Splot Studio"
+        : root.has-source ? root.source-name + " — Splot Studio" : "Splot Studio";
     background: Tokens.raised;
     // The window is the card: its size is pinned (min == max) to the content
     // plus whatever sits above it (the in-window menu bar, if any), so it is
@@ -598,7 +1003,7 @@ export component AppWindow inherits Window {
             MenuItem {
                 title: "Open…";
                 shortcut: root.open-keys;
-                enabled: !root.locked && !root.sheet-open;
+                enabled: root.can-add && !root.sheet-open;
                 activated => {
                     root.open-requested();
                 }
@@ -648,17 +1053,30 @@ export component AppWindow inherits Window {
                             Wordmark { }
                         }
 
+                        if root.notices.length > 0: VerticalLayout {
+                            spacing: Tokens.space-1;
+
+                            for notice in root.notices: Text {
+                                text: notice.text;
+                                color: notice.tone == Tone.neutral ? Tokens.text-secondary : Tones.color(notice.tone);
+                                font-size: Tokens.type-caption * 1rem;
+                                font-weight: notice.tone == Tone.neutral ? Tokens.weight-regular : Tokens.weight-semibold;
+                                wrap: word-wrap;
+                                accessible-live-region: polite;
+                            }
+                        }
+
                         // Source zone: an intentional empty state or the file card.
                         if !root.has-source: Rectangle {
                             height: 176px;
                             border-radius: Tokens.radius-medium + 2px;
                             background: Tokens.track;
                             border-width: 1px;
-                            border-color: zone.has-hover && !root.locked ? Tokens.accent : Tokens.border-strong;
+                            border-color: zone.has-hover && root.can-add ? Tokens.accent : Tokens.border-strong;
                             animate border-color { duration: Tokens.motion-short; }
 
                             zone := TouchArea {
-                                enabled: !root.locked;
+                                enabled: root.can-add;
                                 mouse-cursor: pointer;
                                 clicked => {
                                     root.open-requested();
@@ -689,7 +1107,7 @@ export component AppWindow inherits Window {
 
                                     open-button := Button {
                                         text: "Open…";
-                                        enabled: !root.locked;
+                                        enabled: root.can-add;
                                         accessible-description: "Choose a video file (" + root.open-keys.to-string() + ")";
                                         clicked => {
                                             root.open-requested();
@@ -699,7 +1117,73 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        if root.has-source: VerticalLayout {
+                        if root.view-mode == ViewMode.list: VerticalLayout {
+                            spacing: Tokens.space-2;
+
+                            Rectangle {
+                                border-radius: Tokens.radius-medium + 2px;
+                                background: Tokens.track;
+                                border-width: 1px;
+                                border-color: Tokens.border;
+                                clip: true;
+
+                                VerticalLayout {
+                                    HorizontalLayout {
+                                        padding-left: Tokens.space-3;
+                                        padding-right: Tokens.space-2;
+                                        padding-top: Tokens.space-1;
+                                        padding-bottom: Tokens.space-1;
+                                        spacing: Tokens.space-3;
+
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            text: root.list-title;
+                                            color: Tokens.text-secondary;
+                                            font-size: Tokens.type-caption * 1rem;
+                                            font-weight: Tokens.weight-semibold;
+                                            vertical-alignment: center;
+                                            accessible-role: none;
+                                        }
+
+                                        LinkButton {
+                                            text: "Add…";
+                                            enabled: root.can-add;
+                                            description: "Add videos to the list (" + root.open-keys.to-string() + ")";
+                                            clicked => {
+                                                root.open-requested();
+                                            }
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        height: 1px;
+                                        background: Tokens.border;
+                                    }
+
+                                    FileList {
+                                        rows: root.rows;
+                                        selected: root.selected-row;
+                                        actions-enabled: !root.sheet-open;
+                                        row-selected(i) => {
+                                            root.row-selected(i);
+                                        }
+                                        row-action(i) => {
+                                            root.row-action(i);
+                                        }
+                                        remove-requested(i) => {
+                                            root.remove-requested(i);
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.omission-summary != "" && root.source-view != SourceView.unreadable: Caption {
+                                text: root.omission-summary;
+                                color: Tokens.text;
+                            }
+                        }
+
+                        if root.view-mode == ViewMode.single: VerticalLayout {
                                 spacing: Tokens.space-2;
 
                             Rectangle {
@@ -753,11 +1237,15 @@ export component AppWindow inherits Window {
                                         }
 
                                         LinkButton {
-                                            text: "Change…";
-                                            enabled: !root.locked;
-                                            description: "Choose another video (" + root.open-keys.to-string() + ")";
+                                            text: root.card-replaces ? "Change…" : "Add…";
+                                            enabled: root.can-add;
+                                            description: root.card-replaces ? "Choose another video" : "Add videos to convert after this one (" + root.open-keys.to-string() + ")";
                                             clicked => {
-                                                root.open-requested();
+                                                if root.card-replaces {
+                                                    root.change-requested();
+                                                } else {
+                                                    root.open-requested();
+                                                }
                                             }
                                         }
                                     }
@@ -781,6 +1269,10 @@ export component AppWindow inherits Window {
                                 text: root.omission-summary;
                                 color: Tokens.text;
                             }
+                        }
+
+                        if root.settings-note != "": Caption {
+                            text: root.settings-note;
                         }
 
                         // Quality
@@ -864,11 +1356,11 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             spacing: Tokens.space-2;
 
-                            if root.job-view == JobView.cancelled || root.job-view == JobView.failed || root.job-view == JobView.lost: Rectangle {
+                            if root.job-view == JobView.cancelled || root.job-view == JobView.failed || root.job-view == JobView.lost || root.job-view == JobView.interrupted: Rectangle {
                                 border-radius: Tokens.radius-medium;
                                 background: Tokens.track;
                                 border-width: 1px;
-                                border-color: root.job-view == JobView.cancelled ? Tokens.border : Tokens.error;
+                                border-color: root.job-view == JobView.cancelled ? Tokens.border : root.job-view == JobView.interrupted ? Tokens.warning : Tokens.error;
 
                                 VerticalLayout {
                                     padding: Tokens.space-3;
@@ -905,14 +1397,38 @@ export component AppWindow inherits Window {
                             if !root.job-active && root.job-view != JobView.completed: VerticalLayout {
                                 spacing: Tokens.space-2;
 
+                                if root.summary-text != "": HorizontalLayout {
+                                    spacing: Tokens.space-3;
+
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        text: root.summary-text;
+                                        color: Tokens.text;
+                                        font-size: Tokens.type-body * 1rem;
+                                        font-weight: Tokens.weight-semibold;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        accessible-live-region: polite;
+                                    }
+
+                                    if root.can-clear-finished: LinkButton {
+                                        text: "Clear Finished";
+                                        enabled: !root.sheet-open;
+                                        description: "Remove the converted files from the list. The files themselves stay.";
+                                        clicked => {
+                                            root.clear-finished();
+                                        }
+                                    }
+                                }
+
                                 if root.destination-line != "": Caption {
                                     text: root.destination-line;
                                     wrap: no-wrap;
                                     overflow: elide;
                                 }
 
-                                PrimaryButton {
-                                    text: "Convert";
+                                if root.show-primary: PrimaryButton {
+                                    text: root.primary-text;
                                     enabled: root.can-encode;
                                     description: root.encode-status;
                                     clicked => {
@@ -920,7 +1436,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
-                                if !root.can-encode: Caption {
+                                if !root.can-encode && root.encode-status != "": Caption {
                                     text: root.encode-status;
                                     color: root.encode-status-tone == Tone.neutral ? Tokens.text-secondary : Tones.color(root.encode-status-tone);
                                     font-weight: root.encode-status-tone == Tone.error ? Tokens.weight-semibold : Tokens.weight-regular;
@@ -943,6 +1459,13 @@ export component AppWindow inherits Window {
                                         font-weight: Tokens.weight-semibold;
                                         overflow: elide;
                                         accessible-live-region: polite;
+                                    }
+
+                                    if root.run-position != "": Text {
+                                        text: root.run-position;
+                                        color: Tokens.text-secondary;
+                                        font-size: Tokens.type-body * 1rem;
+                                        accessible-label: "File " + root.run-position;
                                     }
 
                                     Text {
@@ -1192,7 +1715,7 @@ export component AppWindow inherits Window {
 
                                         LinkButton {
                                             text: "Choose…";
-                                            enabled: root.has-destination && !root.locked && root.advanced-open;
+                                            enabled: root.has-destination && root.destination-editable && root.advanced-open && !root.sheet-open;
                                             description: "Choose where to save the converted file";
                                             clicked => {
                                                 root.choose-destination-requested();
@@ -1220,6 +1743,63 @@ export component AppWindow inherits Window {
                                     }
                                 }
 
+                                if root.detail-headline != "": VerticalLayout {
+                                    spacing: Tokens.space-1;
+
+                                    SectionTitle {
+                                        text: "RESULT";
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: Tokens.space-2;
+
+                                        StatusDot {
+                                            tone: root.detail-tone;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            text: root.detail-headline;
+                                            color: Tokens.text;
+                                            font-size: Tokens.type-caption * 1rem;
+                                            font-weight: Tokens.weight-semibold;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+
+                                    if root.detail-text != "": Text {
+                                        text: root.detail-text;
+                                        color: Tokens.text;
+                                        font-size: Tokens.type-caption * 1rem;
+                                        wrap: word-wrap;
+                                    }
+
+                                    for check in root.detail-checks: HorizontalLayout {
+                                        spacing: Tokens.space-2;
+                                        accessible-role: text;
+                                        accessible-label: check.name + ": " + check.outcome + (check.detail != "" ? ". " + check.detail : "");
+
+                                        Text {
+                                            width: 56px;
+                                            text: check.outcome;
+                                            color: Tones.color(check.tone);
+                                            font-size: Tokens.type-caption * 1rem;
+                                            font-weight: Tokens.weight-bold;
+                                            accessible-role: none;
+                                        }
+
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            text: check.name + (check.detail != "" ? " — " + check.detail : "");
+                                            color: Tokens.text-secondary;
+                                            font-size: Tokens.type-caption * 1rem;
+                                            wrap: word-wrap;
+                                            accessible-role: none;
+                                        }
+                                    }
+                                }
+
                                 if root.has-track-picker: VerticalLayout {
                                     spacing: Tokens.space-1;
 
@@ -1230,7 +1810,7 @@ export component AppWindow inherits Window {
                                     ComboBox {
                                         model: root.track-labels;
                                         current-index <=> root.track-index;
-                                        enabled: !root.locked && root.advanced-open && root.source-view != SourceView.probing;
+                                        enabled: root.destination-editable && root.advanced-open && root.source-view != SourceView.probing;
                                         accessible-label: "Video track";
                                         accessible-description: "The one video track that is converted";
                                         selected => {
@@ -1343,6 +1923,29 @@ export component AppWindow inherits Window {
                             wrap: word-wrap;
                         }
 
+                        if root.sheet-items.length > 0: VerticalLayout {
+                            spacing: Tokens.space-1;
+
+                            for line in root.sheet-items: HorizontalLayout {
+                                spacing: Tokens.space-2;
+
+                                Text {
+                                    text: "•";
+                                    color: Tokens.text-secondary;
+                                    font-size: Tokens.type-caption * 1rem;
+                                    accessible-role: none;
+                                }
+
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: line;
+                                    color: Tokens.text;
+                                    font-size: Tokens.type-caption * 1rem;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
                         HorizontalLayout {
                             alignment: end;
                             spacing: Tokens.space-2;
@@ -1446,6 +2049,59 @@ export component AppWindow inherits Window {
                             about.close();
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+// Shown instead of the main window when another Splot Studio already owns
+// the list of files: only one may run, so that list is never written twice.
+export component AlreadyOpenWindow inherits Window {
+    callback quit-requested();
+
+    title: "Splot Studio";
+    background: Tokens.raised;
+    min-width: 408px;
+    max-width: 408px;
+    min-height: card.preferred-height;
+    max-height: card.preferred-height;
+
+    card := VerticalLayout {
+        padding: Tokens.space-6;
+        spacing: Tokens.space-3;
+
+        HorizontalLayout {
+            alignment: start;
+
+            Wordmark { }
+        }
+
+        Text {
+            text: "Splot Studio is already open";
+            color: Tokens.text;
+            font-size: Tokens.type-title * 1rem;
+            font-weight: Tokens.weight-semibold;
+            wrap: word-wrap;
+            accessible-live-region: polite;
+        }
+
+        Caption {
+            text: "Use the window that is already open. Only one can run at a time, so the list of files is kept in one place.";
+        }
+
+        HorizontalLayout {
+            alignment: end;
+            padding-top: Tokens.space-2;
+
+            Button {
+                text: "Quit";
+                accessible-description: "Close this window";
+                init => {
+                    self.focus();
+                }
+                clicked => {
+                    root.quit-requested();
                 }
             }
         }

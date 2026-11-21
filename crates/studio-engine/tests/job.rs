@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
-use common::{Clip, TestResult, decode, leftovers, run_job, settings, spec};
+use common::{Clip, TestResult, decode, leftovers, run_announced, run_job, settings, spec};
 use splot_encode::SourceFrame;
 use studio_domain::job::{
     CheckKind, CheckOutcome, ChromaLayout, Disclosure, FailureCode, Rational, Stage,
@@ -35,7 +35,8 @@ fn encode_ok(
     let src = dir.path().join("in.y4m");
     clip.write(&src)?;
     let dst = dir.path().join(format!("out.{}", kind.extension()));
-    let (events, end) = run_job(spec(&src, &dst, kind), |_, _| {});
+    let (events, end, working) = run_announced(spec(&src, &dst, kind), |_, _| {});
+    assert!(working.is_some(), "no Working before {end:?}");
     let Event::Completed { report } = end else {
         return Err(format!("{clip:?} {kind:?}: {end:?}").into());
     };
@@ -412,17 +413,22 @@ fn a_destination_that_appears_during_the_job_is_kept() -> TestResult {
     Clip::new(16, 8, "420", 3).write(&src)?;
     let dst = dir.path().join("out.obu");
     let racer = dst.clone();
-    let (_, end) = run_job(spec(&src, &dst, OutputKind::Av2AnnexB), move |event, _| {
-        if matches!(
-            event,
-            Event::Stage {
-                stage: Stage::Publishing
+    let (_, end, working) =
+        run_announced(spec(&src, &dst, OutputKind::Av2AnnexB), move |event, _| {
+            if matches!(
+                event,
+                Event::Stage {
+                    stage: Stage::Publishing
+                }
+            ) {
+                let _ = fs::write(&racer, "someone else's");
             }
-        ) {
-            let _ = fs::write(&racer, "someone else's");
-        }
-    });
+        });
     assert_eq!(code(&end), Some(FailureCode::DestinationExists), "{end:?}");
+    assert!(
+        working.is_some(),
+        "Failed after the file was made, without Working"
+    );
     assert_eq!(fs::read(&dst)?, b"someone else's");
     assert_eq!(
         leftovers(dir.path(), &[&src, &dst]),
@@ -464,17 +470,24 @@ fn cancel_mid_encode_and_mid_verify_leaves_nothing() -> TestResult {
         let src = dir.path().join("in.y4m");
         Clip::new(16, 8, "420", 12).write(&src)?;
         let dst = dir.path().join("out.ivf");
-        let (events, end) = run_job(spec(&src, &dst, OutputKind::Ivf), move |event, cancel| {
-            let hit = match (at_stage, event) {
-                (Stage::Encoding, Event::Progress { progress }) => progress.frames_read == 3,
-                (stage, Event::Stage { stage: now }) => stage == *now && stage != Stage::Encoding,
-                _ => false,
-            };
-            if hit {
-                cancel.store(true, Ordering::Relaxed);
-            }
-        });
+        let (events, end, working) =
+            run_announced(spec(&src, &dst, OutputKind::Ivf), move |event, cancel| {
+                let hit = match (at_stage, event) {
+                    (Stage::Encoding, Event::Progress { progress }) => progress.frames_read == 3,
+                    (stage, Event::Stage { stage: now }) => {
+                        stage == *now && stage != Stage::Encoding
+                    }
+                    _ => false,
+                };
+                if hit {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+            });
         assert!(matches!(end, Event::Cancelled), "{at_stage:?}: {end:?}");
+        assert!(
+            working.is_some(),
+            "{at_stage:?}: Cancelled after the file was made"
+        );
         if at_stage == Stage::Encoding {
             let read = events.iter().filter_map(|e| match e {
                 Event::Progress { progress } => Some(progress.frames_read),
@@ -569,5 +582,33 @@ fn verification_catches_damaged_output() -> TestResult {
         };
         assert!(fails(&outcomes(other, 3)?[0]), "{kind:?}");
     }
+    Ok(())
+}
+
+/// A job cancelled before its temporary file exists announces none and
+/// leaves none.
+#[test]
+fn cancel_before_the_file_exists_announces_nothing() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let src = dir.path().join("in.y4m");
+    Clip::new(16, 8, "420", 3).write(&src)?;
+    let dst = dir.path().join("out.ivf");
+    let (events, end, working) =
+        run_announced(spec(&src, &dst, OutputKind::Ivf), |event, cancel| {
+            if matches!(
+                event,
+                Event::Stage {
+                    stage: Stage::Encoding
+                }
+            ) {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        });
+    assert!(matches!(end, Event::Cancelled), "{end:?}");
+    assert!(working.is_none(), "{events:?}");
+    assert_eq!(
+        leftovers(dir.path(), &[&src]),
+        Vec::<std::path::PathBuf>::new()
+    );
     Ok(())
 }

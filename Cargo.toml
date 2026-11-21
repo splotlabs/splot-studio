@@ -32,6 +32,8 @@ splot-validate = { git = "https://github.com/splotlabs/splot", branch = "main" }
 slint = { version = "=1.19.0", default-features = false }
 slint-build = "=1.19.0"
 rfd = { version = "=0.18.0", default-features = false }
+# GUI only (studio-app): the per-user application-data folder of each OS.
+directories = "6.0.0"
 
 [workspace.lints.rust]
 # Deny, not forbid: a reviewed FFI module must be able to opt out later

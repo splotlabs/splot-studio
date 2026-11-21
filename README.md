@@ -13,9 +13,10 @@ Windows, macOS and Linux. Processing is local; there is no web or browser target
 
 ## Status
 
-Milestone STUDIO-03: it converts **ordinary local video files** (MP4, MOV, MKV, WebM, TS, AVI)
+Milestone STUDIO-04: it converts **ordinary local video files** (MP4, MOV, MKV, WebM, TS, AVI)
 and Y4M to video-only AV2. Sources must be progressive, constant frame rate and SDR; anything
-else is refused with a reason. Encoding is slow: the codec is young.
+else is refused with a reason. Several files queue up and the list survives restarts.
+Encoding is slow: the codec is young.
 
 - `studio-app` (`splot-studio`): the Slint desktop app. Open a video, pick Quality and
   Priority, press Convert, watch real progress, cancel, reveal the result.

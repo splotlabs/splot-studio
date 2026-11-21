@@ -20,19 +20,29 @@
 //! frame yet), `unsupported` (refused when opened), `unsupported-job`
 //! (refused at Start), `changed` (the file changed before Start),
 //! `tool-missing` (no `FFmpeg` in this build) and `tool-missing-file` (an MP4
-//! opened without one).
+//! opened without one). Several files: `list` (done, failed, converting,
+//! waiting, refused; `list-advanced` selects the failed row), `running-list`
+//! (the second of five converting), `summary` (a finished run),
+//! `batch-confirm` (the confirmation for seven files), `save-failed` (the
+//! journal cannot be written), `many` (eight rows, the list scrolls) and
+//! `restored` (the list after the app stopped mid-job). `already-open` is the
+//! window a second instance shows.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Rgba8Pixel, SharedPixelBuffer};
-use studio_app::Palette;
 use studio_app::activity::Input;
-use studio_app::state::{AppState, Effect, Intent, ProbeFailure};
+use studio_app::journal::{Journal, JournalCause, JournalItem, JournalPartial, JournalState};
+use studio_app::recovery::{Disk, Kind};
+use studio_app::source::ProbeFailure;
+use studio_app::state::{AppState, Effect, Intent, Startup};
+use studio_app::{AlreadyOpenWindow, Palette};
 use studio_domain::job::{
     Check, CheckKind, CheckOutcome, ChromaLayout, Disclosure, Failure, FailureCode, JobReport,
-    Omissions, Progress, Rational, SourceFacts, SourceFingerprint, SourceReader, Stage, VideoTrack,
-    WirePath,
+    JobSpec, Omissions, Progress, Rational, SourceFacts, SourceFingerprint, SourceReader, Stage,
+    VideoTrack, WirePath,
 };
 use studio_domain::protocol::{Capabilities, Event, MediaTool, MediaToolOrigin};
 use studio_domain::settings::OutputKind;
@@ -112,26 +122,390 @@ fn capabilities(tool: bool) -> Capabilities {
     }
 }
 
+/// The snapshots' disk: nothing exists, so no name is taken.
+struct NoFiles;
+
+impl Disk for NoFiles {
+    fn kind(&self, _: &Path) -> Kind {
+        Kind::Missing
+    }
+}
+
+/// A state driven as the session drives it, with probes answered from a
+/// table instead of an engine.
+struct Driver {
+    state: AppState,
+    now: Instant,
+}
+
+impl Driver {
+    fn apply(&mut self, intent: Intent) -> Vec<Effect> {
+        self.state.apply(intent, self.now, &NoFiles).effects
+    }
+
+    fn apply_at(&mut self, intent: Intent, at: Instant) -> Vec<Effect> {
+        self.state.apply(intent, at, &NoFiles).effects
+    }
+
+    /// Answers the probes in `effects`, and those that follow, with
+    /// `answer`; returns the other effects.
+    fn answer(
+        &mut self,
+        mut effects: Vec<Effect>,
+        answer: &dyn Fn(&Path) -> Result<SourceFacts, ProbeFailure>,
+        size: u64,
+    ) -> Vec<Effect> {
+        let mut others = Vec::new();
+        loop {
+            let mut next = None;
+            for effect in effects {
+                match effect {
+                    Effect::Probe { item, request } => next = Some((item, request)),
+                    other => others.push(other),
+                }
+            }
+            let Some((item, request)) = next else {
+                return others;
+            };
+            // Plausible, different sizes for different files.
+            let spread = request.path.as_os_str().len() as u64 % 7;
+            self.state
+                .note_size(item, Some(size / 7 * (spread + 3) / 4));
+            effects = self.apply(Intent::ProbeAnswered {
+                id: request.id,
+                result: answer(&request.path),
+            });
+        }
+    }
+
+    fn add(
+        &mut self,
+        paths: &[&str],
+        answer: &dyn Fn(&Path) -> Result<SourceFacts, ProbeFailure>,
+        size: u64,
+    ) -> Vec<Effect> {
+        let effects = self.apply(Intent::FilesOpened(
+            paths.iter().map(PathBuf::from).collect(),
+        ));
+        self.answer(effects, answer, size)
+    }
+
+    fn job(&mut self, id: u64, input: Input) -> Vec<Effect> {
+        self.apply(Intent::Job { id, input })
+    }
+
+    fn started(effects: &[Effect]) -> Option<u64> {
+        effects.iter().find_map(|e| match e {
+            Effect::Start { id, .. } => Some(*id),
+            _ => None,
+        })
+    }
+
+    /// Publishes and completes job `id` with a verified report.
+    fn complete(&mut self, id: u64, destination: &str, long: bool) -> Vec<Effect> {
+        for stage in [Stage::Finalizing, Stage::Verifying, Stage::Publishing] {
+            self.job(id, Input::Event(Event::Stage { stage }));
+        }
+        self.job(
+            id,
+            Input::Event(Event::Completed {
+                report: report(destination, long),
+            }),
+        )
+    }
+
+    fn progress(&mut self, id: u64, encoded: u64) {
+        self.job(
+            id,
+            Input::Event(Event::Stage {
+                stage: Stage::Encoding,
+            }),
+        );
+        self.job(
+            id,
+            Input::Event(Event::Progress {
+                progress: Progress {
+                    frames_read: encoded + 14,
+                    frames_encoded: encoded,
+                    bytes_written: 2_481_337,
+                },
+            }),
+        );
+    }
+}
+
+fn report(destination: &str, long: bool) -> JobReport {
+    JobReport {
+        destination: WirePath::Utf8(destination.into()),
+        frames: 300,
+        bytes: 6_302_118,
+        checks: vec![
+            Check {
+                kind: CheckKind::Structure,
+                outcome: CheckOutcome::Passed,
+            },
+            Check {
+                kind: CheckKind::SplotDecode,
+                outcome: CheckOutcome::Passed,
+            },
+            Check {
+                kind: CheckKind::AvmDecode,
+                outcome: CheckOutcome::NotRun {
+                    reason: if long {
+                        "No AVM decoder is configured on this machine. Set one up to \
+                         compare an independent decode; until then this file is \
+                         checked only by Splot's own decoder."
+                            .into()
+                    } else {
+                        "No AVM decoder is configured on this machine.".into()
+                    },
+                },
+            },
+        ],
+        disclosures: vec![Disclosure::ColorUnspecified],
+    }
+}
+
+fn ok_y4m(frames: Option<u64>) -> impl Fn(&Path) -> Result<SourceFacts, ProbeFailure> {
+    move |_| Ok(facts(frames))
+}
+
+/// Answers each file of the list scenarios: `.mp4` as the phone clip,
+/// `.hdr.mov` as refused, everything else as the Y4M.
+fn list_answer(path: &Path) -> Result<SourceFacts, ProbeFailure> {
+    let name = path.to_string_lossy();
+    if name.ends_with(".hdr.mov") {
+        return Err(ProbeFailure {
+            code: Some(FailureCode::UnsupportedSource),
+            message: "The video is HDR (PQ transfer). Only SDR video is encoded".into(),
+        });
+    }
+    if name.ends_with(".mp4") {
+        Ok(mp4_facts())
+    } else {
+        Ok(SourceFacts {
+            height: if name.contains("drone") { 2160 } else { 1080 },
+            width: if name.contains("drone") { 3840 } else { 1920 },
+            ..facts(Some(300))
+        })
+    }
+}
+
+const LIST: [&str; 5] = [
+    "/home/user/Videos/park walk.y4m",
+    "/home/user/Videos/drone over the jetty.y4m",
+    "/home/user/Videos/harbour at dusk.mp4",
+    "/home/user/Videos/kitchen timelapse.y4m",
+    "/home/user/Videos/birthday candles.y4m",
+];
+
+/// The list scenarios: several files in one window.
+#[allow(clippy::too_many_lines)]
+fn list_scenario(name: &str, now: Instant) -> Result<AppState, String> {
+    let start = now.checked_sub(Duration::from_secs(83)).unwrap_or(now);
+    let mut d = Driver {
+        state: AppState::default(),
+        now: start,
+    };
+    d.apply(Intent::EngineAnswered(Ok(capabilities(true))));
+    match name {
+        "list" | "list-advanced" => {
+            // A finished file, a failure, one converting with its run,
+            // one waiting and one refused when it was read.
+            let files = [
+                LIST[0],
+                LIST[3],
+                LIST[1],
+                LIST[4],
+                "/home/user/Videos/sunset.hdr.mov",
+            ];
+            d.add(&files, &list_answer, 1_866_247_800);
+            let a = Driver::started(&d.apply(Intent::ConvertRequested)).ok_or("no start")?;
+            d.progress(a, 300);
+            let b = Driver::started(&d.complete(a, "/home/user/Videos/park walk.ivf", false))
+                .ok_or("no second start")?;
+            d.job(
+                b,
+                Input::Event(Event::Failed {
+                    failure: Failure {
+                        code: FailureCode::Output,
+                        message: "Writing the temporary file failed: No space left on device \
+                                  (os error 28)"
+                            .into(),
+                    },
+                }),
+            );
+            let c = d.state.items()[2]
+                .attempt()
+                .map(|a| a.request)
+                .ok_or("no third")?;
+            d.now = now;
+            d.progress(c, 117);
+            if name == "list-advanced" {
+                d.apply(Intent::RowSelected(1));
+            }
+        }
+        "running-list" => {
+            d.add(&LIST, &list_answer, 1_866_247_800);
+            d.apply(Intent::ConvertRequested);
+            let a = Driver::started(&d.apply(Intent::OmissionsConfirmed)).ok_or("no start")?;
+            d.progress(a, 300);
+            let b = Driver::started(&d.complete(a, "/home/user/Videos/park walk.ivf", false))
+                .ok_or("no second start")?;
+            d.now = now;
+            d.progress(b, 117);
+        }
+        "summary" => {
+            d.add(&LIST, &list_answer, 412_733_901);
+            d.apply(Intent::ConvertRequested);
+            let mut id = Driver::started(&d.apply(Intent::OmissionsConfirmed));
+            let mut n = 0;
+            while let Some(job) = id {
+                let effects = if n == 2 {
+                    d.job(
+                        job,
+                        Input::Event(Event::Failed {
+                            failure: Failure {
+                                code: FailureCode::UnsupportedSource,
+                                message: "The video has a variable frame rate".into(),
+                            },
+                        }),
+                    )
+                } else {
+                    let destination = d.state.items()[n].destination().path.display().to_string();
+                    d.complete(job, &destination, false)
+                };
+                id = Driver::started(&effects);
+                n += 1;
+            }
+        }
+        "batch-confirm" => {
+            let files = [
+                "/home/user/Videos/harbour at dusk.mp4",
+                "/home/user/Videos/ferry crossing.mp4",
+                "/home/user/Videos/park walk.y4m",
+                "/home/user/Videos/market morning.mp4",
+                "/home/user/Videos/street band.mp4",
+                "/home/user/Videos/tram ride.mp4",
+                "/home/user/Videos/rain on the window.mp4",
+                "/home/user/Videos/night bus.mp4",
+            ];
+            d.add(&files, &list_answer, 412_733_901);
+            d.apply(Intent::ConvertRequested);
+        }
+        "save-failed" => {
+            d.add(&LIST[..3], &list_answer, 412_733_901);
+            d.apply(Intent::JournalSaved(Err(
+                "No space left on device (os error 28)".into(),
+            )));
+        }
+        "many" => {
+            let files: Vec<String> = (1..=8)
+                .map(|n| format!("/home/user/Videos/lecture part {n}.y4m"))
+                .collect();
+            let files: Vec<&str> = files.iter().map(String::as_str).collect();
+            d.add(&files, &ok_y4m(Some(300)), 1_866_247_800);
+        }
+        other => return Err(format!("unknown scenario {other:?}")),
+    }
+    d.now = now;
+    Ok(d.state)
+}
+
+/// A queue restored after the app stopped mid-job: the job that was
+/// converting is interrupted (its temporary file removed), the rest wait.
+fn restored_scenario(now: Instant) -> AppState {
+    let item = |id: u64, source: &str, state: JournalState| JournalItem {
+        id,
+        source: WirePath::Utf8(source.into()),
+        size: Some(1_866_247_800),
+        video_stream: None,
+        facts: Some(facts(Some(300))),
+        destination: WirePath::Utf8(source.replace(".y4m", ".ivf")),
+        destination_chosen: false,
+        acknowledgement: None,
+        state,
+    };
+    let job = |source: &str| JobSpec {
+        source: WirePath::Utf8(source.into()),
+        fingerprint: facts(None).fingerprint,
+        video_stream: 0,
+        omissions_acknowledged: false,
+        destination: WirePath::Utf8(source.replace(".y4m", ".ivf")),
+        settings: studio_app::state::INITIAL_SETTINGS,
+    };
+    let journal = Journal {
+        version: studio_app::journal::VERSION,
+        next_id: 4,
+        settings: studio_app::state::INITIAL_SETTINGS,
+        items: vec![
+            item(
+                1,
+                LIST[0],
+                JournalState::Interrupted {
+                    job: job(LIST[0]),
+                    publishing: false,
+                    cause: JournalCause::AppStopped,
+                    destination_present: false,
+                    partial: JournalPartial::Removed {
+                        path: WirePath::Utf8(
+                            "/home/user/Videos/.park walk.ivf.Hq3xZ1.partial".into(),
+                        ),
+                    },
+                },
+            ),
+            item(2, LIST[3], JournalState::Waiting),
+            item(3, LIST[4], JournalState::Waiting),
+        ],
+    };
+    let recovered = studio_app::recovery::recover(journal, &NoFiles);
+    let mut state = AppState::new(Startup {
+        recovered: Some(recovered),
+        problem: None,
+    });
+    state.apply(
+        Intent::EngineAnswered(Ok(capabilities(true))),
+        now,
+        &NoFiles,
+    );
+    state
+}
+
 /// Plays `scenario` into a fresh state, as the controller would. `long`
 /// uses a long file name, a long failure message and long check details.
 #[allow(clippy::too_many_lines)]
 fn scenario(name: &str, long: bool, now: Instant) -> Result<AppState, String> {
-    let mut state = AppState::default();
+    if matches!(
+        name,
+        "list"
+            | "list-advanced"
+            | "running-list"
+            | "summary"
+            | "batch-confirm"
+            | "save-failed"
+            | "many"
+    ) {
+        return list_scenario(name, now);
+    }
+    if name == "restored" {
+        return Ok(restored_scenario(now));
+    }
+    let mut d = Driver {
+        state: AppState::default(),
+        now,
+    };
     if name == "engine-missing" {
-        state.apply(
-            Intent::EngineAnswered(Err(
-                "The encoding engine is missing (/opt/splot-studio/splot-studio-engine). \
-                 Reinstall Splot Studio."
-                    .into(),
-            )),
-            now,
-        );
-        return Ok(state);
+        d.apply(Intent::EngineAnswered(Err(
+            "The encoding engine is missing (/opt/splot-studio/splot-studio-engine). \
+             Reinstall Splot Studio."
+                .into(),
+        )));
+        return Ok(d.state);
     }
     let tool = !name.starts_with("tool-missing");
-    state.apply(Intent::EngineAnswered(Ok(capabilities(tool))), now);
+    d.apply(Intent::EngineAnswered(Ok(capabilities(tool))));
     if matches!(name, "empty" | "tool-missing") {
-        return Ok(state);
+        return Ok(d.state);
     }
     let ordinary = matches!(
         name,
@@ -148,12 +522,18 @@ fn scenario(name: &str, long: bool, now: Instant) -> Result<AppState, String> {
         (false, true) => LONG_SOURCE,
         (false, false) => SOURCE,
     };
-    let Effect::Probe(request) = state.apply(Intent::PickFinished(Some(source.into())), now) else {
+    let effects = d.apply(Intent::FilesOpened(vec![source.into()]));
+    let Some((item, request)) = effects.iter().find_map(|e| match e {
+        Effect::Probe { item, request } => Some((*item, request.clone())),
+        _ => None,
+    }) else {
         return Err("picking did not probe".into());
     };
-    let id = request.id;
     // 300 frames of 1920x1080 10-bit 4:2:0 Y4M, or a phone clip.
-    state.note_source_size(Some(if ordinary { 412_733_901 } else { 1_866_247_800 }));
+    d.state.note_size(
+        item,
+        Some(if ordinary { 412_733_901 } else { 1_866_247_800 }),
+    );
     let total = if name == "running-unknown" {
         None
     } else {
@@ -166,7 +546,7 @@ fn scenario(name: &str, long: bool, now: Instant) -> Result<AppState, String> {
         })
     };
     let result = match name {
-        "probing" => return Ok(state),
+        "probing" => return Ok(d.state),
         "unreadable" => refused(
             FailureCode::UnsupportedSource,
             "Unsupported Y4M: interlaced content (Itop) is not encoded by this build.",
@@ -182,45 +562,49 @@ fn scenario(name: &str, long: bool, now: Instant) -> Result<AppState, String> {
         _ if ordinary => Ok(mp4_facts()),
         _ => Ok(facts(total)),
     };
-    state.apply(Intent::ProbeAnswered { id, result }, now);
+    d.apply(Intent::ProbeAnswered {
+        id: request.id,
+        result,
+    });
     if matches!(
         name,
         "probed" | "unreadable" | "ordinary" | "unsupported" | "tool-missing-file"
     ) {
-        return Ok(state);
+        return Ok(d.state);
     }
 
     // The checking scenario is two seconds in; the others 1:23.
     let ago = if name == "checking" { 2 } else { 83 };
     let start = now.checked_sub(Duration::from_secs(ago)).unwrap_or(now);
-    let id = match state.apply(Intent::EncodeRequested, start) {
-        Effect::Start { id, .. } => id,
-        Effect::None if state.confirmation().is_some() => {
+    let effects = d.apply_at(Intent::ConvertRequested, start);
+    let id = match Driver::started(&effects) {
+        Some(id) => id,
+        None if d.state.confirmation().is_some() => {
             if name == "confirm" {
-                return Ok(state);
+                return Ok(d.state);
             }
-            let Effect::Start { id, .. } = state.apply(Intent::OmissionsConfirmed, start) else {
-                return Err("confirming did not start".into());
-            };
-            id
+            Driver::started(&d.apply_at(Intent::OmissionsConfirmed, start))
+                .ok_or("confirming did not start")?
         }
-        _ => return Err("encode did not start".into()),
-    };
-    let mut job = |input: Input| {
-        state.apply(Intent::Job { id, input }, now);
+        None => return Err("encode did not start".into()),
     };
     if ordinary {
         match name {
             // No stage and no counts yet: the engine is checking timestamps.
             "checking" => {}
-            "unsupported-job" => job(Input::Event(Event::Failed {
-                failure: Failure {
-                    code: FailureCode::UnsupportedSource,
-                    message: "The video has a variable frame rate: frame 412 lasts 1/30 s \
-                              after frames of 1/25 s"
-                        .into(),
-                },
-            })),
+            "unsupported-job" => {
+                d.job(
+                    id,
+                    Input::Event(Event::Failed {
+                        failure: Failure {
+                            code: FailureCode::UnsupportedSource,
+                            message: "The video has a variable frame rate: frame 412 lasts \
+                                      1/30 s after frames of 1/25 s"
+                                .into(),
+                        },
+                    }),
+                );
+            }
             "changed" => {
                 let failed = Input::Event(Event::Failed {
                     failure: Failure {
@@ -229,102 +613,59 @@ fn scenario(name: &str, long: bool, now: Instant) -> Result<AppState, String> {
                     },
                 });
                 // The app reads the file again by itself; show it read.
-                let Effect::Job {
-                    reprobe: Some(request),
-                    ..
-                } = state.apply(Intent::Job { id, input: failed }, now)
-                else {
-                    return Err("a changed source was not read again".into());
-                };
-                state.apply(
-                    Intent::ProbeAnswered {
-                        id: request.id,
-                        result: Ok(mp4_facts()),
-                    },
-                    now,
-                );
+                let effects = d.job(id, failed);
+                d.answer(effects, &|_| Ok(mp4_facts()), 412_733_901);
             }
             other => return Err(format!("unknown scenario {other:?}")),
         }
-        return Ok(state);
+        return Ok(d.state);
     }
-    job(Input::Event(Event::Stage {
-        stage: Stage::Encoding,
-    }));
-    job(Input::Event(Event::Progress {
-        progress: Progress {
-            frames_read: 131,
-            frames_encoded: 117,
-            bytes_written: 2_481_337,
-        },
-    }));
+    d.progress(id, 117);
     match name {
         "running" | "running-unknown" => {}
         "cancelling" => {
-            job(Input::CancelPressed);
-            job(Input::Event(Event::CancelRequested));
+            d.apply(Intent::CancelRequested);
+            d.job(id, Input::Event(Event::CancelRequested));
         }
         "completed" => {
-            for stage in [Stage::Finalizing, Stage::Verifying, Stage::Publishing] {
-                job(Input::Event(Event::Stage { stage }));
-            }
-            job(Input::Event(Event::Completed {
-                report: JobReport {
-                    destination: WirePath::Utf8(source.replace(".y4m", ".ivf")),
-                    frames: 300,
-                    bytes: 6_302_118,
-                    checks: vec![
-                        Check {
-                            kind: CheckKind::Structure,
-                            outcome: CheckOutcome::Passed,
-                        },
-                        Check {
-                            kind: CheckKind::SplotDecode,
-                            outcome: CheckOutcome::Passed,
-                        },
-                        Check {
-                            kind: CheckKind::AvmDecode,
-                            outcome: CheckOutcome::NotRun {
-                                reason: if long {
-                                    "No AVM decoder is configured on this machine. Set one up to \
-                                     compare an independent decode; until then this file is \
-                                     checked only by Splot's own decoder."
-                                        .into()
-                                } else {
-                                    "No AVM decoder is configured on this machine.".into()
-                                },
-                            },
-                        },
-                    ],
-                    disclosures: vec![Disclosure::ColorUnspecified],
-                },
-            }));
+            let destination = source.replace(".y4m", ".ivf");
+            d.complete(id, &destination, long);
         }
         "cancelled" => {
-            job(Input::CancelPressed);
-            job(Input::Event(Event::CancelRequested));
-            job(Input::Event(Event::Cancelled));
+            d.apply(Intent::CancelRequested);
+            d.job(id, Input::Event(Event::CancelRequested));
+            d.job(id, Input::Event(Event::Cancelled));
         }
-        "failed" => job(Input::Event(Event::Failed {
-            failure: Failure {
-                code: FailureCode::Output,
-                message: if long {
-                    "Writing the temporary file /home/user/Videos/.park walk.ivf.splot-tmp-4f1c \
-                     failed after 2.48 GB: No space left on device (os error 28). The partial \
-                     temporary file was removed"
-                        .into()
-                } else {
-                    "Writing the temporary file failed: No space left on device (os error 28)"
-                        .into()
+        "failed" => {
+            d.job(
+                id,
+                Input::Event(Event::Failed {
+                    failure: Failure {
+                        code: FailureCode::Output,
+                        message: if long {
+                            "Writing the temporary file /home/user/Videos/.park walk.ivf.splot-tmp-4f1c \
+                             failed after 2.48 GB: No space left on device (os error 28). The partial \
+                             temporary file was removed"
+                                .into()
+                        } else {
+                            "Writing the temporary file failed: No space left on device (os error 28)"
+                                .into()
+                        },
+                    },
+                }),
+            );
+        }
+        "lost" => {
+            d.job(
+                id,
+                Input::WorkerEnded {
+                    detail: "signal: 9 (SIGKILL)".into(),
                 },
-            },
-        })),
-        "lost" => job(Input::WorkerEnded {
-            detail: "signal: 9 (SIGKILL)".into(),
-        }),
+            );
+        }
         other => return Err(format!("unknown scenario {other:?}")),
     }
-    Ok(state)
+    Ok(d.state)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -340,26 +681,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         other => return Err(format!("unknown scheme {other:?}").into()),
     };
 
+    let long = rest.iter().any(|a| a == "long");
+    let mut name = "empty";
+    for arg in rest {
+        if !matches!(arg.as_str(), "about" | "advanced" | "long") {
+            name = arg;
+        }
+    }
+    if name == "already-open" {
+        let window = AlreadyOpenWindow::new()?;
+        window.global::<Palette>().set_color_scheme(scheme);
+        window.show()?;
+        return capture(&window, out);
+    }
     let window = studio_app::new_window()?;
     window.global::<Palette>().set_color_scheme(scheme);
     let now = Instant::now();
-    let long = rest.iter().any(|a| a == "long");
-    let mut name = "empty";
     for arg in rest {
         match arg.as_str() {
             "about" => window.invoke_show_about(),
             "advanced" => window.set_advanced_open(true),
-            "long" => {}
-            other => name = other,
+            _ => {}
         }
     }
     let state = scenario(name, long, now)?;
     studio_app::render(&window, &state, now);
     window.set_engine_identity("renderer snapshot, no engine ran".into());
     window.show()?;
+    capture(&window, out)
+}
 
-    let weak = window.as_weak();
-    let out = out.clone();
+/// Waits for the first frames, then writes `component`'s pixels to `out`.
+fn capture<T: ComponentHandle + 'static>(
+    component: &T,
+    out: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let weak = component.as_weak();
+    let out = out.to_owned();
     let (tx, rx) = std::sync::mpsc::channel();
     // Long enough for the first frames to land.
     slint::Timer::single_shot(Duration::from_millis(800), move || {

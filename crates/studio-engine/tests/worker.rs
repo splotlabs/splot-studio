@@ -209,12 +209,15 @@ fn version_mismatch_is_answered_and_the_session_continues() -> TestResult {
 
 #[test]
 fn malformed_messages_are_answered() -> TestResult {
-    let mut input =
-        raw_frame(br#"{"protocol_version":3,"request_id":5,"body":{"type":"encode"}}"#)?;
+    let v = PROTOCOL_VERSION;
+    let mut input = raw_frame(
+        format!(r#"{{"protocol_version":{v},"request_id":5,"body":{{"type":"encode"}}}}"#)
+            .as_bytes(),
+    )?;
     input.extend(raw_frame(b"not json")?);
     // A Start whose settings are out of range does not decode either.
     input.extend(raw_frame(
-        br#"{"protocol_version":3,"request_id":6,"body":{"type":"start","job":{"source":{"kind":"utf8","value":"a"},"destination":{"kind":"utf8","value":"b"},"settings":{"output":"ivf","preset":11,"crf":20}}}}"#,
+        format!(r#"{{"protocol_version":{v},"request_id":6,"body":{{"type":"start","job":{{"source":{{"kind":"utf8","value":"a"}},"destination":{{"kind":"utf8","value":"b"}},"settings":{{"output":"ivf","preset":11,"crf":20}}}}}}}}"#).as_bytes(),
     )?);
     let output = worker(&input)?;
     assert_eq!(output.status.code(), Some(0));
@@ -370,6 +373,14 @@ fn a_job_runs_once_with_ordered_events() -> TestResult {
         ]
     );
     assert!(matches!(job.last(), Some(Event::Completed { report }) if report.frames == 10));
+    let working: Vec<usize> = (0..job.len())
+        .filter(|&i| matches!(job[i], Event::Working { .. }))
+        .collect();
+    let first_progress = job.iter().position(|e| matches!(e, Event::Progress { .. }));
+    assert!(
+        matches!(working.as_slice(), [at] if Some(*at) < first_progress && *at > 0),
+        "{job:?}"
+    );
     let mut last = (0, 0);
     for event in &job {
         if let Event::Progress { progress } = event {
@@ -469,11 +480,22 @@ fn a_killed_worker_publishes_nothing_and_leaves_its_temporary_file() -> TestResu
             job: spec(&src, &dst, OutputKind::Ivf),
         },
     )?;
-    live.read_until(|e| matches!(e, Event::Progress { .. }))?;
+    let seen = live.read_until(|e| matches!(e, Event::Progress { .. }))?;
     live.child.kill()?;
     live.child.wait()?;
     assert!(!dst.exists());
+    let announced: Vec<std::path::PathBuf> = seen
+        .iter()
+        .filter_map(|e| match &e.body {
+            Event::Working { partial } => partial.to_path_buf().ok(),
+            _ => None,
+        })
+        .collect();
     let left = leftovers(dir.path(), &[&src]);
+    assert_eq!(
+        left, announced,
+        "the leftover is not what Working announced"
+    );
     let names: Vec<String> = left
         .iter()
         .filter_map(|p| Some(p.file_name()?.to_string_lossy().into_owned()))
@@ -621,6 +643,8 @@ fn encode_command_prints_the_job() -> TestResult {
     let text = String::from_utf8(output.stdout)?;
     assert_eq!(output.status.code(), Some(0), "{text}");
     assert!(text.contains("completed frames=3"), "{text}");
+    assert_eq!(text.matches(" working ").count(), 1, "{text}");
+    assert!(text.contains("/.out.obu."), "{text}");
     assert!(text.contains("check Structure: passed"), "{text}");
     let again = run(&["encode", src_arg, dst_arg], &[])?;
     assert_eq!(again.status.code(), Some(1));
