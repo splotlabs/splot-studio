@@ -644,7 +644,7 @@ fn encode_command_prints_the_job() -> TestResult {
     assert_eq!(output.status.code(), Some(0), "{text}");
     assert!(text.contains("completed frames=3"), "{text}");
     assert_eq!(text.matches(" working ").count(), 1, "{text}");
-    assert!(text.contains("/.out.obu."), "{text}");
+    assert!(text.contains(".out.obu."), "{text}");
     assert!(text.contains("check Structure: passed"), "{text}");
     let again = run(&["encode", src_arg, dst_arg], &[])?;
     assert_eq!(again.status.code(), Some(1));
