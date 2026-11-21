@@ -208,13 +208,23 @@ impl Worker {
         role: Role,
         mut deliver: impl FnMut(Delivery) + Send + 'static,
     ) -> Result<Self, SpawnError> {
-        let child = Process::new(engine)
+        let mut command = Process::new(engine);
+        command
             .arg(role.arg())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Engine diagnostics stay visible to whoever launched the app.
-            .stderr(Stdio::inherit())
-            .spawn();
+            .stderr(Stdio::inherit());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            /// `CREATE_NO_WINDOW`: the engine is a console program and the
+            /// release app has no console, so without this Windows would
+            /// open a console window for every engine process.
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let child = command.spawn();
         let mut child = match child {
             Ok(child) => child,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {

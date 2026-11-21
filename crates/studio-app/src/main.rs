@@ -6,12 +6,20 @@
 //! in the Open dialog. Only one instance runs per user; a second one says
 //! so and quits.
 //!
+//! `splot-studio --version` prints the build identity, protocol version and
+//! processor floor without opening a window.
+//!
+//! On a processor below the packaged engine's floor ([`studio_app::cpu`])
+//! the app shows why and exits before it reads its data folder or starts
+//! anything.
+//!
 //! `SPLOT_STUDIO_DATA_DIR` replaces the per-user data folder (tests and
 //! development only).
 
 // Keep a console window from opening next to the GUI on Windows release builds.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -19,6 +27,24 @@ use studio_app::instance::{self, DATA_DIR_VAR};
 use studio_app::{APP_NAME, Opening};
 
 fn main() -> ExitCode {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--version")
+    {
+        return match std::io::stdout().write_all(studio_app::version_text().as_bytes()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
+    let missing = studio_app::cpu::missing();
+    if !missing.is_empty() {
+        let (heading, message) = studio_app::cpu::notice(&missing);
+        eprintln!("{APP_NAME}: {heading}. {message}");
+        if let Err(error) = studio_app::show_notice(&heading, &message) {
+            eprintln!("{APP_NAME}: {error}");
+        }
+        return ExitCode::from(4);
+    }
     // Absolute, so the default destinations and the display name the same
     // files the user meant; no filesystem access is involved.
     let files: Result<Vec<PathBuf>, _> = std::env::args_os()

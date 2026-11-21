@@ -21,6 +21,7 @@
 
 pub mod activity;
 mod controller;
+pub mod cpu;
 pub mod engine;
 pub mod instance;
 pub mod journal;
@@ -53,7 +54,7 @@ use crate::state::{AppState, JournalProblem, Startup};
 
 pub use render::{render, render_counters, render_preview};
 pub use ui::{
-    AlreadyOpenWindow, AppWindow, CheckRow, Fact, JobView, Notice, Palette, QueueRow, RowState,
+    AppWindow, CheckRow, Fact, JobView, Notice, NoticeWindow, Palette, QueueRow, RowState,
     SourceView, StageState, Tone, ViewMode,
 };
 
@@ -76,6 +77,41 @@ mod ui {
 
 /// The executable name, as sent to the engine.
 pub const APP_NAME: &str = "splot-studio";
+
+/// The commit a packaged build was made from (`cargo xtask package` sets
+/// `SPLOT_STUDIO_BUILD_COMMIT`, with `-dirty` for uncommitted changes);
+/// `None` for a development build.
+pub const BUILD_COMMIT: Option<&str> = option_env!("SPLOT_STUDIO_BUILD_COMMIT");
+
+/// The version shown in About: the package version, and the short commit of
+/// a packaged build.
+#[must_use]
+pub fn display_version() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    match BUILD_COMMIT {
+        Some(commit) => {
+            let (hash, dirty) = commit
+                .strip_suffix("-dirty")
+                .map_or((commit, ""), |hash| (hash, "-dirty"));
+            let short: String = hash.chars().take(10).collect();
+            format!("{version} ({short}{dirty})")
+        }
+        None => format!("{version} (development build)"),
+    }
+}
+
+/// The `--version` text: what this executable is, which protocol it speaks,
+/// and the processor floor it checks. Needs no window or display.
+#[must_use]
+pub fn version_text() -> String {
+    format!(
+        "{APP_NAME} {}\ncommit: {}\nprotocol version: {}\n{}\n",
+        env!("CARGO_PKG_VERSION"),
+        BUILD_COMMIT.unwrap_or("not recorded (development build)"),
+        studio_domain::protocol::PROTOCOL_VERSION,
+        cpu::describe()
+    )
+}
 
 /// What startup found before any window opens.
 #[derive(Debug)]
@@ -222,7 +258,7 @@ pub fn build(prepared: Prepared, files: Vec<PathBuf>) -> Result<Studio, slint::P
 /// Returns a [`slint::PlatformError`] when no window can be created.
 pub fn new_window() -> Result<AppWindow, slint::PlatformError> {
     let window = AppWindow::new()?;
-    window.set_app_version(env!("CARGO_PKG_VERSION").into());
+    window.set_app_version(display_version().into());
     window.set_output_labels(render::output_labels());
     let labels = |all: &[&str]| render::model(all.iter().map(|&l| SharedString::from(l)).collect());
     window.set_quality_labels(labels(&Quality::ALL.map(Quality::label)));
@@ -244,7 +280,25 @@ pub fn new_window() -> Result<AppWindow, slint::PlatformError> {
 /// # Errors
 /// Returns a [`slint::PlatformError`] when no window can be created.
 pub fn show_already_open() -> Result<(), slint::PlatformError> {
-    let window = AlreadyOpenWindow::new()?;
+    show_notice(ALREADY_OPEN.0, ALREADY_OPEN.1)
+}
+
+/// The heading and message a second instance shows.
+pub const ALREADY_OPEN: (&str, &str) = (
+    "Splot Studio is already open",
+    "Use the window that is already open. Only one can run at a time, so the list of files is \
+     kept in one place.",
+);
+
+/// A small window with `heading`, `message` and Quit, shown instead of the
+/// main window when the app cannot start. Returns when it is closed.
+///
+/// # Errors
+/// Returns a [`slint::PlatformError`] when no window can be created.
+pub fn show_notice(heading: &str, message: &str) -> Result<(), slint::PlatformError> {
+    let window = NoticeWindow::new()?;
+    window.set_heading(heading.into());
+    window.set_message(message.into());
     window.on_quit_requested(|| {
         let _ = slint::quit_event_loop();
     });

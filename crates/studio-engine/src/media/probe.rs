@@ -149,27 +149,81 @@ pub fn probe(
     let output = process::run_bounded(ffprobe, MAX_REPORT_BYTES, PROBE_TIMEOUT)
         .map_err(|e| invalid(format!("ffprobe could not read the source: {e}")))?;
     if !output.ended.status.success() {
-        return Err(refusal(&output.ended));
+        return Err(refusal(tool, path, &output.ended));
     }
     let report: Report = serde_json::from_slice(&output.stdout)
         .map_err(|e| invalid(format!("ffprobe's report is not readable: {e}")))?;
     accept(&report, fingerprint, requested, &output.ended.stderr)
 }
 
-/// Maps a failed `ffprobe`. The tool says "not on whitelist" when the
-/// detected format is not one of [`super::FORMAT_WHITELIST`].
-fn refusal(ended: &process::Ended) -> Stop {
-    if ended.stderr.contains("whitelist") {
-        return unsupported(
-            "this kind of file is not read: Studio reads MP4, MOV, Matroska (MKV, WebM), \
-             MPEG-TS and AVI files. Playlists, concatenation lists, image sequences and \
-             other formats that can refer to further files are refused",
-        );
+/// What the files Studio reads are, for refusals of every other kind.
+const READ_KINDS: &str = "Studio reads MP4, MOV, Matroska (MKV, WebM), MPEG-TS and AVI files. \
+     Playlists, concatenation lists, image sequences and other formats that can refer to \
+     further files are refused";
+
+/// `ffprobe`'s words when `avformat_open_input` fails with invalid data:
+/// either no demuxer recognised the file, or the one that did could not
+/// read it.
+const INVALID_DATA: &str = "Invalid data found when processing input";
+
+/// Maps a failed `ffprobe`.
+///
+/// - "not on whitelist": a demuxer that is built recognised the file, but it
+///   is not one of [`super::FORMAT_WHITELIST`] (a full `FFmpeg` build).
+/// - Invalid data and no demuxer claimed the file ([`claimed`]): nothing
+///   built recognises it, which is how the bundled build, holding only the
+///   whitelisted demuxers, meets every other kind of file.
+/// - Anything else, including invalid data in a file a whitelisted demuxer
+///   took (a damaged or truncated MP4, say), is an unreadable source.
+fn refusal(tool: &Tool, path: &std::path::Path, ended: &process::Ended) -> Stop {
+    let said = without_url(&ended.stderr, path);
+    if said.contains("whitelist") {
+        return unsupported(format!("this kind of file is not read: {READ_KINDS}"));
+    }
+    if said.contains(INVALID_DATA) && !claimed(tool, path) {
+        return unsupported(format!(
+            "this is not a file Studio reads, or not a media file: {READ_KINDS}"
+        ));
     }
     invalid(format!(
         "ffprobe cannot read the source: it {}",
         ended.describe()
     ))
+}
+
+/// Whether a demuxer took `path` when `ffprobe` opened it. `libavformat`
+/// names the format it probed before the demuxer reads anything ("Format …
+/// probed with size=…" at debug level, "Format … detected only with low
+/// score of …" as a warning), and names none when nothing recognised the
+/// file. Asked again at debug level, only after a failure. When this check
+/// cannot run, the file counts as claimed, so the failure stays an
+/// unreadable source rather than a refusal.
+fn claimed(tool: &Tool, path: &std::path::Path) -> bool {
+    let Ok(ffprobe) = command(tool, Program::Ffprobe, path, &["-v", "debug"]) else {
+        return true;
+    };
+    match process::run_bounded(ffprobe, 64 * 1024, PROBE_TIMEOUT) {
+        Ok(output) => names_a_format(&without_url(&output.ended.stderr, path)),
+        Err(_) => true,
+    }
+}
+
+/// Whether `ffprobe`'s diagnostics name a probed format.
+fn names_a_format(said: &str) -> bool {
+    said.lines().any(|line| {
+        line.contains("] Format ")
+            && (line.contains(" probed with size=")
+                || line.contains(" detected only with low score of "))
+    })
+}
+
+/// `stderr` without the input URL, so a file's own name is never read as
+/// one of the tool's messages.
+fn without_url(stderr: &str, path: &std::path::Path) -> String {
+    super::file_url(path).map_or_else(
+        |_| stderr.to_owned(),
+        |url| stderr.replace(&*url.to_string_lossy(), ""),
+    )
 }
 
 /// `diagnostics` is what `ffprobe` printed while it succeeded.
@@ -695,6 +749,28 @@ mod tests {
             code(accept(&report(&json), FINGERPRINT, None, "")),
             Some(FailureCode::UnsupportedSource)
         );
+    }
+
+    /// The lines `libavformat` prints when a demuxer takes a file, and none
+    /// when nothing recognises it, whatever the file is called.
+    #[test]
+    fn probed_formats_are_recognised() {
+        assert!(names_a_format(
+            "[matroska,webm @ 0x5e78] Format matroska,webm probed with size=2048 and score=100\n"
+        ));
+        assert!(names_a_format(
+            "[mov,mp4,m4a,3gp,3g2,mj2 @ 0x6249] Format mov,mp4,m4a,3gp,3g2,mj2 detected only \
+             with low score of 1, misdetection possible!\n"
+        ));
+        assert!(!names_a_format(
+            "file:/tmp/list.m3u8: Invalid data found when processing input\n"
+        ));
+        let path = std::path::Path::new("/tmp/] Format x probed with size=1 whitelist.bin");
+        let said = format!("file:{}: {INVALID_DATA}\n", path.display());
+        let said = without_url(&said, path);
+        assert!(!names_a_format(&said));
+        assert!(!said.contains("whitelist"));
+        assert!(said.contains(INVALID_DATA));
     }
 
     #[test]

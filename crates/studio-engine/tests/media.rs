@@ -451,9 +451,19 @@ fn multi_track_inventory_selection_and_acknowledgement() -> TestResult {
         .iter()
         .map(|t| (t.stream, t.width, t.height, t.attached_picture))
         .collect();
-    assert_eq!(
-        tracks,
-        [(0, 32, 16, false), (1, 16, 8, false), (5, 8, 8, true)]
+    // The PNG cover's size comes from its decoder; the bundled build has
+    // none (it needs zlib), so the size is unknown there and reads 0x0. An
+    // attached picture is never encoded and the app never shows its size.
+    assert!(
+        matches!(
+            tracks.as_slice(),
+            [
+                (0, 32, 16, false),
+                (1, 16, 8, false),
+                (5, 8, 8, true) | (5, 0, 0, true)
+            ]
+        ),
+        "{tracks:?}"
     );
     assert_eq!(facts.video_stream, 0);
     assert_eq!(
@@ -925,24 +935,73 @@ fn refused_media() -> TestResult {
         ("empty", empty, FailureCode::InvalidSource, "empty"),
     ];
     for (name, maker, expected, words) in cases {
-        let dir = tempfile::tempdir()?;
-        let src = maker(dir.path())?;
-        let before = leftovers(dir.path(), &[]);
-        let dst = dir.path().join("out.ivf");
-        let mut job = spec(&src, &dst, OutputKind::Ivf);
-        job.omissions_acknowledged = true;
-        let (_, end) = run_job(job, |_, _| {});
-        let (code, message) = failure(&end).ok_or(format!("{name}: {end:?}"))?;
-        assert_eq!(code, expected, "{name}: {message}");
-        assert!(message.contains(words), "{name}: {message}");
-        assert_eq!(leftovers(dir.path(), &[]), before, "{name}");
+        refused(name, maker, expected, words)?;
     }
+    Ok(())
+}
+
+/// A file no built demuxer recognises is refused as a kind Studio does not
+/// read, the same with a minimal `FFmpeg` (nothing claims it) and a full one
+/// (the whitelist refuses what it detects, or nothing claims it); a file a
+/// supported demuxer recognises and cannot read stays a damaged source.
+#[test]
+fn unknown_kinds_are_refused_and_damaged_headers_are_not() -> TestResult {
+    refused(
+        "unrecognised",
+        unrecognised,
+        FailureCode::UnsupportedSource,
+        "not a file Studio reads",
+    )?;
+    refused(
+        "damaged header",
+        damaged_header,
+        FailureCode::InvalidSource,
+        "ffprobe",
+    )
+}
+
+/// `maker`'s source fails with `expected` and a message holding `words`,
+/// publishes nothing and leaves no temporary file.
+fn refused(name: &str, maker: Maker, expected: FailureCode, words: &str) -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let src = maker(dir.path())?;
+    let before = leftovers(dir.path(), &[]);
+    let dst = dir.path().join("out.ivf");
+    let mut job = spec(&src, &dst, OutputKind::Ivf);
+    job.omissions_acknowledged = true;
+    let (_, end) = run_job(job, |_, _| {});
+    let (code, message) = failure(&end).ok_or(format!("{name}: {end:?}"))?;
+    assert_eq!(code, expected, "{name}: {message}");
+    assert!(message.contains(words), "{name}: {message}");
+    assert_eq!(leftovers(dir.path(), &[]), before, "{name}");
     Ok(())
 }
 
 fn not_media(dir: &Path) -> Fallible<PathBuf> {
     let src = dir.join("notes.mp4");
     fs::write(&src, "these are not the frames you are looking for")?;
+    Ok(src)
+}
+
+/// Text that no demuxer, in any build, takes for media: refused as not a
+/// file Studio reads, whichever `FFmpeg` probes it.
+fn unrecognised(dir: &Path) -> Fallible<PathBuf> {
+    let src = dir.join("notes.bin");
+    fs::write(&src, "these are not the frames you are looking for")?;
+    Ok(src)
+}
+
+/// A Matroska EBML header cut off inside its first element, then filler:
+/// the Matroska demuxer recognises it by content and then cannot read it,
+/// so it is a damaged file, not a refused kind.
+fn damaged_header(dir: &Path) -> Fallible<PathBuf> {
+    let part = with_args(dir, "part.mkv", "420", &["-c:v", "ffv1"])?;
+    let mut bytes = fs::read(&part)?;
+    fs::remove_file(&part)?;
+    bytes.truncate(36);
+    bytes.resize(4096, 0xff);
+    let src = dir.join("header.bin");
+    fs::write(&src, bytes)?;
     Ok(src)
 }
 

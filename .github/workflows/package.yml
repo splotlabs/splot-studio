@@ -1,0 +1,141 @@
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+#
+# Unsigned test packages for the three release lanes: build the controlled
+# FFmpeg from source, `cargo xtask package`, `cargo xtask smoke`, and keep the
+# archive as a workflow artifact for 14 days.
+#
+# Nothing is published: no tag, no release, no upload anywhere but this run's
+# artifacts. No secrets, no signing, read-only token. Runners are pinned
+# images; the Linux image sets the glibc floor (see BUILD.json in the archive).
+#
+# The smoke test also lists each executable's start-up libraries with the
+# platform's own tool and fails on anything outside the OS:
+#   Linux    objdump -p <exe> (NEEDED, RPATH/RUNPATH, GLIBC_ versions) and ldd <exe>
+#   macOS    otool -L <exe> (load commands) and otool -l <exe> (LC_RPATH, minos)
+#   Windows  dumpbin /dependents <exe> (found through vswhere), and the PE
+#            subsystem field: window for splot-studio.exe, console for the engine
+
+name: package
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "native/ffmpeg/**"
+      - "packaging/**"
+      - "xtask/**"
+      - ".github/workflows/package.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  package:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 24.04: glibc 2.39. ubuntu-22.04 (glibc 2.35) would lower the
+          # floor but is deprecated on GitHub (removal announced for 2027-04).
+          - { name: linux-x86_64, runner: ubuntu-24.04 }
+          - { name: windows-x86_64, runner: windows-2025 }
+          - { name: macos-arm64, runner: macos-15 }
+    steps:
+      # build.sh runs in MSYS2 bash, which cannot read CRLF line endings.
+      - name: Keep LF line endings (Windows)
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+
+      # GUI build (fontconfig.pc, see ci.yml) and the FFmpeg build tools from
+      # native/ffmpeg/README.md.
+      - name: Install build packages (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev nasm meson ninja-build
+
+      - name: Install FFmpeg build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install meson ninja pkgconf
+
+      # msys2/setup-msys2 v2.34.0
+      - name: Set up MSYS2 UCRT64 (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            make diffutils tar xz curl git
+            mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-nasm
+            mingw-w64-ucrt-x86_64-meson mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+
+      # actions/cache v6.1.0. The FFmpeg pair depends only on the pinned
+      # sources, the script and the runner image.
+      - name: Cache the FFmpeg build
+        id: ffmpeg-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: native/ffmpeg/out/${{ matrix.name }}
+          key: ffmpeg-${{ matrix.name }}-${{ matrix.runner }}-${{ hashFiles('native/ffmpeg/versions.env', 'native/ffmpeg/build.sh') }}
+
+      - name: Build FFmpeg from source (Linux, macOS)
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
+        run: native/ffmpeg/build.sh ${{ matrix.name }}
+
+      - name: Build FFmpeg from source (Windows)
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+        shell: msys2 {0}
+        run: native/ffmpeg/build.sh ${{ matrix.name }}
+
+      # actions/cache v6.1.0
+      - name: Cache Cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/package/cargo
+          key: package-cargo-${{ matrix.name }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            package-cargo-${{ matrix.name }}-
+
+      - name: Package
+        run: cargo xtask package
+
+      - name: Smoke test the unpacked package
+        run: cargo xtask smoke
+
+      # actions/upload-artifact v7.0.2
+      - name: Keep the archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: splot-studio-unsigned-test-${{ matrix.name }}
+          path: |
+            target/package/splot-studio-*.tar.gz
+            target/package/splot-studio-*.zip
+            target/package/splot-studio-*.sha256
+          if-no-files-found: error
+          retention-days: 14

@@ -792,7 +792,7 @@ fn refusals_name_their_reason() -> TestResult {
     fs::write(&not_media, b"hello")?;
     assert_eq!(
         preview.failure(7, &source_target(&not_media), 0)?,
-        PictureFailure::Unreadable
+        PictureFailure::Unsupported
     );
     for (generation, size) in [
         (

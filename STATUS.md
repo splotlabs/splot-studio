@@ -1,8 +1,8 @@
 # Status
 
-**Phase:** STUDIO-05 complete on Linux x86_64.
+**Phase:** STUDIO-06 packaging in place; **not release-ready** (see Release assessment).
 **Updated:** 2026-11-21.
-**Next prompt:** `docs/planning/studio-v1/prompts/06-RELEASE-HARDENING.md`.
+**Next prompt:** `docs/planning/studio-v1/prompts/07-FUTURE-CONTAINERS.md` (separate authorization).
 
 ## What works
 
@@ -70,6 +70,27 @@
   counts); results restart at most one key-frame interval (120 frames) back.
 - **Running it:** `cargo xtask run --release` builds the app and its engine
   together; `cargo run -p studio-app` alone can start a stale engine.
+- **Packages (STUDIO-06):** `cargo xtask package [--smoke]` builds an unsigned
+  test archive for the host: Linux `.tar.gz`, Windows `.zip`, macOS `.app` in a
+  `.zip`, named `splot-studio-0.1.0-unsigned-test-<target>`. It holds the app,
+  the engine, the bundled FFmpeg pair with its manifest and licences, generated
+  third-party notices (failing on an unreviewed licence), `BUILD.json` (commit,
+  toolchain, CPU baselines, library floors, per-file SHA-256) and a checksum.
+  `.github/workflows/package.yml` builds all three as workflow artifacts; no
+  secrets, nothing is published.
+- **Bundled FFmpeg:** built from source by `native/ffmpeg/build.sh`: FFmpeg
+  8.0.3 + dav1d 1.5.5 (signatures verified, SHA-256 pinned), LGPL 2.1+, no GPL
+  or nonfree, static, system C library only, no network or devices. Decoders:
+  H.264, HEVC, VP8, VP9, AV1 (dav1d), MPEG-1/2, MPEG-4 part 2, ProRes, DNxHD,
+  FFV1, MJPEG, raw video. The Linux build is reproducible and takes 2 min 20 s.
+- **CPU floor:** the engine is built for x86-64-v3; the app stays portable,
+  checks the 18 features before anything starts and shows "This processor is
+  not supported" otherwise. The engine run directly on an older CPU cannot
+  protect itself. Output is byte-identical to a portable engine; 1.2-1.4x faster.
+- **Refusals:** a file no supported container recognises is now
+  `UnsupportedSource` ("not a file Studio reads"), a damaged supported file
+  stays `InvalidSource`, with both the bundled and a full FFmpeg.
+- **Version 0.1.0**, shown by `--version` (app and engine), About and `BUILD.json`.
 - Everything from STUDIO-02 (safe publish, verification, bounded cancel) applies
   to both routes. Cancel and a killed worker leave no `ffmpeg`
   child (Linux).
@@ -88,16 +109,29 @@ the current file.
 The pinned encoder writes no colour description, so the output never says how to
 interpret its samples (splotlabs/splot#1777); the app discloses this per source.
 
+## Release assessment (2026-11-21)
+
+**Still blocked.** Ready: reproducible Linux package that passes the clean-
+environment smoke test with the real FFmpeg. Outstanding, all in
+`docs/release/CHECKLIST.md`: signing and notarization (no credentials);
+clean-machine install/run on each OS; Windows and macOS packages are first
+exercised by the packaging workflow and never by hand; a real pre-AVX2 CPU;
+AVM differential check; legal review of the shipped FFmpeg/decoder
+combination (LGPL does not settle decoder patents); source archives must be
+attached to a release; app icon; human approval. Nothing is tagged or published.
+
 ## FFmpeg
 
 - **Development:** commands run through Cargo opt in to the machine's FFmpeg
   (`SPLOT_STUDIO_SYSTEM_FFMPEG=1` in `.cargo/config.toml`); the app labels it as
   a development setup. Tested with 8.0.1 only. The test suite needs it and fails
   clearly without it.
-- **Release:** the engine otherwise uses only `ffmpeg`/`ffprobe` beside itself.
-  **That controlled LGPL build does not exist yet** — a STUDIO-06 release
-  blocker, see `native/ffmpeg/README.md`. Without any FFmpeg the app reads Y4M
-  only and says so.
+- **Release:** the engine otherwise uses only `ffmpeg`/`ffprobe` beside itself,
+  from `native/ffmpeg/build.sh` (see above and `native/ffmpeg/README.md`).
+  Without any FFmpeg the app reads Y4M only and says so. Not read by the
+  bundled build: audio (inventoried only), PNG cover-art dimensions, zlib or
+  bzip2-compressed Matroska tracks and compressed MOV headers. MPEG-1 in
+  MPEG-TS or AVI is refused by the frame-rate check with any FFmpeg.
 
 ## Deliberate deviations from the pack (owner decisions, 2026-11-20)
 
@@ -107,6 +141,11 @@ interpret its samples (splotlabs/splot#1777); the app discloses this per source.
 - **STUDIO-04:** GUI-owned durable queue in one atomically written JSON file;
   no supervisor process, no socket IPC, no SQLite; nothing resumes by itself
   after a restart; Permute-style file list.
+- **STUDIO-06 (2026-11-21):** plain archives, no installers; unsigned; FFmpeg
+  common decoders plus dav1d; x86-64-v3 required. FFmpeg is linked statically
+  into its two executables rather than shipped as shared libraries (the pair
+  stays replaceable; `licenses/SOURCE.md` says how). macOS minimum 15.0, Linux
+  glibc 2.39 (ubuntu-24.04 runner), bundle id `io.github.splotlabs.studio`.
 - **STUDIO-05 (2026-11-21):** stills plus playback; the live frame is the real
   encoded picture; the preview sits in the card, not in its own window.
   Pictures share the control pipe (header JSON, raw pixels after it) instead
@@ -156,8 +195,8 @@ posted closure waited p95 under 0.2 ms, max 4.9 ms.
 ## Checks run (Linux x86_64, Wayland)
 
 - `cargo xtask ci` — pass: fmt, SPDX headers, dependency direction, clippy
-  `-D warnings`, 295 tests (domain 16, engine 38 + 15 + 6 + 15 + 14 + 1 + 27,
-  app 134 + 3 + 8 + 1 + 1 + 13 against the real engine, xtask 3). Clippy is
+  `-D warnings`, 309 tests (domain 16, engine 39 + 15 + 6 + 16 + 14 + 1 + 27,
+  app 136 + 3 + 8 + 1 + 1 + 13 against the real engine, xtask 13). Clippy is
   also clean for
   `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`.
 - Real-process fault tests: worker killed mid-job; app killed mid-job (a real
@@ -167,8 +206,11 @@ posted closure waited p95 under 0.2 ms, max 4.9 ms.
 - Real app by hand: two files on the command line → two waiting items in the
   journal; a second instance left the journal byte-identical; relaunch restored
   the list and ran nothing.
-- Evidence: `docs/evidence/studio-04/` and `docs/evidence/studio-05/` (Slint
-  renderer snapshots, engine and app measurements).
+- Evidence: `docs/evidence/studio-04/`, `studio-05/` (renderer snapshots,
+  measurements) and `studio-06/` (FFmpeg build, package, network audit).
+- `cargo xtask package --smoke` on Linux with the real FFmpeg: pass (26.8 MB
+  archive; Y4M and MP4 to IVF and OBU from an emptied environment; only system
+  libraries loaded). `strace` of the packaged app and engine: no network socket.
 
 ## Not tested / open
 
