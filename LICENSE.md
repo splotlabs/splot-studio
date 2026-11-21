@@ -1,4 +1,14 @@
-Required Notice: Copyright © 2026 Bartosz Tomczyk. Commercial use of splot requires a separate written commercial license from Bartosz Tomczyk.
+# Splot Studio — licence scope and notices
+
+First-party material in this repository is offered by **Bartosz Tomczyk**, a natural person using **SplotLabs** and **splot** as project names. These names do not identify a separate company.
+
+Required Notice: Copyright (c) 2026 Bartosz Tomczyk.
+
+This notice identifies Bartosz Tomczyk's original material. Contributions and third-party components keep their own ownership, notices and licence terms. Slint, FFmpeg and the other dependencies are not covered by this licence; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+The standard PolyForm Noncommercial License 1.0.0 below governs the permissions it grants. For uses outside those permissions, contact **bartekplus@gmail.com** about an alternative commercial licence. This scope notice does not narrow the permissions granted by the standard licence. An alternative agreement applies only to rights Bartosz Tomczyk is authorized to grant.
+
+---
 
 # PolyForm Noncommercial License 1.0.0
 
@@ -20,7 +30,7 @@ The licensor grants you an additional copyright license to distribute copies of 
 
 You must ensure that anyone who gets a copy of any part of the software from you also gets a copy of these terms or the URL for them above, as well as copies of any plain-text lines beginning with `Required Notice:` that the licensor provided with the software.  For example:
 
-> Required Notice: Copyright © 2026 Bartosz Tomczyk. Commercial use of splot requires a separate written commercial license from Bartosz Tomczyk.
+> Required Notice: Copyright Yoyodyne, Inc. (http://example.com)
 
 ## Changes and New Works License
 
