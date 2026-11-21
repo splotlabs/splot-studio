@@ -40,10 +40,12 @@ on `PATH`; no FFmpeg is shipped yet (see `native/ffmpeg/README.md`).
 cargo xtask doctor                 # toolchain and native prerequisites; read-only
 cargo xtask ci --fast              # fmt, repo checks, clippy, unit tests
 cargo xtask ci                     # full gate, as CI runs it
-cargo run -p studio-app            # the desktop app
+cargo xtask run --release          # the desktop app, with its engine built to match
 cargo run -p studio-engine -- --help
 cargo run --release -p studio-engine -- encode in.y4m out.ivf
 ```
+
+`cargo run -p studio-app` rebuilds only the app, not the engine it starts; use `cargo xtask run`.
 
 Rules for contributors and coding agents are in [`AGENTS.md`](AGENTS.md).
 
