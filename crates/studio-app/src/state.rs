@@ -1,31 +1,41 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
-//! Interaction state: what the user has chosen and what the engine said, as
-//! typed values.
+//! Interaction state: the queue of files, the current settings and what the
+//! engine said, as typed values.
 //!
 //! UI callbacks and worker answers become [`Intent`]s; [`AppState::apply`]
-//! validates them against the domain types and returns the [`Effect`] the
-//! caller must perform. The window is then re-synchronised from [`AppState`],
-//! so a rejected value snaps back instead of lingering in a widget. Nothing
-//! here touches files, processes or the window.
+//! validates them, moves items only through the [`crate::queue`] table and
+//! returns the [`Effect`]s the caller must perform. The window is then
+//! re-synchronised from [`AppState`], so a rejected value snaps back. Nothing
+//! here starts processes or writes files; the disk is only looked at
+//! through [`Disk`] (does a destination exist).
 //!
-//! A job is only ever built from a successful probe of the current source:
-//! its fingerprint and video stream come from those facts. When the output
-//! leaves something out, Convert first asks for a [`Confirmation`]; only that
-//! confirmation sets [`JobSpec::omissions_acknowledged`], for that one job.
+//! Settings are global and apply to every waiting item; an item takes an
+//! immutable [`JobSpec`] snapshot when it starts. One item runs at a time.
+//! A run converts the waiting items in list order; a failure moves on to the
+//! next, Cancel stops the run after the current item (the rest wait for
+//! Continue). A video-only output that leaves something out needs a
+//! [`Confirmation`], recorded per item as an [`Acknowledgement`] that holds
+//! only while the file, stream and settings it was given for are unchanged.
 
-use std::path::{Path, PathBuf};
+mod files;
+mod run;
+#[cfg(test)]
+mod tests;
+
+use std::path::PathBuf;
 use std::time::Instant;
 
-use studio_domain::job::{
-    Failure, FailureCode, JobSpec, Omissions, SourceFacts, SourceReader, VideoTrack, WirePath,
-};
+use studio_domain::job::{FailureCode, JobSpec, Omissions, SourceFacts};
 use studio_domain::protocol::Capabilities;
 use studio_domain::settings::{Crf, EncoderSettings, OutputKind, SpeedPreset};
 
-use crate::activity::{self, Activity, Phase};
+use crate::activity::{self, Changed};
+use crate::queue::{Acknowledgement, Item, ItemId, ItemState, PartialFate};
+use crate::recovery::{Disk, Recovered};
 use crate::simple::{Priority, Quality};
+use crate::source::{ProbeFailure, ProbeRequest, TrackPicker};
 
 /// `splot_encode::Config::DEFAULT_CRF` at the pinned codec revision.
 const CODEC_DEFAULT_CRF: u8 = 20;
@@ -54,11 +64,14 @@ pub const INITIAL_SETTINGS: EncoderSettings = EncoderSettings {
 /// Something the user asked for, or an answer from a worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Intent {
-    /// Open the native file dialog.
-    OpenRequested,
-    /// The file dialog closed, or a path came from the command line; `None`
-    /// means the dialog was cancelled.
-    PickFinished(Option<PathBuf>),
+    /// Open the native file dialog to add files (Open…, Add…).
+    AddRequested,
+    /// Open the native file dialog to replace the one file (Change…).
+    ReplaceRequested,
+    /// The file dialog closed; empty means it was cancelled.
+    PickFinished(Vec<PathBuf>),
+    /// Files named on the command line: added, as if picked.
+    FilesOpened(Vec<PathBuf>),
     /// A probe worker answered.
     ProbeAnswered {
         /// The probe, as returned in [`Effect::Probe`].
@@ -66,9 +79,17 @@ pub enum Intent {
         /// The facts, or why the source cannot be read.
         result: Result<SourceFacts, ProbeFailure>,
     },
-    /// A video track, by index into [`AppState::track_picker`]'s tracks.
+    /// A row was selected, by index.
+    RowSelected(i32),
+    /// A row's action (Remove, Cancel, Retry, Show in Folder), by index.
+    RowAction(i32),
+    /// Remove a row, by index, unless it is converting.
+    RemoveRequested(i32),
+    /// Remove every converted file from the list.
+    ClearFinished,
+    /// A video track of the selected file, by index into its picker.
     VideoTrackSelected(i32),
-    /// Open the native Save dialog for the destination.
+    /// Open the native Save dialog for the selected file's destination.
     ChooseDestinationRequested,
     /// The Save dialog closed; `None` means it was cancelled.
     DestinationPicked(Option<PathBuf>),
@@ -82,44 +103,42 @@ pub enum Intent {
     QualitySelected(i32),
     /// A Priority step, by index into [`Priority::ALL`].
     PrioritySelected(i32),
-    /// Clear the source and the finished job to start over.
+    /// Clear the one file to start over (Convert Another).
     ResetRequested,
     /// The startup handshake finished: what the engine can do, or why it
     /// cannot be used.
     EngineAnswered(Result<Capabilities, String>),
-    /// Start encoding with the current choices. When the output leaves
-    /// something out, this only asks for a [`Confirmation`].
-    EncodeRequested,
+    /// Convert, Convert N Files or Continue. When something waiting leaves
+    /// streams out, this only asks for a [`Confirmation`].
+    ConvertRequested,
     /// The user confirmed the video-only output in the confirmation.
     OmissionsConfirmed,
     /// The user dismissed the confirmation.
     OmissionsDeclined,
+    /// Stop the converting file; the run pauses.
+    CancelRequested,
     /// Something happened to a job.
     Job {
-        /// The job, as returned in [`Effect::Start`].
+        /// The job's request, as returned in [`Effect::Start`].
         id: u64,
         /// What happened.
         input: activity::Input,
     },
+    /// [`Effect::CleanPartial`] was carried out.
+    PartialCleaned {
+        /// The item.
+        item: ItemId,
+        /// What became of the file.
+        fate: PartialFate,
+    },
+    /// Saving the journal started failing (`Err`) or works again.
+    JournalSaved(Result<(), String>),
 }
 
-/// A probe to run with a new worker; any older probe is obsolete.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProbeRequest {
-    /// Echoed in [`Intent::ProbeAnswered`].
-    pub id: u64,
-    /// The source.
-    pub path: PathBuf,
-    /// The video stream to describe; `None` lets the engine pick.
-    pub video_stream: Option<u32>,
-}
-
-/// What [`AppState::apply`] asks the caller to do next.
+/// What the caller must do for an [`AppState::apply`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
-    /// Only re-synchronise the window.
-    None,
-    /// Show the native Open dialog.
+    /// Show the native Open dialog (several files may be picked).
     ShowOpenDialog,
     /// Show the native Save dialog, suggesting this file.
     ShowSaveDialog {
@@ -130,8 +149,13 @@ pub enum Effect {
         /// The output kind, for the file type filter.
         output: OutputKind,
     },
-    /// Probe a source.
-    Probe(ProbeRequest),
+    /// Probe a source with a new worker; any older probe is obsolete.
+    Probe {
+        /// The item it is for, so its size can be noted.
+        item: ItemId,
+        /// The request.
+        request: ProbeRequest,
+    },
     /// Start `job` with a new worker.
     Start {
         /// Echoed in [`Intent::Job`].
@@ -139,189 +163,36 @@ pub enum Effect {
         /// The immutable request.
         job: JobSpec,
     },
-    /// Act on a job's worker and redraw what changed.
-    Job {
-        /// The job.
+    /// Act on a job's worker.
+    Worker {
+        /// The job's request.
         id: u64,
-        /// The step it took.
-        step: activity::Step,
-        /// The engine said the source changed since it was probed: probe it
-        /// again, once.
-        reprobe: Option<ProbeRequest>,
+        /// What to do.
+        effect: activity::Effect,
     },
-}
-
-/// Why a probe produced no facts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProbeFailure {
-    /// The engine's reason; `None` when the engine could not be asked or
-    /// broke off.
-    pub code: Option<FailureCode>,
-    /// The explanation, safe to show.
-    pub message: String,
-}
-
-impl ProbeFailure {
-    /// A failure without an engine reason, such as a worker that did not start.
-    #[must_use]
-    pub fn other(message: impl Into<String>) -> Self {
-        Self {
-            code: None,
-            message: message.into(),
-        }
-    }
-}
-
-impl From<Failure> for ProbeFailure {
-    fn from(failure: Failure) -> Self {
-        Self {
-            code: Some(failure.code),
-            message: failure.message,
-        }
-    }
-}
-
-/// What is known about the chosen source.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Source {
-    /// Nothing chosen yet.
-    None,
-    /// The engine is reading its header.
-    Probing {
-        /// The file.
-        path: PathBuf,
-        /// The probe in flight.
-        id: u64,
-        /// The video stream asked for; `None` lets the engine pick.
-        video_stream: Option<u32>,
-        /// The facts of an earlier probe of this file while it is read again
-        /// (another video track, or the file changed). Display only.
-        previous: Option<Box<SourceFacts>>,
+    /// The worker of a job is gone and left `partial`: remove it with
+    /// [`crate::recovery::remove_partial`], then send
+    /// [`Intent::PartialCleaned`].
+    CleanPartial {
+        /// The item.
+        item: ItemId,
+        /// The announced temporary file.
+        partial: PathBuf,
+        /// The output it was for.
+        destination: PathBuf,
     },
-    /// The engine read its header.
-    Ready {
-        /// The file.
-        path: PathBuf,
-        /// What the header says.
-        facts: SourceFacts,
-    },
-    /// The engine could not read it, or could not be asked.
-    Unreadable {
-        /// The file.
-        path: PathBuf,
-        /// Why.
-        failure: ProbeFailure,
-        /// The video stream that was asked for.
-        video_stream: Option<u32>,
-        /// The facts of an earlier probe of this file, so another video
-        /// track can still be chosen. Display only.
-        previous: Option<Box<SourceFacts>>,
-    },
+    /// Show this converted file in the file manager.
+    Reveal(PathBuf),
 }
 
-impl Source {
-    /// The chosen file, in any state.
-    #[must_use]
-    pub fn path(&self) -> Option<&Path> {
-        match self {
-            Self::None => None,
-            Self::Probing { path, .. }
-            | Self::Ready { path, .. }
-            | Self::Unreadable { path, .. } => Some(path),
-        }
-    }
-
-    /// The facts to show: the current ones, or the previous ones while the
-    /// same file is read again. Never used to build a job.
-    #[must_use]
-    pub fn shown_facts(&self) -> Option<&SourceFacts> {
-        match self {
-            Self::Ready { facts, .. } => Some(facts),
-            Self::Probing { previous, .. } => previous.as_deref(),
-            Self::None | Self::Unreadable { .. } => None,
-        }
-    }
-
-    /// Every video track known for this file, attached pictures included.
-    #[must_use]
-    pub fn video_tracks(&self) -> &[VideoTrack] {
-        match self {
-            Self::Ready { facts, .. } => &facts.video_tracks,
-            Self::Probing { previous, .. } | Self::Unreadable { previous, .. } => {
-                previous.as_deref().map_or(&[], |f| &f.video_tracks)
-            }
-            Self::None => &[],
-        }
-    }
-
-    /// The video stream described, or asked for while reading.
-    #[must_use]
-    pub fn video_stream(&self) -> Option<u32> {
-        match self {
-            Self::Ready { facts, .. } => Some(facts.video_stream),
-            Self::Probing {
-                video_stream,
-                previous,
-                ..
-            }
-            | Self::Unreadable {
-                video_stream,
-                previous,
-                ..
-            } => video_stream.or_else(|| previous.as_deref().map(|f| f.video_stream)),
-            Self::None => None,
-        }
-    }
-}
-
-/// The video tracks a user may choose: every track that is not an attached
-/// picture.
-#[must_use]
-pub fn selectable_tracks(tracks: &[VideoTrack]) -> Vec<&VideoTrack> {
-    tracks.iter().filter(|t| !t.attached_picture).collect()
-}
-
-/// The attached pictures in `facts` other than the selected stream; they are
-/// part of [`Omissions::other_video`].
-#[must_use]
-pub fn attached_pictures(facts: &SourceFacts) -> u32 {
-    let count = facts
-        .video_tracks
-        .iter()
-        .filter(|t| t.attached_picture && t.stream != facts.video_stream)
-        .count();
-    u32::try_from(count)
-        .unwrap_or(u32::MAX)
-        .min(facts.omissions.other_video)
-}
-
-/// The Video track choice, shown only when a file has more than one track a
-/// user may choose.
+/// The result of one [`AppState::apply`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrackPicker {
-    /// The choosable tracks, in stream order.
-    pub tracks: Vec<VideoTrack>,
-    /// The index of the selected or requested track in `tracks`.
-    pub selected: Option<usize>,
-    /// Attached pictures, which are never encoded.
-    pub attached: Vec<VideoTrack>,
-}
-
-/// The question Convert asks before a job that leaves something out.
-///
-/// It holds the exact job it would start. Confirming starts that job with
-/// [`JobSpec::omissions_acknowledged`] set, and only when the job built from
-/// the current choices is still identical: same file and fingerprint, video
-/// stream, destination and settings (output kind included). Any change
-/// discards it. It is never kept for a later job.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Confirmation {
-    /// The job that confirming starts, still unacknowledged.
-    pub job: JobSpec,
-    /// What the output leaves out, as the confirmation repeats it.
-    pub omissions: Omissions,
-    /// How many of `omissions.other_video` are attached pictures.
-    pub attached_pictures: u32,
+pub struct Update {
+    /// What to do, in order.
+    pub effects: Vec<Effect>,
+    /// What to redraw. [`Changed::Phase`] also means the journal may have
+    /// changed.
+    pub changed: Changed,
 }
 
 /// Why Convert is unavailable.
@@ -344,227 +215,705 @@ pub enum Severity {
     Problem,
 }
 
-/// Where the output goes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Destination {
-    /// The file to create.
-    pub path: PathBuf,
-    /// The user picked it in the Save dialog; otherwise it is the default
-    /// next to the source and follows the output kind's extension.
-    pub chosen: bool,
-    /// Something existed at `path` when last checked.
-    pub exists: bool,
+/// How the window shows the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// No file: the empty state.
+    Empty,
+    /// One file: the file card, exactly as before there was a queue.
+    Single,
+    /// Several files: a list of rows.
+    List,
 }
 
-/// The user's choices and what the engine reported.
+/// One file in the question Convert asks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Asked {
+    /// The item.
+    pub item: ItemId,
+    /// What confirming records for it.
+    pub ack: Acknowledgement,
+    /// The source file.
+    pub source: PathBuf,
+    /// What its output leaves out.
+    pub omissions: Omissions,
+    /// How many of `omissions.other_video` are attached pictures.
+    pub attached_pictures: u32,
+}
+
+/// The question Convert asks before converting files whose video-only
+/// output leaves something out. Confirming records each file's
+/// [`Acknowledgement`]; a change to any of them (file, stream, settings,
+/// destination taken) discards the whole question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Confirmation {
+    /// The files, in list order.
+    pub asked: Vec<Asked>,
+    /// The output kind the question names.
+    pub output: OutputKind,
+}
+
+/// Why the journal is not in use, or what happened to it at startup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JournalProblem {
+    /// It did not parse and was moved here; the list started empty.
+    MovedAside(PathBuf),
+    /// A newer Splot Studio wrote it; it is left untouched and not saved.
+    TooNew {
+        /// The file.
+        path: PathBuf,
+        /// The version it states.
+        version: u32,
+    },
+    /// It cannot be read; it is left untouched and not saved.
+    Unreadable {
+        /// The file.
+        path: PathBuf,
+        /// Why.
+        error: String,
+    },
+    /// No data folder can be used; nothing is saved.
+    NoFolder(String),
+}
+
+/// The queue's view of startup: what was restored and what went wrong.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Startup {
+    /// The reconciled journal.
+    pub recovered: Option<Recovered>,
+    /// A problem to tell the user about.
+    pub problem: Option<JournalProblem>,
+}
+
+/// What the restored-queue notice says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Restored {
+    /// Files restored.
+    pub files: usize,
+    /// Of those, interrupted while converting.
+    pub interrupted: usize,
+    /// Files the journal named that could not be restored.
+    pub dropped: usize,
+}
+
+/// Which dialog is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dialog {
+    /// Open, adding the picked files.
+    Add,
+    /// Open, replacing the one file.
+    Replace,
+    /// Save, for this item.
+    Save(ItemId),
+}
+
+/// A run: converting the waiting files one after another.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Run {
+    /// Items this run started or decided not to start, in order.
+    attempted: Vec<ItemId>,
+    /// Cancel was pressed: end the run when the current item ends.
+    stop_after_current: bool,
+}
+
+/// The settings the window shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsView {
+    /// The values.
+    pub settings: EncoderSettings,
+    /// They are a file's snapshot (it is converting or converted), not the
+    /// current settings, and cannot be changed.
+    pub read_only: bool,
+}
+
+/// The queue, the current settings and what the engine reported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppState {
-    source: Source,
-    destination: Option<Destination>,
+    items: Vec<Item>,
+    next_id: ItemId,
     settings: EncoderSettings,
     /// `None` until the startup handshake answers; `Err` when the engine
     /// cannot be used, with the reason for the user.
     engine: Option<Result<Capabilities, String>>,
-    /// The current or last job and its id. A finished one is dismissed as
-    /// soon as the user changes what a new job would be made from.
-    job: Option<(u64, Activity)>,
-    /// The open confirmation, if Convert is waiting for one.
+    /// The row the user selected; see [`AppState::selected`].
+    selected: Option<ItemId>,
+    run: Option<Run>,
+    /// A run was cancelled, or the queue restored, with files left waiting:
+    /// the primary action reads Continue.
+    paused: bool,
     confirmation: Option<Confirmation>,
-    /// The source file's size, when it could be read.
-    source_size: Option<u64>,
-    /// The Open dialog is showing; further Open requests are ignored.
-    picking: bool,
-    /// The Save dialog is showing.
-    saving: bool,
-    next_id: u64,
+    /// The probe in flight: its request and item.
+    probing: Option<(u64, ItemId)>,
+    dialog: Option<Dialog>,
+    restored: Option<Restored>,
+    journal_problem: Option<JournalProblem>,
+    save_error: Option<String>,
+    next_request: u64,
 }
 
 impl Default for AppState {
     fn default() -> Self {
-        Self {
-            source: Source::None,
-            destination: None,
-            settings: INITIAL_SETTINGS,
-            engine: None,
-            job: None,
-            confirmation: None,
-            source_size: None,
-            picking: false,
-            saving: false,
-            next_id: 1,
-        }
+        Self::new(Startup::default())
     }
 }
 
 impl AppState {
-    /// Applies one intent at time `now`. Out-of-range values, stale answers
-    /// and changes while a job runs leave the state unchanged.
-    pub fn apply(&mut self, intent: Intent, now: Instant) -> Effect {
-        let inputs = self.job_inputs();
-        let effect = self.apply_inner(intent, now);
-        if self.job.as_ref().is_some_and(|(_, a)| a.is_terminal()) && self.job_inputs() != inputs {
-            self.job = None;
+    /// The state at launch: the recovered queue, or an empty one. Nothing
+    /// starts by itself; restored waiting files wait for Continue.
+    #[must_use]
+    pub fn new(startup: Startup) -> Self {
+        let mut state = Self {
+            items: Vec::new(),
+            next_id: 1,
+            settings: INITIAL_SETTINGS,
+            engine: None,
+            selected: None,
+            run: None,
+            paused: false,
+            confirmation: None,
+            probing: None,
+            dialog: None,
+            restored: None,
+            journal_problem: startup.problem,
+            save_error: None,
+            next_request: 1,
+        };
+        if let Some(recovered) = startup.recovered {
+            let interrupted = recovered
+                .items
+                .iter()
+                .filter(|i| i.state == ItemState::Interrupted)
+                .count();
+            if !recovered.items.is_empty() || recovered.dropped > 0 {
+                state.restored = Some(Restored {
+                    files: recovered.items.len(),
+                    interrupted,
+                    dropped: recovered.dropped,
+                });
+            }
+            state.paused = recovered
+                .items
+                .iter()
+                .any(|i| i.state == ItemState::Waiting);
+            state.items = recovered.items;
+            state.next_id = recovered.next_id;
+            state.settings = recovered.settings;
+        }
+        state
+    }
+
+    /// Applies one intent at time `now`, judging destinations on `disk`.
+    /// Out-of-range values, stale answers and edits of a converting file
+    /// leave the state unchanged.
+    pub fn apply(&mut self, intent: Intent, now: Instant, disk: &dyn Disk) -> Update {
+        let mut update = Update {
+            effects: Vec::new(),
+            changed: Changed::Phase,
+        };
+        self.apply_inner(intent, now, disk, &mut update);
+        if update.changed == Changed::Phase {
+            self.settle(now, &mut update);
+        }
+        update
+    }
+
+    fn apply_inner(&mut self, intent: Intent, now: Instant, disk: &dyn Disk, update: &mut Update) {
+        // The confirmation is modal: nothing new is opened behind it.
+        let modal = self.confirmation.is_some();
+        match intent {
+            Intent::AddRequested
+            | Intent::ReplaceRequested
+            | Intent::ChooseDestinationRequested
+                if self.dialog.is_some() || modal => {}
+            Intent::AddRequested => {
+                self.dialog = Some(Dialog::Add);
+                update.effects.push(Effect::ShowOpenDialog);
+            }
+            Intent::ReplaceRequested => {
+                if self.items.len() == 1 && !self.items[0].state.is_active() {
+                    self.dialog = Some(Dialog::Replace);
+                    update.effects.push(Effect::ShowOpenDialog);
+                }
+            }
+            Intent::PickFinished(paths) => {
+                let replace = self.dialog == Some(Dialog::Replace);
+                if matches!(self.dialog, Some(Dialog::Add | Dialog::Replace)) {
+                    self.dialog = None;
+                }
+                if !paths.is_empty() {
+                    if replace {
+                        self.replace(paths, disk);
+                    } else {
+                        self.add(paths, disk);
+                    }
+                }
+            }
+            Intent::FilesOpened(paths) => self.add(paths, disk),
+            Intent::ProbeAnswered { id, result } => self.probe_answered(id, result),
+            Intent::RowSelected(index) => {
+                if let Some(item) = self.at(index) {
+                    self.selected = Some(item.id);
+                }
+            }
+            Intent::RowAction(index) => self.row_action(index, now, disk, update),
+            Intent::RemoveRequested(index) => {
+                if let Some(id) = self.at(index).map(|i| i.id) {
+                    self.remove(id);
+                }
+            }
+            Intent::ClearFinished => {
+                let done: Vec<ItemId> = self
+                    .items
+                    .iter()
+                    .filter(|i| i.state == ItemState::Completed)
+                    .map(|i| i.id)
+                    .collect();
+                for id in done {
+                    self.remove(id);
+                }
+            }
+            Intent::VideoTrackSelected(index) => self.select_track(index, disk),
+            Intent::ChooseDestinationRequested => {
+                if let Some(effect) = self.save_dialog() {
+                    update.effects.push(effect);
+                }
+            }
+            Intent::DestinationPicked(path) => {
+                if let Some(Dialog::Save(id)) = self.dialog {
+                    self.dialog = None;
+                    if let Some(path) = path {
+                        self.choose_destination(id, path);
+                    }
+                }
+            }
+            Intent::OutputSelected(_)
+            | Intent::PresetEdited(_)
+            | Intent::CrfEdited(_)
+            | Intent::QualitySelected(_)
+            | Intent::PrioritySelected(_) => {
+                if !self.settings_view().read_only {
+                    self.edit_settings(&intent, disk);
+                }
+            }
+            Intent::ResetRequested => {
+                if self.items.len() == 1 && !self.items[0].state.is_active() {
+                    self.remove(self.items[0].id);
+                }
+            }
+            Intent::EngineAnswered(answer) => self.engine = Some(answer),
+            Intent::ConvertRequested => self.convert(disk),
+            Intent::OmissionsConfirmed => self.confirm(),
+            Intent::OmissionsDeclined => self.decline(),
+            Intent::CancelRequested => self.cancel(now, update),
+            Intent::Job { id, input } => self.job_input(id, input, now, disk, update),
+            Intent::PartialCleaned { item, fate } => self.partial_cleaned(item, fate),
+            Intent::JournalSaved(result) => self.save_error = result.err(),
+        }
+    }
+
+    /// Brings derived state up to date after a change: acknowledgements
+    /// and the confirmation that no longer hold are dropped, the next probe
+    /// is sent and the run moves on.
+    fn settle(&mut self, now: Instant, update: &mut Update) {
+        let settings = self.settings;
+        for item in &mut self.items {
+            let judged = item.facts.is_some() && item.state != ItemState::Probing;
+            if !item.state.is_active() && judged && !item.acknowledged_for(settings) {
+                item.ack = None;
+            }
         }
         if let Some(confirmation) = &self.confirmation
             && !self.still_confirms(confirmation)
         {
             self.confirmation = None;
         }
-        effect
+        if let Some(effect) = self.next_probe() {
+            update.effects.push(effect);
+        }
+        self.advance(now, update);
+        if !self.items.iter().any(|i| i.state == ItemState::Waiting) {
+            self.paused = false;
+        }
+        if self.items.is_empty() {
+            self.restored = None;
+        }
     }
 
-    /// What a new job would be made from.
-    fn job_inputs(&self) -> (Option<PathBuf>, Option<PathBuf>, EncoderSettings) {
-        (
-            self.source.path().map(Path::to_path_buf),
-            self.destination.as_ref().map(|d| d.path.clone()),
-            self.settings,
+    /// Records whether something exists at each destination now. The
+    /// engine refuses to replace a file either way; this only says so
+    /// earlier. Converting and converted files are not looked at.
+    pub fn refresh_destinations(&mut self, disk: &dyn Disk) {
+        for item in &mut self.items {
+            if !item.state.is_active() && item.state != ItemState::Completed {
+                item.destination.exists = disk.exists(&item.destination.path);
+            }
+        }
+        if let Some(confirmation) = &self.confirmation
+            && !self.still_confirms(confirmation)
+        {
+            self.confirmation = None;
+        }
+    }
+
+    /// Records a source file's size as read from its metadata.
+    pub fn note_size(&mut self, item: ItemId, size: Option<u64>) {
+        if let Some(item) = self.item_mut(item) {
+            item.size = size;
+        }
+    }
+
+    /// The app is closing: the converting file, if any, is recorded as
+    /// interrupted (with its temporary file still to be dealt with) before
+    /// its worker is stopped, so even a kill during shutdown is recovered.
+    pub fn interrupt_for_shutdown(&mut self) {
+        for item in &mut self.items {
+            if item.state.is_active() {
+                let publishing = item.state == ItemState::Publishing;
+                if item.transition(crate::queue::Transition::Interrupt).is_ok()
+                    && let Some(attempt) = &mut item.attempt
+                {
+                    attempt.ending = Some(crate::queue::Ending::Interrupted(
+                        crate::queue::Interruption {
+                            publishing,
+                            cause: crate::queue::Cause::AppClosed,
+                            destination_present: false,
+                            partial: PartialFate::pending(attempt.partial.as_deref()),
+                        },
+                    ));
+                }
+            }
+        }
+        self.run = None;
+    }
+
+    // Views.
+
+    /// How the window shows the queue.
+    #[must_use]
+    pub const fn mode(&self) -> Mode {
+        match self.items.len() {
+            0 => Mode::Empty,
+            1 => Mode::Single,
+            _ => Mode::List,
+        }
+    }
+
+    /// Every item, in list order.
+    #[must_use]
+    pub fn items(&self) -> &[Item] {
+        &self.items
+    }
+
+    /// The next item id, for the journal.
+    #[must_use]
+    pub const fn next_id(&self) -> ItemId {
+        self.next_id
+    }
+
+    /// The item whose details Advanced shows: the one the user selected,
+    /// otherwise the first that can still be edited, the converting one, or
+    /// the first.
+    #[must_use]
+    pub fn selected(&self) -> Option<&Item> {
+        self.selected
+            .and_then(|id| self.item(id))
+            .or_else(|| {
+                self.items
+                    .iter()
+                    .find(|i| matches!(i.state, ItemState::Waiting | ItemState::Probing))
+            })
+            .or_else(|| self.active())
+            .or_else(|| self.items.first())
+    }
+
+    /// The index of [`Self::selected`] in [`Self::items`].
+    #[must_use]
+    pub fn selected_index(&self) -> Option<usize> {
+        let id = self.selected()?.id;
+        self.items.iter().position(|i| i.id == id)
+    }
+
+    /// The index of the row the user selected, if they selected one.
+    #[must_use]
+    pub fn chosen_index(&self) -> Option<usize> {
+        let id = self.selected?;
+        self.items.iter().position(|i| i.id == id)
+    }
+
+    /// The converting item, if any.
+    #[must_use]
+    pub fn active(&self) -> Option<&Item> {
+        self.items.iter().find(|i| i.state.is_active())
+    }
+
+    /// The item shown in the activity area: the converting one, or in
+    /// [`Mode::Single`] the one file.
+    #[must_use]
+    pub fn focus(&self) -> Option<&Item> {
+        self.active().or_else(|| match self.mode() {
+            Mode::Single => self.items.first(),
+            Mode::Empty | Mode::List => None,
+        })
+    }
+
+    /// A run is under way (a file converting, or about to).
+    #[must_use]
+    pub const fn running(&self) -> bool {
+        self.run.is_some()
+    }
+
+    /// The primary action reads Continue.
+    #[must_use]
+    pub const fn paused(&self) -> bool {
+        self.paused
+    }
+
+    /// `(position, total)` of the converting file in the run: "2 of 5".
+    #[must_use]
+    pub fn run_position(&self) -> Option<(usize, usize)> {
+        let run = self.run.as_ref()?;
+        self.active()?;
+        let started = run
+            .attempted
+            .iter()
+            .filter(|id| self.item(**id).is_some_and(|i| i.attempt.is_some()))
+            .count();
+        let ahead = self
+            .items
+            .iter()
+            .filter(|i| !run.attempted.contains(&i.id))
+            .filter(|i| i.state == ItemState::Probing || self.startable(i))
+            .count();
+        Some((started, started + ahead))
+    }
+
+    /// How many files Convert would start now.
+    #[must_use]
+    pub fn startable_count(&self) -> usize {
+        self.items.iter().filter(|i| self.startable(i)).count()
+    }
+
+    /// The confirmation Convert is waiting for, if any.
+    #[must_use]
+    pub const fn confirmation(&self) -> Option<&Confirmation> {
+        self.confirmation.as_ref()
+    }
+
+    /// What the engine can do; `None` until it answered or when it cannot be
+    /// used.
+    #[must_use]
+    pub fn capabilities(&self) -> Option<&Capabilities> {
+        self.engine.as_ref().and_then(|e| e.as_ref().ok())
+    }
+
+    /// The restored-queue notice, until a run starts or the list empties.
+    #[must_use]
+    pub const fn restored(&self) -> Option<&Restored> {
+        self.restored.as_ref()
+    }
+
+    /// What happened to the journal at startup.
+    #[must_use]
+    pub const fn journal_problem(&self) -> Option<&JournalProblem> {
+        self.journal_problem.as_ref()
+    }
+
+    /// Why the journal cannot be saved right now.
+    #[must_use]
+    pub fn save_error(&self) -> Option<&str> {
+        self.save_error.as_deref()
+    }
+
+    /// The current settings, which every waiting file will use.
+    #[must_use]
+    pub const fn settings(&self) -> EncoderSettings {
+        self.settings
+    }
+
+    /// The settings the window shows: the selected file's snapshot while it
+    /// converts or once converted (and in one-file mode only while it
+    /// converts, as before there was a queue), otherwise the current ones.
+    #[must_use]
+    pub fn settings_view(&self) -> SettingsView {
+        let item = match self.mode() {
+            Mode::Single => self.items.first().filter(|i| i.state.is_active()),
+            // Only a row the user selected; the fallback shows the current
+            // settings, which is what the next files will use.
+            Mode::List => self
+                .selected
+                .and_then(|id| self.item(id))
+                .filter(|i| i.state.is_active() || i.state == ItemState::Completed),
+            Mode::Empty => None,
+        };
+        match item.and_then(|i| i.attempt.as_ref()) {
+            Some(attempt) => SettingsView {
+                settings: attempt.job.settings,
+                read_only: true,
+            },
+            None => SettingsView {
+                settings: self.settings,
+                read_only: false,
+            },
+        }
+    }
+
+    /// The index of `kind` in [`OutputKind::ALL`].
+    #[must_use]
+    pub fn output_index(kind: OutputKind) -> i32 {
+        OutputKind::ALL
+            .iter()
+            .position(|&k| k == kind)
+            .and_then(|i| i32::try_from(i).ok())
+            .unwrap_or(0)
+    }
+
+    /// The Video track choice for the selected file, when it has more than
+    /// one track a user may choose.
+    #[must_use]
+    pub fn track_picker(&self) -> Option<TrackPicker> {
+        let item = self.selected()?;
+        TrackPicker::of(
+            item.facts.as_ref().map_or(&[], |f| &f.video_tracks),
+            item.video_stream(),
         )
     }
 
-    /// Whether `confirmation` still describes the job Convert would start.
-    fn still_confirms(&self, confirmation: &Confirmation) -> bool {
-        let omissions = match &self.source {
-            Source::Ready { facts, .. } => facts.omissions,
-            _ => return false,
-        };
-        omissions == confirmation.omissions && self.next_job().as_ref() == Some(&confirmation.job)
+    /// The selected file's destination can be changed now.
+    #[must_use]
+    pub fn destination_editable(&self) -> bool {
+        self.selected().is_some_and(Self::editable)
     }
 
-    fn apply_inner(&mut self, intent: Intent, now: Instant) -> Effect {
-        let locked = self.job_running();
-        // The confirmation is modal: nothing new is opened behind it.
-        let modal = locked || self.confirmation.is_some();
-        match intent {
-            Intent::OpenRequested if self.picking || modal => {}
-            Intent::OpenRequested => {
-                self.picking = true;
-                return Effect::ShowOpenDialog;
+    /// A file whose source, track and destination may still change.
+    const fn editable(item: &Item) -> bool {
+        !item.state.is_active() && !matches!(item.state, ItemState::Completed)
+    }
+
+    /// Why Convert is unavailable and how serious that is. Engine problems
+    /// come first: no file choice can fix them.
+    #[must_use]
+    pub fn blocker(&self) -> Option<Blocker> {
+        let blocker = |text: &str, severity| {
+            Some(Blocker {
+                text: text.to_owned(),
+                severity,
+            })
+        };
+        if self.running() && self.mode() == Mode::Single {
+            return blocker("Converting. Closing the window stops it.", Severity::Info);
+        }
+        match &self.engine {
+            Some(Err(problem)) => return blocker(problem, Severity::Problem),
+            Some(Ok(c)) if c.encode_outputs.is_empty() => {
+                return blocker("This engine build cannot convert.", Severity::Problem);
             }
-            Intent::PickFinished(path) => {
-                self.picking = false;
-                // Cancelling keeps the previous choice.
-                if let Some(path) = path.filter(|_| !locked) {
-                    return self.choose_source(path);
-                }
-            }
-            Intent::ProbeAnswered { id, result } => {
-                if let Source::Probing {
-                    path,
-                    id: current,
-                    video_stream,
-                    previous,
-                } = &mut self.source
-                    && *current == id
-                {
-                    let path = std::mem::take(path);
-                    self.source = match result {
-                        Ok(facts) => Source::Ready { path, facts },
-                        Err(failure) => Source::Unreadable {
-                            path,
-                            failure,
-                            video_stream: *video_stream,
-                            previous: previous.take(),
-                        },
-                    };
-                }
-            }
-            Intent::VideoTrackSelected(_) | Intent::ResetRequested if locked => {}
-            Intent::VideoTrackSelected(index) => return self.select_track(index),
-            Intent::ChooseDestinationRequested if self.saving || modal => {}
-            Intent::ChooseDestinationRequested => {
-                if let Some(destination) = &self.destination {
-                    self.saving = true;
-                    let path = &destination.path;
-                    return Effect::ShowSaveDialog {
-                        directory: path.parent().map(Path::to_path_buf),
-                        file_name: path
-                            .file_name()
-                            .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
-                        output: self.settings.output,
-                    };
-                }
-            }
-            Intent::DestinationPicked(path) => {
-                self.saving = false;
-                if let Some(path) = path.filter(|_| !locked) {
-                    self.destination = Some(Destination {
-                        path,
-                        chosen: true,
-                        exists: false,
-                    });
-                }
-            }
-            Intent::OutputSelected(_)
-            | Intent::PresetEdited(_)
-            | Intent::CrfEdited(_)
-            | Intent::QualitySelected(_)
-            | Intent::PrioritySelected(_)
-                if !locked =>
+            _ => {}
+        }
+        let supported = self
+            .capabilities()
+            .is_none_or(|c| c.encode_outputs.contains(&self.settings.output));
+        if !supported {
+            return blocker(
+                &format!("This engine cannot write {}.", self.settings.output.label()),
+                Severity::Problem,
+            );
+        }
+        match self.mode() {
+            Mode::Empty => blocker("Open a video to convert it.", Severity::Info),
+            Mode::Single => self.single_blocker(&self.items[0]),
+            Mode::List => self.list_blocker(),
+        }
+    }
+
+    fn single_blocker(&self, item: &Item) -> Option<Blocker> {
+        let blocker = |text: &str, severity| {
+            Some(Blocker {
+                text: text.to_owned(),
+                severity,
+            })
+        };
+        match item.state {
+            ItemState::Probing => blocker("Reading the source…", Severity::Info),
+            ItemState::Unreadable
+                if item
+                    .probe_failure
+                    .as_ref()
+                    .is_some_and(|f| f.code == Some(FailureCode::MediaToolMissing)) =>
             {
-                self.edit_settings(&intent);
+                blocker("This build converts Y4M files only.", Severity::Problem)
             }
-            Intent::OutputSelected(_)
-            | Intent::PresetEdited(_)
-            | Intent::CrfEdited(_)
-            | Intent::QualitySelected(_)
-            | Intent::PrioritySelected(_) => {}
-            Intent::ResetRequested => {
-                self.source = Source::None;
-                self.destination = None;
-                self.source_size = None;
-                self.job = None;
+            ItemState::Unreadable => blocker("This file cannot be converted.", Severity::Problem),
+            ItemState::Waiting if item.destination.exists => {
+                blocker("The output file already exists.", Severity::Warning)
             }
-            Intent::EngineAnswered(answer) => self.engine = Some(answer),
-            Intent::EncodeRequested => return self.start(now),
-            Intent::OmissionsConfirmed => return self.confirm(now),
-            Intent::OmissionsDeclined => self.confirmation = None,
-            Intent::Job { id, input } => return self.job_input(id, input, now),
+            _ if self.engine.is_none() => blocker("Checking the engine…", Severity::Info),
+            ItemState::Completed => blocker("Converted.", Severity::Info),
+            _ => None,
         }
-        Effect::None
     }
 
-    /// Re-probes for the chosen track, unless it is the current one.
-    fn select_track(&mut self, index: i32) -> Effect {
-        let stream = step(&selectable_tracks(self.source.video_tracks()), index)
-            .map(|t| t.stream)
-            .filter(|&s| Some(s) != self.source.video_stream());
-        stream
-            .and_then(|s| self.reprobe(Some(s)))
-            .map_or(Effect::None, Effect::Probe)
+    fn list_blocker(&self) -> Option<Blocker> {
+        let blocker = |text: &str, severity| {
+            Some(Blocker {
+                text: text.to_owned(),
+                severity,
+            })
+        };
+        if self.running() || self.startable_count() > 0 {
+            return if self.engine.is_none() {
+                blocker("Checking the engine…", Severity::Info)
+            } else {
+                None
+            };
+        }
+        if self.items.iter().any(|i| i.state == ItemState::Probing) {
+            return blocker("Reading the files…", Severity::Info);
+        }
+        let taken = self
+            .items
+            .iter()
+            .filter(|i| i.state == ItemState::Waiting && i.destination.exists)
+            .count();
+        match taken {
+            0 => blocker("Nothing is waiting to convert.", Severity::Info),
+            1 => blocker(
+                "The output file of 1 waiting file already exists.",
+                Severity::Warning,
+            ),
+            n => blocker(
+                &format!("The output files of {n} waiting files already exist."),
+                Severity::Warning,
+            ),
+        }
     }
 
-    /// Hands `input` to job `id`, if it is the current one.
-    fn job_input(&mut self, id: u64, input: activity::Input, now: Instant) -> Effect {
-        let Some((current, activity)) = &mut self.job else {
-            return Effect::None;
-        };
-        if *current != id {
-            return Effect::None;
-        }
-        let was_terminal = activity.is_terminal();
-        let step = activity.apply(input, now);
-        let changed = !was_terminal
-            && matches!(activity.phase(), Phase::Failed(f) if f.code == FailureCode::SourceChanged);
-        // The engine refused a file that changed since it was probed. Read
-        // it again, once per refusal; what it contains now needs a new
-        // Convert (and a new confirmation).
-        let reprobe = if changed {
-            let stream = self.source.video_stream();
-            self.reprobe(stream)
-        } else {
-            None
-        };
-        Effect::Job { id, step, reprobe }
+    // Lookups.
+
+    fn item(&self, id: ItemId) -> Option<&Item> {
+        self.items.iter().find(|i| i.id == id)
+    }
+
+    fn item_mut(&mut self, id: ItemId) -> Option<&mut Item> {
+        self.items.iter_mut().find(|i| i.id == id)
+    }
+
+    fn at(&self, index: i32) -> Option<&Item> {
+        usize::try_from(index).ok().and_then(|i| self.items.get(i))
+    }
+
+    const fn take_request(&mut self) -> u64 {
+        let id = self.next_request;
+        self.next_request += 1;
+        id
     }
 
     /// Applies a settings edit; out-of-range values change nothing.
-    fn edit_settings(&mut self, intent: &Intent) {
+    fn edit_settings(&mut self, intent: &Intent, disk: &dyn Disk) {
         match *intent {
             Intent::OutputSelected(index) => {
                 if let Some(output) = step(&OutputKind::ALL, index) {
                     self.settings.output = output;
-                    self.follow_output_kind();
+                    self.follow_output_kind(disk);
                 }
             }
             Intent::PresetEdited(value) => {
@@ -590,293 +939,6 @@ impl AppState {
             _ => {}
         }
     }
-
-    fn choose_source(&mut self, path: PathBuf) -> Effect {
-        let id = self.take_id();
-        self.source_size = None;
-        self.destination = Some(Destination {
-            path: default_destination(&path, self.settings.output),
-            chosen: false,
-            exists: false,
-        });
-        self.source = Source::Probing {
-            path: path.clone(),
-            id,
-            video_stream: None,
-            previous: None,
-        };
-        Effect::Probe(ProbeRequest {
-            id,
-            path,
-            video_stream: None,
-        })
-    }
-
-    /// Reads the current file again for `video_stream`, keeping the
-    /// destination. The last facts stay visible until the answer arrives.
-    fn reprobe(&mut self, video_stream: Option<u32>) -> Option<ProbeRequest> {
-        let path = self.source.path()?.to_path_buf();
-        let previous = match std::mem::replace(&mut self.source, Source::None) {
-            Source::Ready { facts, .. } => Some(Box::new(facts)),
-            Source::Probing { previous, .. } | Source::Unreadable { previous, .. } => previous,
-            Source::None => None,
-        };
-        let id = self.take_id();
-        self.source = Source::Probing {
-            path: path.clone(),
-            id,
-            video_stream,
-            previous,
-        };
-        Some(ProbeRequest {
-            id,
-            path,
-            video_stream,
-        })
-    }
-
-    /// A default destination keeps following the output kind's extension.
-    fn follow_output_kind(&mut self) {
-        if let (Some(destination), Some(source)) = (&mut self.destination, self.source.path())
-            && !destination.chosen
-        {
-            destination.path = default_destination(source, self.settings.output);
-            destination.exists = false;
-        }
-    }
-
-    /// The job Convert would start now, unacknowledged; `None` while
-    /// anything blocks it. Its fingerprint and stream come from the current
-    /// probe.
-    fn next_job(&self) -> Option<JobSpec> {
-        if self.blocker().is_some() {
-            return None;
-        }
-        let (Source::Ready { path, facts }, Some(destination)) = (&self.source, &self.destination)
-        else {
-            return None;
-        };
-        Some(JobSpec {
-            source: WirePath::from_path(path),
-            fingerprint: facts.fingerprint,
-            video_stream: facts.video_stream,
-            omissions_acknowledged: false,
-            destination: WirePath::from_path(&destination.path),
-            settings: self.settings,
-        })
-    }
-
-    fn start(&mut self, now: Instant) -> Effect {
-        let (Some(job), Source::Ready { facts, .. }) = (self.next_job(), &self.source) else {
-            return Effect::None;
-        };
-        if facts.omissions.any() {
-            self.confirmation = Some(Confirmation {
-                job,
-                omissions: facts.omissions,
-                attached_pictures: attached_pictures(facts),
-            });
-            return Effect::None;
-        }
-        self.launch(job, now)
-    }
-
-    fn confirm(&mut self, now: Instant) -> Effect {
-        match self.confirmation.take() {
-            Some(confirmation) if self.still_confirms(&confirmation) => self.launch(
-                JobSpec {
-                    omissions_acknowledged: true,
-                    ..confirmation.job
-                },
-                now,
-            ),
-            _ => Effect::None,
-        }
-    }
-
-    fn launch(&mut self, job: JobSpec, now: Instant) -> Effect {
-        let (Source::Ready { facts, .. }, Some(destination)) = (&self.source, &self.destination)
-        else {
-            return Effect::None;
-        };
-        let activity = Activity::new(
-            destination.path.clone(),
-            facts.frame_count,
-            facts.reader == SourceReader::Ffmpeg,
-            now,
-        );
-        let id = self.take_id();
-        self.job = Some((id, activity));
-        Effect::Start { id, job }
-    }
-
-    const fn take_id(&mut self) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
-    }
-
-    /// Records whether something exists at the destination now. The engine
-    /// refuses to replace a file either way; this only says so earlier.
-    pub fn note_destination_exists(&mut self, exists: bool) {
-        if let Some(destination) = &mut self.destination {
-            destination.exists = exists;
-        }
-        // A destination that is now taken blocks the confirmed job.
-        if let Some(confirmation) = &self.confirmation
-            && !self.still_confirms(confirmation)
-        {
-            self.confirmation = None;
-        }
-    }
-
-    /// Records the source file's size as read from its metadata.
-    pub const fn note_source_size(&mut self, size: Option<u64>) {
-        self.source_size = size;
-    }
-
-    /// The source file's size, when it could be read.
-    #[must_use]
-    pub const fn source_size(&self) -> Option<u64> {
-        self.source_size
-    }
-
-    /// Why Encode is unavailable right now, or `None` when it can start.
-    #[must_use]
-    pub fn encode_blocker(&self) -> Option<String> {
-        self.blocker().map(|b| b.text)
-    }
-
-    /// Why Encode is unavailable and how serious that is. Engine problems
-    /// come first: no source choice can fix them.
-    #[must_use]
-    pub fn blocker(&self) -> Option<Blocker> {
-        let blocker = |text: &str, severity| {
-            Some(Blocker {
-                text: text.to_owned(),
-                severity,
-            })
-        };
-        if self.job_running() {
-            return blocker("Converting. Closing the window stops it.", Severity::Info);
-        }
-        match &self.engine {
-            Some(Err(problem)) => return blocker(problem, Severity::Problem),
-            Some(Ok(c)) if c.encode_outputs.is_empty() => {
-                return blocker("This engine build cannot convert.", Severity::Problem);
-            }
-            _ => {}
-        }
-        let outputs = self
-            .engine
-            .as_ref()
-            .map(|e| e.as_ref().map(|c| &c.encode_outputs));
-        match (&self.source, &self.destination, outputs) {
-            (Source::None, ..) => blocker("Open a video to convert it.", Severity::Info),
-            (Source::Probing { .. }, ..) => blocker("Reading the source…", Severity::Info),
-            (Source::Unreadable { failure, .. }, ..)
-                if failure.code == Some(FailureCode::MediaToolMissing) =>
-            {
-                blocker("This build converts Y4M files only.", Severity::Problem)
-            }
-            (Source::Unreadable { .. }, ..) => {
-                blocker("This file cannot be converted.", Severity::Problem)
-            }
-            (_, None, _) => blocker("Choose an output file.", Severity::Info),
-            (_, Some(d), _) if d.exists => {
-                blocker("The output file already exists.", Severity::Warning)
-            }
-            (_, _, None) => blocker("Checking the engine…", Severity::Info),
-            (_, _, Some(Ok(outputs))) if !outputs.contains(&self.settings.output) => blocker(
-                &format!("This engine cannot write {}.", self.settings.output.label()),
-                Severity::Problem,
-            ),
-            (Source::Ready { .. }, Some(_), Some(_)) => None,
-        }
-    }
-
-    /// A job is running: the source, destination and settings are locked.
-    #[must_use]
-    pub fn job_running(&self) -> bool {
-        self.job.as_ref().is_some_and(|(_, a)| !a.is_terminal())
-    }
-
-    /// The current or last job.
-    #[must_use]
-    pub fn job(&self) -> Option<(u64, &Activity)> {
-        self.job.as_ref().map(|(id, a)| (*id, a))
-    }
-
-    /// The confirmation Convert is waiting for, if any.
-    #[must_use]
-    pub const fn confirmation(&self) -> Option<&Confirmation> {
-        self.confirmation.as_ref()
-    }
-
-    /// What the engine can do; `None` until it answered or when it cannot be
-    /// used.
-    #[must_use]
-    pub fn capabilities(&self) -> Option<&Capabilities> {
-        self.engine.as_ref().and_then(|e| e.as_ref().ok())
-    }
-
-    /// The Video track choice, when the file has more than one track a user
-    /// may choose.
-    #[must_use]
-    pub fn track_picker(&self) -> Option<TrackPicker> {
-        let all = self.source.video_tracks();
-        let tracks: Vec<VideoTrack> = selectable_tracks(all).into_iter().cloned().collect();
-        if tracks.len() < 2 {
-            return None;
-        }
-        let stream = self.source.video_stream();
-        Some(TrackPicker {
-            selected: tracks.iter().position(|t| Some(t.stream) == stream),
-            attached: all.iter().filter(|t| t.attached_picture).cloned().collect(),
-            tracks,
-        })
-    }
-
-    /// What is known about the chosen source.
-    #[must_use]
-    pub const fn source(&self) -> &Source {
-        &self.source
-    }
-
-    /// Where the output goes.
-    #[must_use]
-    pub const fn destination(&self) -> Option<&Destination> {
-        self.destination.as_ref()
-    }
-
-    /// The requested encoder settings.
-    #[must_use]
-    pub const fn settings(&self) -> EncoderSettings {
-        self.settings
-    }
-
-    /// The index of the current output kind in [`OutputKind::ALL`].
-    #[must_use]
-    pub fn output_index(&self) -> i32 {
-        OutputKind::ALL
-            .iter()
-            .position(|&kind| kind == self.settings.output)
-            .and_then(|i| i32::try_from(i).ok())
-            .unwrap_or(0)
-    }
-}
-
-/// `<source stem>.<ext>` next to the source, never the source itself.
-#[must_use]
-pub fn default_destination(source: &Path, output: OutputKind) -> PathBuf {
-    let path = source.with_extension(output.extension());
-    if path != source {
-        return path;
-    }
-    let stem = source
-        .file_stem()
-        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-    source.with_file_name(format!("{stem}-av2.{}", output.extension()))
 }
 
 fn step<T: Copy>(all: &[T], index: i32) -> Option<T> {
@@ -887,848 +949,4 @@ fn step<T: Copy>(all: &[T], index: i32) -> Option<T> {
 
 fn to_u8(value: i32) -> Option<u8> {
     u8::try_from(value).ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::activity::{Effect as JobEffect, Input};
-    use studio_domain::job::{ChromaLayout, Rational, SourceFingerprint};
-    use studio_domain::protocol::{Event, MediaTool, MediaToolOrigin};
-
-    const PRINT: SourceFingerprint = SourceFingerprint {
-        len: 1000,
-        modified: Some((1_700_000_000, 5)),
-    };
-
-    fn track(stream: u32, attached_picture: bool) -> VideoTrack {
-        VideoTrack {
-            stream,
-            codec: if attached_picture { "mjpeg" } else { "h264" }.into(),
-            width: 640,
-            height: 360,
-            attached_picture,
-        }
-    }
-
-    fn facts(frame_count: Option<u64>) -> SourceFacts {
-        SourceFacts {
-            reader: SourceReader::Y4m,
-            fingerprint: PRINT,
-            video_stream: 0,
-            video_tracks: vec![track(0, false)],
-            omissions: Omissions::default(),
-            width: 640,
-            height: 360,
-            frame_rate: Rational {
-                num: 30000,
-                den: 1001,
-            },
-            pixel_aspect: None,
-            bit_depth: 10,
-            chroma: ChromaLayout::Yuv420,
-            frame_count,
-            disclosures: Vec::new(),
-        }
-    }
-
-    /// An MP4 with two movie tracks, cover art, audio, subtitles and
-    /// chapters, described for `stream`.
-    fn rich(stream: u32) -> SourceFacts {
-        SourceFacts {
-            reader: SourceReader::Ffmpeg,
-            video_stream: stream,
-            video_tracks: vec![track(0, false), track(1, false), track(4, true)],
-            omissions: Omissions {
-                other_video: 2,
-                audio: 2,
-                subtitles: 3,
-                chapters: 4,
-                ..Omissions::default()
-            },
-            frame_count: None,
-            ..facts(None)
-        }
-    }
-
-    fn capabilities(media_tool: Option<MediaTool>) -> Capabilities {
-        Capabilities {
-            encode_outputs: OutputKind::ALL.to_vec(),
-            media_tool,
-        }
-    }
-
-    fn system_ffmpeg() -> MediaTool {
-        MediaTool {
-            version: "8.0.1".into(),
-            origin: MediaToolOrigin::System,
-        }
-    }
-
-    fn probe_id(effect: &Effect) -> u64 {
-        match effect {
-            Effect::Probe(request) => request.id,
-            other => unreachable!("expected a probe, got {other:?}"),
-        }
-    }
-
-    /// An app whose engine encodes both kinds and whose `path` probed as
-    /// `facts`.
-    fn ready_with(path: &str, facts: SourceFacts) -> (AppState, Instant) {
-        let now = Instant::now();
-        let mut state = AppState::default();
-        state.apply(
-            Intent::EngineAnswered(Ok(capabilities(Some(system_ffmpeg())))),
-            now,
-        );
-        let id = probe_id(&state.apply(Intent::PickFinished(Some(path.into())), now));
-        state.apply(
-            Intent::ProbeAnswered {
-                id,
-                result: Ok(facts),
-            },
-            now,
-        );
-        (state, now)
-    }
-
-    fn ready() -> (AppState, Instant) {
-        ready_with("/media/clip.y4m", facts(Some(90)))
-    }
-
-    fn start(state: &mut AppState, now: Instant) -> (u64, JobSpec) {
-        match state.apply(Intent::EncodeRequested, now) {
-            Effect::Start { id, job } => (id, job),
-            other => unreachable!("expected Start, got {other:?}"),
-        }
-    }
-
-    /// Presses Convert on a source with omissions and confirms.
-    fn confirm(state: &mut AppState, now: Instant) -> (u64, JobSpec) {
-        assert_eq!(state.apply(Intent::EncodeRequested, now), Effect::None);
-        assert!(state.confirmation().is_some(), "Convert must ask first");
-        match state.apply(Intent::OmissionsConfirmed, now) {
-            Effect::Start { id, job } => (id, job),
-            other => unreachable!("expected Start, got {other:?}"),
-        }
-    }
-
-    fn end_job(state: &mut AppState, id: u64, now: Instant, event: Event) -> Effect {
-        state.apply(
-            Intent::Job {
-                id,
-                input: Input::Event(event),
-            },
-            now,
-        )
-    }
-
-    #[test]
-    fn open_is_not_reentrant_while_a_dialog_shows() {
-        let now = Instant::now();
-        let mut state = AppState::default();
-        assert_eq!(
-            state.apply(Intent::OpenRequested, now),
-            Effect::ShowOpenDialog
-        );
-        assert_eq!(state.apply(Intent::OpenRequested, now), Effect::None);
-        state.apply(Intent::PickFinished(None), now);
-        assert_eq!(
-            state.apply(Intent::OpenRequested, now),
-            Effect::ShowOpenDialog
-        );
-    }
-
-    #[test]
-    fn picking_probes_and_sets_a_default_destination() {
-        let now = Instant::now();
-        let mut state = AppState::default();
-        let effect = state.apply(
-            Intent::PickFinished(Some("/media/clip one.mkv".into())),
-            now,
-        );
-        assert_eq!(
-            effect,
-            Effect::Probe(ProbeRequest {
-                id: 1,
-                path: "/media/clip one.mkv".into(),
-                video_stream: None,
-            })
-        );
-        assert_eq!(
-            state.destination().map(|d| (d.path.as_path(), d.chosen)),
-            Some((Path::new("/media/clip one.ivf"), false))
-        );
-        assert_eq!(
-            state.encode_blocker().as_deref(),
-            Some("Reading the source…")
-        );
-        // Cancelling a later dialog keeps the choice.
-        state.apply(Intent::OpenRequested, now);
-        state.apply(Intent::PickFinished(None), now);
-        assert_eq!(
-            state.source().path(),
-            Some(Path::new("/media/clip one.mkv"))
-        );
-    }
-
-    #[test]
-    fn a_stale_probe_answer_is_ignored() {
-        let now = Instant::now();
-        let mut state = AppState::default();
-        state.apply(Intent::PickFinished(Some("/a.y4m".into())), now);
-        state.apply(Intent::PickFinished(Some("/b.y4m".into())), now);
-        state.apply(
-            Intent::ProbeAnswered {
-                id: 1,
-                result: Ok(facts(None)),
-            },
-            now,
-        );
-        assert!(matches!(state.source(), Source::Probing { id: 2, .. }));
-        state.apply(
-            Intent::ProbeAnswered {
-                id: 2,
-                result: Err(ProbeFailure {
-                    code: Some(FailureCode::InvalidSource),
-                    message: "not a video".into(),
-                }),
-            },
-            now,
-        );
-        assert!(
-            matches!(state.source(), Source::Unreadable { failure, .. } if failure.message == "not a video")
-        );
-        assert_eq!(
-            state.encode_blocker().as_deref(),
-            Some("This file cannot be converted.")
-        );
-    }
-
-    #[test]
-    fn the_default_destination_follows_the_output_kind_but_a_chosen_one_stays() {
-        let (mut state, now) = ready();
-        state.apply(Intent::OutputSelected(1), now);
-        assert_eq!(
-            state.destination().map(|d| d.path.clone()),
-            Some("/media/clip.obu".into())
-        );
-        let effect = state.apply(Intent::ChooseDestinationRequested, now);
-        assert_eq!(
-            effect,
-            Effect::ShowSaveDialog {
-                directory: Some("/media".into()),
-                file_name: "clip.obu".into(),
-                output: OutputKind::Av2AnnexB
-            }
-        );
-        state.apply(Intent::DestinationPicked(Some("/out/mine.obu".into())), now);
-        state.apply(Intent::OutputSelected(0), now);
-        assert_eq!(
-            state.destination().map(|d| (d.path.clone(), d.chosen)),
-            Some(("/out/mine.obu".into(), true))
-        );
-        // A new source resets to a default next to it.
-        state.apply(Intent::PickFinished(Some("/media/two.y4m".into())), now);
-        assert_eq!(
-            state.destination().map(|d| (d.path.clone(), d.chosen)),
-            Some(("/media/two.ivf".into(), false))
-        );
-    }
-
-    #[test]
-    fn the_default_destination_is_never_the_source() {
-        assert_eq!(
-            default_destination(Path::new("/m/clip.ivf"), OutputKind::Ivf),
-            PathBuf::from("/m/clip-av2.ivf")
-        );
-        assert_eq!(
-            default_destination(Path::new("/m/clip"), OutputKind::Av2AnnexB),
-            PathBuf::from("/m/clip.obu")
-        );
-    }
-
-    #[test]
-    fn encode_needs_a_probe_a_free_destination_and_engine_support() {
-        let now = Instant::now();
-        let mut state = AppState::default();
-        assert_eq!(
-            state.encode_blocker().as_deref(),
-            Some("Open a video to convert it.")
-        );
-        assert_eq!(state.apply(Intent::EncodeRequested, now), Effect::None);
-
-        let (mut state, now) = ready();
-        assert_eq!(state.encode_blocker(), None);
-        state.note_destination_exists(true);
-        assert_eq!(
-            state.encode_blocker().as_deref(),
-            Some("The output file already exists.")
-        );
-        assert_eq!(state.apply(Intent::EncodeRequested, now), Effect::None);
-        state.note_destination_exists(false);
-
-        let ivf_only = Capabilities {
-            encode_outputs: vec![OutputKind::Ivf],
-            media_tool: None,
-        };
-        state.apply(Intent::EngineAnswered(Ok(ivf_only)), now);
-        state.apply(Intent::OutputSelected(1), now);
-        assert_eq!(
-            state.encode_blocker(),
-            Some(format!(
-                "This engine cannot write {}.",
-                OutputKind::Av2AnnexB.label()
-            ))
-        );
-        state.apply(Intent::EngineAnswered(Ok(Capabilities::default())), now);
-        state.apply(Intent::OutputSelected(0), now);
-        assert_eq!(state.blocker().map(|b| b.severity), Some(Severity::Problem));
-    }
-
-    #[test]
-    fn an_engine_problem_shows_before_anything_else() {
-        let now = Instant::now();
-        let mut state = AppState::default();
-        state.apply(
-            Intent::EngineAnswered(Err("The engine is missing.".into())),
-            now,
-        );
-        assert_eq!(
-            state.blocker(),
-            Some(Blocker {
-                text: "The engine is missing.".into(),
-                severity: Severity::Problem
-            })
-        );
-        assert_eq!(state.capabilities(), None);
-        let (mut state, now) = ready();
-        state.apply(Intent::EngineAnswered(Err("Incompatible.".into())), now);
-        assert_eq!(state.encode_blocker().as_deref(), Some("Incompatible."));
-        assert_eq!(state.apply(Intent::EncodeRequested, now), Effect::None);
-    }
-
-    #[test]
-    fn an_unanswered_engine_blocks_encode() {
-        let now = Instant::now();
-        let mut state = AppState::default();
-        let id = probe_id(&state.apply(Intent::PickFinished(Some("/m/a.y4m".into())), now));
-        state.apply(
-            Intent::ProbeAnswered {
-                id,
-                result: Ok(facts(None)),
-            },
-            now,
-        );
-        assert_eq!(
-            state.encode_blocker().as_deref(),
-            Some("Checking the engine…")
-        );
-    }
-
-    #[test]
-    fn encode_builds_the_job_from_the_probe_and_the_current_choices_and_locks_them() {
-        let (mut state, now) = ready();
-        state.apply(Intent::PresetEdited(9), now);
-        state.apply(Intent::CrfEdited(33), now);
-        let (id, job) = start(&mut state, now);
-        assert_eq!(job.source, WirePath::Utf8("/media/clip.y4m".into()));
-        assert_eq!(job.destination, WirePath::Utf8("/media/clip.ivf".into()));
-        assert_eq!(job.fingerprint, PRINT);
-        assert_eq!(job.video_stream, 0);
-        // Nothing to leave out: one click, nothing acknowledged.
-        assert!(!job.omissions_acknowledged);
-        assert_eq!(job.settings.preset.get(), 9);
-        assert_eq!(job.settings.crf.get(), 33);
-        assert!(state.job_running());
-        assert_eq!(state.job().map(|(_, a)| a.total_frames()), Some(Some(90)));
-
-        // Everything the job was built from is locked while it runs.
-        let before = state.clone();
-        for intent in [
-            Intent::OpenRequested,
-            Intent::PickFinished(Some("/other.y4m".into())),
-            Intent::VideoTrackSelected(1),
-            Intent::ChooseDestinationRequested,
-            Intent::DestinationPicked(Some("/other.ivf".into())),
-            Intent::OutputSelected(1),
-            Intent::PresetEdited(1),
-            Intent::CrfEdited(1),
-            Intent::EncodeRequested,
-            Intent::OmissionsConfirmed,
-        ] {
-            assert_eq!(state.apply(intent.clone(), now), Effect::None, "{intent:?}");
-            assert_eq!(state, before, "{intent:?} must not change a running job");
-        }
-
-        // The job's own events reach it; another job id's do not.
-        let cancelled = || Input::Event(Event::Cancelled);
-        assert_eq!(
-            state.apply(
-                Intent::Job {
-                    id: id + 100,
-                    input: cancelled()
-                },
-                now
-            ),
-            Effect::None
-        );
-        let effect = state.apply(
-            Intent::Job {
-                id,
-                input: cancelled(),
-            },
-            now,
-        );
-        assert!(
-            matches!(effect, Effect::Job { step, reprobe: None, .. } if step.effect == JobEffect::CloseInput)
-        );
-        assert!(!state.job_running());
-        assert_eq!(state.job().map(|(_, a)| a.phase()), Some(&Phase::Cancelled));
-        // Retry is pressing Encode again.
-        assert!(matches!(
-            state.apply(Intent::EncodeRequested, now),
-            Effect::Start { .. }
-        ));
-    }
-
-    #[test]
-    fn simple_steps_and_raw_values_are_one_setting() {
-        let now = Instant::now();
-        let mut state = AppState::default();
-        state.apply(Intent::QualitySelected(0), now);
-        state.apply(Intent::PrioritySelected(2), now);
-        assert_eq!(state.settings().crf, Quality::Compact.crf());
-        assert_eq!(state.settings().preset, Priority::SmallestFile.preset());
-        // A raw edit that matches no step is Custom, not a stale step.
-        state.apply(Intent::CrfEdited(37), now);
-        assert_eq!(Quality::of(state.settings().crf), None);
-        state.apply(Intent::CrfEdited(28), now);
-        assert_eq!(Quality::of(state.settings().crf), Some(Quality::Good));
-        for bad in [-1, 4, i32::MAX] {
-            state.apply(Intent::QualitySelected(bad), now);
-            state.apply(Intent::PrioritySelected(bad), now);
-        }
-        assert_eq!(state.settings().crf.get(), 28);
-        assert_eq!(state.settings().preset, Priority::SmallestFile.preset());
-    }
-
-    #[test]
-    fn a_finished_job_is_dismissed_when_its_inputs_change() {
-        let (mut state, now) = ready();
-        let (id, _) = start(&mut state, now);
-        end_job(&mut state, id, now, Event::Cancelled);
-        // Answers and checks do not dismiss it.
-        state.note_destination_exists(false);
-        state.apply(Intent::EngineAnswered(Ok(capabilities(None))), now);
-        assert!(state.job().is_some());
-        // Changing what a new job would be made from does.
-        state.apply(Intent::QualitySelected(0), now);
-        assert!(state.job().is_none());
-    }
-
-    #[test]
-    fn convert_another_starts_over_but_keeps_the_settings() {
-        let (mut state, now) = ready();
-        state.apply(Intent::QualitySelected(3), now);
-        let (id, _) = start(&mut state, now);
-        assert_eq!(state.apply(Intent::ResetRequested, now), Effect::None);
-        assert!(state.job_running(), "a running job is not reset");
-        state.apply(
-            Intent::Job {
-                id,
-                input: activity::Input::WorkerEnded {
-                    detail: "exit status: 1".into(),
-                },
-            },
-            now,
-        );
-        state.note_source_size(Some(10));
-        state.apply(Intent::ResetRequested, now);
-        assert_eq!(state.source(), &Source::None);
-        assert_eq!(state.destination(), None);
-        assert_eq!(state.source_size(), None);
-        assert!(state.job().is_none());
-        assert_eq!(state.settings().crf, Quality::Highest.crf());
-    }
-
-    #[test]
-    fn settings_follow_the_domain_ranges() {
-        let now = Instant::now();
-        let mut state = AppState::default();
-        state.apply(Intent::PresetEdited(i32::from(SpeedPreset::MAX)), now);
-        state.apply(Intent::CrfEdited(i32::from(Crf::MIN)), now);
-        state.apply(Intent::OutputSelected(1), now);
-        let expected = EncoderSettings {
-            output: OutputKind::ALL[1],
-            preset: SpeedPreset::new(SpeedPreset::MAX).unwrap_or_else(|e| unreachable!("{e}")),
-            crf: Crf::new(Crf::MIN).unwrap_or_else(|e| unreachable!("{e}")),
-        };
-        assert_eq!(state.settings(), expected);
-        assert_eq!(state.output_index(), 1);
-
-        for bad in [
-            Intent::PresetEdited(i32::from(SpeedPreset::MAX) + 1),
-            Intent::PresetEdited(-1),
-            Intent::CrfEdited(i32::from(Crf::MIN) - 1),
-            Intent::CrfEdited(i32::from(Crf::MAX) + 1),
-            Intent::CrfEdited(i32::MAX),
-            Intent::OutputSelected(-1),
-            Intent::OutputSelected(2),
-        ] {
-            state.apply(bad.clone(), now);
-            assert_eq!(state.settings(), expected, "{bad:?} must be rejected");
-        }
-    }
-
-    #[test]
-    fn initial_settings_are_valid_and_first_output() {
-        let state = AppState::default();
-        assert_eq!(state.settings(), INITIAL_SETTINGS);
-        assert_eq!(state.output_index(), 0);
-        assert_eq!(state.source(), &Source::None);
-        assert_eq!(state.destination(), None);
-    }
-
-    // Video-only acknowledgement.
-
-    #[test]
-    fn convert_asks_first_and_only_the_confirmation_acknowledges() {
-        let (mut state, now) = ready_with("/media/trip.mp4", rich(0));
-        assert_eq!(state.encode_blocker(), None);
-        assert_eq!(state.apply(Intent::EncodeRequested, now), Effect::None);
-        let confirmation = state.confirmation().cloned();
-        let Some(confirmation) = confirmation else {
-            unreachable!("Convert must ask first")
-        };
-        assert!(!confirmation.job.omissions_acknowledged);
-        assert_eq!(confirmation.omissions, rich(0).omissions);
-        assert_eq!(confirmation.attached_pictures, 1);
-        assert!(!state.job_running());
-        // Pressing Convert again does not start anything behind the question.
-        assert_eq!(state.apply(Intent::EncodeRequested, now), Effect::None);
-        // Nothing new opens behind it.
-        assert_eq!(state.apply(Intent::OpenRequested, now), Effect::None);
-        assert_eq!(
-            state.apply(Intent::ChooseDestinationRequested, now),
-            Effect::None
-        );
-
-        let Effect::Start { job, .. } = state.apply(Intent::OmissionsConfirmed, now) else {
-            unreachable!("confirming starts the job")
-        };
-        assert_eq!(
-            job,
-            JobSpec {
-                omissions_acknowledged: true,
-                ..confirmation.job
-            }
-        );
-        assert_eq!(state.confirmation(), None);
-    }
-
-    #[test]
-    fn declining_starts_nothing_and_a_stray_confirm_is_ignored() {
-        let (mut state, now) = ready_with("/media/trip.mp4", rich(0));
-        assert_eq!(state.apply(Intent::OmissionsConfirmed, now), Effect::None);
-        state.apply(Intent::EncodeRequested, now);
-        assert_eq!(state.apply(Intent::OmissionsDeclined, now), Effect::None);
-        assert_eq!(state.confirmation(), None);
-        assert_eq!(state.apply(Intent::OmissionsConfirmed, now), Effect::None);
-        assert!(state.job().is_none());
-    }
-
-    #[test]
-    fn an_acknowledgement_is_never_kept_for_the_next_job() {
-        let (mut state, now) = ready_with("/media/trip.mp4", rich(0));
-        let (id, job) = confirm(&mut state, now);
-        assert!(job.omissions_acknowledged);
-        end_job(&mut state, id, now, Event::Cancelled);
-        // The same file, stream and settings: Convert asks again.
-        assert_eq!(state.apply(Intent::EncodeRequested, now), Effect::None);
-        assert!(state.confirmation().is_some());
-    }
-
-    #[test]
-    fn any_change_to_the_job_discards_the_confirmation() {
-        type Change = fn(&mut AppState, Instant);
-        let changes: [(&str, Change); 6] = [
-            ("settings", |s, now| {
-                s.apply(Intent::QualitySelected(0), now);
-            }),
-            ("output kind", |s, now| {
-                s.apply(Intent::OutputSelected(1), now);
-            }),
-            ("destination", |s, now| {
-                s.apply(Intent::DestinationPicked(Some("/out/x.ivf".into())), now);
-            }),
-            ("destination taken", |s, _| s.note_destination_exists(true)),
-            ("video track", |s, now| {
-                s.apply(Intent::VideoTrackSelected(1), now);
-            }),
-            ("source", |s, now| {
-                s.apply(Intent::PickFinished(Some("/media/other.mp4".into())), now);
-            }),
-        ];
-        for (what, change) in changes {
-            let (mut state, now) = ready_with("/media/trip.mp4", rich(0));
-            state.apply(Intent::EncodeRequested, now);
-            assert!(state.confirmation().is_some());
-            change(&mut state, now);
-            assert_eq!(state.confirmation(), None, "{what} must discard it");
-            assert_eq!(
-                state.apply(Intent::OmissionsConfirmed, now),
-                Effect::None,
-                "{what}"
-            );
-            assert!(!state.job_running(), "{what}");
-        }
-    }
-
-    #[test]
-    fn the_confirmed_job_carries_the_probed_fingerprint_and_stream() {
-        let (mut state, now) = ready_with("/media/trip.mp4", rich(0));
-        state.apply(Intent::EncodeRequested, now);
-        // Re-reading the file (here: another track, then back) discards the
-        // question; the answer carries a new fingerprint.
-        let effect = state.apply(Intent::VideoTrackSelected(1), now);
-        assert_eq!(state.confirmation(), None);
-        state.apply(
-            Intent::ProbeAnswered {
-                id: probe_id(&effect),
-                result: Ok(SourceFacts {
-                    fingerprint: SourceFingerprint { len: 2000, ..PRINT },
-                    ..rich(1)
-                }),
-            },
-            now,
-        );
-        assert_eq!(state.apply(Intent::OmissionsConfirmed, now), Effect::None);
-        let (_, job) = confirm(&mut state, now);
-        assert_eq!(job.fingerprint.len, 2000);
-        assert_eq!(job.video_stream, 1);
-    }
-
-    #[test]
-    fn sources_without_omissions_convert_in_one_click() {
-        let video_only = SourceFacts {
-            reader: SourceReader::Ffmpeg,
-            ..facts(None)
-        };
-        let (mut state, now) = ready_with("/media/screen.webm", video_only);
-        let (_, job) = start(&mut state, now);
-        assert!(!job.omissions_acknowledged);
-        assert_eq!(state.confirmation(), None);
-    }
-
-    // Video track choice.
-
-    #[test]
-    fn the_track_picker_lists_movie_tracks_only_and_only_when_there_is_a_choice() {
-        let (state, _) = ready();
-        assert_eq!(state.track_picker(), None, "one track is no choice");
-        let one_and_art = SourceFacts {
-            video_tracks: vec![track(0, false), track(1, true)],
-            ..rich(0)
-        };
-        let (state, _) = ready_with("/m/song.mp4", one_and_art);
-        assert_eq!(state.track_picker(), None, "cover art is not a choice");
-
-        let (state, _) = ready_with("/m/trip.mp4", rich(1));
-        let picker = state.track_picker();
-        assert_eq!(
-            picker,
-            Some(TrackPicker {
-                tracks: vec![track(0, false), track(1, false)],
-                selected: Some(1),
-                attached: vec![track(4, true)],
-            })
-        );
-    }
-
-    #[test]
-    fn choosing_a_track_re_probes_that_stream_and_keeps_the_destination() {
-        let (mut state, now) = ready_with("/m/trip.mp4", rich(0));
-        state.apply(Intent::DestinationPicked(Some("/out/t.ivf".into())), now);
-        // The selected track, or one out of range, changes nothing.
-        for same in [0, 2, -1] {
-            assert_eq!(
-                state.apply(Intent::VideoTrackSelected(same), now),
-                Effect::None
-            );
-        }
-        let effect = state.apply(Intent::VideoTrackSelected(1), now);
-        let Effect::Probe(request) = effect else {
-            unreachable!("{effect:?}")
-        };
-        assert_eq!(request.video_stream, Some(1));
-        assert_eq!(request.path, PathBuf::from("/m/trip.mp4"));
-        // While reading, the last facts stay visible and the picker shows
-        // the requested track, but Convert waits.
-        assert_eq!(
-            state.source().shown_facts().map(|f| f.video_stream),
-            Some(0)
-        );
-        assert_eq!(state.track_picker().and_then(|p| p.selected), Some(1));
-        assert_eq!(
-            state.encode_blocker().as_deref(),
-            Some("Reading the source…")
-        );
-        assert_eq!(
-            state.destination().map(|d| d.path.clone()),
-            Some("/out/t.ivf".into())
-        );
-        state.apply(
-            Intent::ProbeAnswered {
-                id: request.id,
-                result: Ok(rich(1)),
-            },
-            now,
-        );
-        let (_, job) = confirm(&mut state, now);
-        assert_eq!(job.video_stream, 1);
-    }
-
-    #[test]
-    fn a_track_that_cannot_be_read_still_lets_the_user_choose_another() {
-        let (mut state, now) = ready_with("/m/trip.mp4", rich(0));
-        let request = match state.apply(Intent::VideoTrackSelected(1), now) {
-            Effect::Probe(request) => request,
-            other => unreachable!("{other:?}"),
-        };
-        state.apply(
-            Intent::ProbeAnswered {
-                id: request.id,
-                result: Err(ProbeFailure {
-                    code: Some(FailureCode::UnsupportedSource),
-                    message: "Interlaced video is not supported".into(),
-                }),
-            },
-            now,
-        );
-        assert!(matches!(state.source(), Source::Unreadable { .. }));
-        assert_eq!(state.track_picker().and_then(|p| p.selected), Some(1));
-        let back = state.apply(Intent::VideoTrackSelected(0), now);
-        assert!(
-            matches!(
-                back,
-                Effect::Probe(ProbeRequest {
-                    video_stream: Some(0),
-                    ..
-                })
-            ),
-            "{back:?}"
-        );
-    }
-
-    // FFmpeg availability and a changed source.
-
-    #[test]
-    fn a_missing_media_tool_blocks_only_files_that_need_it() {
-        let now = Instant::now();
-        let mut state = AppState::default();
-        state.apply(Intent::EngineAnswered(Ok(capabilities(None))), now);
-        assert_eq!(
-            state.capabilities().map(|c| c.media_tool.is_none()),
-            Some(true)
-        );
-        let id = probe_id(&state.apply(Intent::PickFinished(Some("/m/a.mp4".into())), now));
-        state.apply(
-            Intent::ProbeAnswered {
-                id,
-                result: Err(ProbeFailure {
-                    code: Some(FailureCode::MediaToolMissing),
-                    message: "this build has no FFmpeg".into(),
-                }),
-            },
-            now,
-        );
-        assert_eq!(
-            state.blocker(),
-            Some(Blocker {
-                text: "This build converts Y4M files only.".into(),
-                severity: Severity::Problem
-            })
-        );
-        // Y4M still works without FFmpeg.
-        let id = probe_id(&state.apply(Intent::PickFinished(Some("/m/a.y4m".into())), now));
-        state.apply(
-            Intent::ProbeAnswered {
-                id,
-                result: Ok(facts(Some(3))),
-            },
-            now,
-        );
-        assert!(matches!(
-            state.apply(Intent::EncodeRequested, now),
-            Effect::Start { .. }
-        ));
-    }
-
-    #[test]
-    fn a_changed_source_is_read_again_once_and_needs_a_new_confirmation() {
-        let (mut state, now) = ready_with("/media/trip.mp4", rich(1));
-        let (id, _) = confirm(&mut state, now);
-        let changed = Event::Failed {
-            failure: Failure {
-                code: FailureCode::SourceChanged,
-                message: "The source changed since it was probed".into(),
-            },
-        };
-        let effect = end_job(&mut state, id, now, changed.clone());
-        let Effect::Job {
-            reprobe: Some(request),
-            step,
-            ..
-        } = effect
-        else {
-            unreachable!("{effect:?}")
-        };
-        assert_eq!(step.effect, JobEffect::CloseInput);
-        assert_eq!(request.video_stream, Some(1));
-        // The failure stays visible while the file is read again.
-        assert!(matches!(
-            state.job().map(|(_, a)| a.phase()),
-            Some(Phase::Failed(f)) if f.code == FailureCode::SourceChanged
-        ));
-        // A duplicate terminal event does not read it again.
-        assert!(matches!(
-            end_job(&mut state, id, now, changed),
-            Effect::Job { reprobe: None, .. }
-        ));
-        state.apply(
-            Intent::ProbeAnswered {
-                id: request.id,
-                result: Ok(SourceFacts {
-                    fingerprint: SourceFingerprint {
-                        len: 5,
-                        modified: None,
-                    },
-                    ..rich(1)
-                }),
-            },
-            now,
-        );
-        let (_, job) = confirm(&mut state, now);
-        assert_eq!(job.fingerprint.len, 5);
-    }
-
-    #[test]
-    fn other_job_failures_do_not_re_probe() {
-        let (mut state, now) = ready();
-        let (id, _) = start(&mut state, now);
-        let effect = end_job(
-            &mut state,
-            id,
-            now,
-            Event::Failed {
-                failure: Failure {
-                    code: FailureCode::UnsupportedSource,
-                    message: "Variable frame rate".into(),
-                },
-            },
-        );
-        assert!(matches!(effect, Effect::Job { reprobe: None, .. }));
-        assert!(matches!(state.source(), Source::Ready { .. }));
-    }
 }

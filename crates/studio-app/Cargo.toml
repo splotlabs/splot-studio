@@ -34,6 +34,10 @@ slint = { workspace = true, features = [
 # XDG desktop portal (dlopened libdbus, zenity fallback) with Wayland parenting on
 # Linux; native panels on Windows/macOS. No GTK, no async runtime.
 rfd = { workspace = true, features = ["xdg-portal", "wayland"] }
+# The per-user data folder that holds the queue journal and the instance lock.
+directories.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true

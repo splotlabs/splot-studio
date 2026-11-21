@@ -4,6 +4,8 @@
 //! Display text for domain values. Exact values first; any rounded figure is
 //! a secondary hint next to the exact one, never a replacement.
 
+pub mod queue;
+
 use std::path::Path;
 use std::time::Duration;
 
@@ -15,7 +17,7 @@ use studio_domain::protocol::{Capabilities, MediaToolOrigin};
 use studio_domain::settings::OutputKind;
 
 use crate::activity::{Activity, Phase};
-use crate::state::ProbeFailure;
+use crate::source::ProbeFailure;
 
 /// How a line of the activity area or a check should read; the words always
 /// carry the meaning on their own.
@@ -474,25 +476,37 @@ pub fn detail(activity: &Activity) -> String {
 /// The engine's message, that nothing was published, and what to do next.
 #[must_use]
 pub fn failure_text(failure: &Failure) -> String {
+    failure_text_with(failure, "Convert")
+}
+
+/// [`failure_text`] naming `verb` as the button that tries again: Convert
+/// for the one file, Retry for a row of the list.
+#[must_use]
+pub fn failure_text_with(failure: &Failure, verb: &str) -> String {
     let remedy = match failure.code {
-        FailureCode::InvalidSource => "Check the source file, then open it again.",
-        FailureCode::UnsupportedSource => UNSUPPORTED_REMEDY,
-        FailureCode::MediaToolMissing => "This build can read Y4M files only.",
-        FailureCode::SourceChanged => "The file was read again; check it, then press Convert.",
+        FailureCode::InvalidSource => "Check the source file, then open it again.".to_owned(),
+        FailureCode::UnsupportedSource => UNSUPPORTED_REMEDY.to_owned(),
+        FailureCode::MediaToolMissing => "This build can read Y4M files only.".to_owned(),
+        FailureCode::SourceChanged => {
+            format!("The file was read again; check it, then press {verb}.")
+        }
         FailureCode::OmissionsNotAcknowledged => {
-            "Press Convert and confirm that only the video is converted."
+            format!("Press {verb} and confirm that only the video is converted.")
         }
-        FailureCode::TooLarge => "Use a source with a smaller frame size.",
-        FailureCode::InvalidSettings => "Change the settings, then press Convert again.",
-        FailureCode::SourceIsDestination => "Choose a different output file.",
-        FailureCode::DestinationExists => {
-            "Choose another output file, or move the existing one, then press Convert again."
+        FailureCode::TooLarge => "Use a source with a smaller frame size.".to_owned(),
+        FailureCode::InvalidSettings => {
+            format!("Change the settings, then press {verb} again.")
         }
-        FailureCode::Output => {
-            "Check free space and write permission for the output folder, then press Convert again."
-        }
+        FailureCode::SourceIsDestination => "Choose a different output file.".to_owned(),
+        FailureCode::DestinationExists => format!(
+            "Choose another output file, or move the existing one, then press {verb} again."
+        ),
+        FailureCode::Output => format!(
+            "Check free space and write permission for the output folder, then press {verb} \
+             again."
+        ),
         FailureCode::Encoder | FailureCode::VerificationFailed => {
-            "Press Convert to try again. If it fails again, report this message."
+            format!("Press {verb} to try again. If it fails again, report this message.")
         }
     };
     let message = failure.message.trim_end_matches('.');

@@ -531,7 +531,7 @@ mod tests {
     use std::io;
     use std::sync::mpsc;
 
-    use studio_domain::protocol::{BuildIdentity, read_message};
+    use studio_domain::protocol::{BuildIdentity, PROTOCOL_VERSION, read_message};
 
     use super::*;
 
@@ -565,7 +565,10 @@ mod tests {
 
     #[test]
     fn bad_message_is_answered_and_session_continues() {
-        let bad = br#"{"protocol_version":3,"request_id":8,"body":{"type":"encode"}}"#;
+        let bad = format!(
+            r#"{{"protocol_version":{PROTOCOL_VERSION},"request_id":8,"body":{{"type":"encode"}}}}"#
+        );
+        let bad = bad.as_bytes();
         let mut input = Vec::new();
         input.extend_from_slice(&u32::try_from(bad.len()).unwrap_or(0).to_le_bytes());
         input.extend_from_slice(bad);
@@ -678,6 +681,37 @@ mod tests {
         // The stage, one progress (the newest), the terminal.
         assert!(
             matches!(bodies.as_slice(), [_, Event::Progress { progress }, _] if progress.frames_read == 9_999),
+            "{bodies:?}"
+        );
+    }
+
+    /// `Working` keeps its place among the job's events: after what came
+    /// before it, never replaced by progress, and never after the terminal.
+    #[test]
+    fn working_is_ordered_kept_and_never_follows_the_terminal() {
+        let outbox = Outbox::default();
+        let partial = Event::Working {
+            partial: studio_domain::job::WirePath::from_path(std::path::Path::new(
+                ".out.ivf.x.partial",
+            )),
+        };
+        let progress = |frames_read| Event::Progress {
+            progress: studio_domain::job::Progress {
+                frames_read,
+                ..Default::default()
+            },
+        };
+        outbox.begin_job(1);
+        outbox.progress(1, progress(1));
+        outbox.job_event(1, partial.clone());
+        outbox.progress(1, progress(2));
+        outbox.progress(1, progress(3));
+        outbox.job_end(1, Event::Cancelled);
+        outbox.job_event(1, partial.clone());
+        let bodies: Vec<Event> = outbox.lock().queue.drain(..).map(|e| e.body).collect();
+        assert_eq!(
+            bodies,
+            [progress(1), partial, progress(3), Event::Cancelled],
             "{bodies:?}"
         );
     }

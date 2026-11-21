@@ -19,7 +19,8 @@ use std::thread::{self, JoinHandle};
 
 use splot_encode::{BitDepth, CancelToken, Config, Encoder, Preset, RateControlMode, SourceFrame};
 use studio_domain::job::{
-    CheckOutcome, Failure, FailureCode, JobReport, JobSpec, Progress, SourceReader, Stage,
+    Check, CheckOutcome, Failure, FailureCode, JobReport, JobSpec, Progress, SourceReader, Stage,
+    WirePath,
 };
 use studio_domain::protocol::Event;
 use studio_domain::settings::{EncoderSettings, OutputKind};
@@ -172,6 +173,8 @@ fn execute(
     report(Event::Stage {
         stage: Stage::Encoding,
     });
+    // Cancelled before the file exists: there is nothing to announce or remove.
+    stop_if(cancel)?;
     let mut prepared = None;
     control.hold_temp(&mut || {
         let made = output::prepare(&destination, &source.id);
@@ -181,6 +184,9 @@ fn execute(
     });
     let temp =
         prepared.unwrap_or_else(|| Err(output::output("the temporary file was not created")))?;
+    report(Event::Working {
+        partial: WirePath::from_path(temp.path()),
+    });
     let frames = encode(
         &mut source,
         &config,
@@ -197,20 +203,7 @@ fn execute(
         kind: job.settings.output,
         frames,
     };
-    let checks = verify::run(temp.as_file(), expected, cancel)?;
-    let failures: Vec<String> = checks
-        .iter()
-        .filter_map(|check| match &check.outcome {
-            CheckOutcome::Failed { detail } => Some(format!("{:?}: {detail}", check.kind)),
-            _ => None,
-        })
-        .collect();
-    if !failures.is_empty() {
-        return Err(Stop::failed(
-            FailureCode::VerificationFailed,
-            failures.join("; "),
-        ));
-    }
+    let checks = checked(temp.as_file(), expected, cancel)?;
     if !control.claim_publish() {
         return Err(Stop::Cancelled);
     }
@@ -225,6 +218,34 @@ fn execute(
         checks,
         disclosures: source.facts.disclosures,
     })
+}
+
+/// Runs the verification checks on the finished file.
+///
+/// # Errors
+/// [`Stop::Cancelled`] when cancelled meanwhile, or
+/// [`FailureCode::VerificationFailed`] naming every check that failed.
+fn checked(
+    file: &File,
+    expected: verify::Expected<'_>,
+    cancel: &AtomicBool,
+) -> Result<Vec<Check>, Stop> {
+    let checks = verify::run(file, expected, cancel)?;
+    let failures: Vec<String> = checks
+        .iter()
+        .filter_map(|check| match &check.outcome {
+            CheckOutcome::Failed { detail } => Some(format!("{:?}: {detail}", check.kind)),
+            _ => None,
+        })
+        .collect();
+    if failures.is_empty() {
+        Ok(checks)
+    } else {
+        Err(Stop::failed(
+            FailureCode::VerificationFailed,
+            failures.join("; "),
+        ))
+    }
 }
 
 /// The encoder configuration of a job on a source with `header`: the

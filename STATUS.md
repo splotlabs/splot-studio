@@ -1,9 +1,8 @@
 # Status
 
-**Phase:** STUDIO-03 complete on Linux x86_64.
+**Phase:** STUDIO-04 complete on Linux x86_64.
 **Updated:** 2026-11-21.
-**Next prompt:** `docs/planning/studio-v1/prompts/04-PERSISTENCE-AND-RECOVERY.md`,
-with the deviations below.
+**Next prompt:** `docs/planning/studio-v1/prompts/05-PREVIEW-AND-POLISH.md`.
 
 ## What works
 
@@ -25,12 +24,31 @@ with the deviations below.
 - **Nothing dropped silently:** the probe inventories every stream and chapter.
   A source with audio, subtitles, attachments, chapters or extra video needs an
   explicit acknowledgement per job; the engine refuses the job without it, and
-  the app asks with a confirmation whose default is Cancel. The acknowledgement
-  is never remembered.
+  the app asks once per run with a confirmation whose default is Cancel. The
+  acknowledgement is kept per file only while its fingerprint, stream,
+  omissions and settings are unchanged, and is never moved to another file.
 - **Stale sources:** a job carries the fingerprint (size, mtime) of the file the
   user looked at; a changed file is refused and re-read.
 - **App:** unchanged Simple window, plus the omission summary, the confirmation,
   a video-track picker and the FFmpeg identity under Advanced.
+- **Durable file list (STUDIO-04):** several files become a list of rows; Convert
+  runs the waiting ones one after another, one encode at a time. Cancel stops
+  the current file and pauses the run; a failed file does not stop it. Each file
+  takes an immutable snapshot of the settings when it starts.
+- **Survives restarts:** the list, settings, destinations and results are kept in
+  `queue.json` in the per-user data folder (`~/.local/share/SplotStudio`,
+  `~/Library/Application Support/SplotStudio`, `%LOCALAPPDATA%\SplotStudio`),
+  rewritten atomically on every state change and never on progress ticks. On the
+  next launch nothing starts by itself: the file that was converting is shown as
+  Interrupted and Continue runs the rest. A newer or unreadable journal is left
+  untouched; an unparsable one is moved aside and reported.
+- **Recovery is exact:** the engine announces its partial file (`Event::Working`);
+  after a crash the app removes exactly that file, only if it is a regular file
+  in the destination's folder with the engine's naming. If the app died while a
+  file was being published and a file exists at the destination, it says so and
+  never overwrites or claims it.
+- **One instance:** a lock file in the data folder; a second instance says the
+  app is already open and exits without touching the journal.
 - Everything from STUDIO-02 (safe publish, verification, bounded cancel) applies
   to both routes. Cancel and a killed worker leave no `ffmpeg`
   child (Linux).
@@ -43,7 +61,8 @@ full range and therefore refused); non-square pixels; rotation, cropping, stereo
 or spherical side data; RGB, alpha, other bit depths; size, format or colour
 changing mid-stream; encrypted streams; network or playlist inputs; frames over
 the size or 8 GiB memory limits. No audio, subtitles, resize, target size,
-preview, queue or background continuation.
+preview, reordering, pause or background continuation: closing the window stops
+the current file.
 
 The pinned encoder writes no colour description, so the output never says how to
 interpret its samples (splotlabs/splot#1777); the app discloses this per source.
@@ -64,7 +83,9 @@ interpret its samples (splotlabs/splot#1777); the app discloses this per source.
 - **UI:** one compact "Simple" window (Quality, Priority, Convert, Advanced)
   instead of the three-panel workbench in `05-DESIGN-SYSTEM.md`.
 - **STUDIO-03:** ffprobe/ffmpeg child processes, not rsmpeg FFI.
-- **STUDIO-04:** GUI-owned durable queue, no supervisor process.
+- **STUDIO-04:** GUI-owned durable queue in one atomically written JSON file;
+  no supervisor process, no socket IPC, no SQLite; nothing resumes by itself
+  after a restart; Permute-style file list.
 - **Preview** (thumbnail, live frame) stays in STUDIO-05.
 - Phase PRs are opened and merged by the agent once CI is green.
 - `splot-*` dependencies track `main` until Splot has releases; codec
@@ -100,13 +121,17 @@ the worker kept serving until its input closed.
 ## Checks run (Linux x86_64, Wayland)
 
 - `cargo xtask ci` — pass: fmt, SPDX headers, dependency direction, clippy
-  `-D warnings`, 187 tests (domain 10, engine 23 + 14 + 15 + 27, app 66 + 1 + 13
-  against the real engine, xtask 3, plus doc tests). Clippy is also clean for
+  `-D warnings`, 224 tests (domain 10, engine 24 + 15 + 15 + 27, app 108 + 8 + 1
+  + 13 against the real engine, xtask 3). Clippy is also clean for
   `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`.
-- Real conversions through `encode`: H.264+AAC MP4 → IVF (refused without the
-  acknowledgement, completed with it) and 10-bit HEVC MKV → `.obu`; structure and
-  Splot decode passed, AVM not run, no `ffmpeg` left running.
-- Evidence: `docs/evidence/studio-03/` (Slint renderer snapshots).
+- Real-process fault tests: worker killed mid-job; app killed mid-job (a real
+  second process, SIGKILL); app death during publication; destination taken
+  before, during and between attempts; source edited between probe and start;
+  second instance against a held lock.
+- Real app by hand: two files on the command line → two waiting items in the
+  journal; a second instance left the journal byte-identical; relaunch restored
+  the list and ran nothing.
+- Evidence: `docs/evidence/studio-04/` (Slint renderer snapshots).
 
 ## Not tested / open
 
@@ -122,7 +147,16 @@ the worker kept serving until its input closed.
 - Scan and decode have no whole-file timeout; they stop on cancel.
 - Damage is caught only when FFmpeg reports it. A codec without checksums can
   decode damaged data as valid frames; nothing downstream can tell.
-- A killed worker leaves its `.partial` file behind.
+- If the app dies between the engine's rename and its own journal write, the
+  journal still says running; recovery then reports that a file exists at the
+  destination but cannot prove it is this job's. Closing that needs an engine
+  handshake.
+- The worker-kill tests are Linux only and the app-crash test is skipped on
+  Windows (its helper process never reports ready on the CI runner; not yet
+  investigated on a real machine), so crash recovery is unproven on Windows. Directory fsync, the lock
+  file and rename-over-existing on Windows/macOS are first exercised by CI.
+- Disk full and a read-only data folder are unit-tested only.
+- Keyboard handling of the list and screen readers are untested by hand.
 - Quality and Priority mappings are provisional and uncalibrated.
 - OS drag-and-drop is not possible with Slint 1.19's winit backend.
 - Cancel reaches a running codec call through the encoder's `CancelToken`
@@ -134,6 +168,6 @@ the worker kept serving until its input closed.
 Splot `main` at `e05a86fe866f35f891e8d7fa17454af27922106c` (in `Cargo.lock`) for
 `splot-encode`, `-decode`, `-validate`, `-core` (dev profile builds them at
 `opt-level = 2`). The measurements above were taken at `c1183fec`. `slint` 1.19.0,
-`rfd` 0.18.0, `tempfile` 3.27.0, `serde`, `serde_json`, `thiserror`. Linux build
+`rfd` 0.18.0, `tempfile` 3.27.0, `directories` 6.0.0, `serde`, `serde_json`, `thiserror`. Linux build
 needs `pkg-config` and `libfontconfig-dev`. Cargo fetches Git crates with the git
 CLI (`.cargo/config.toml`).

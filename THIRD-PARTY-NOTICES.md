@@ -12,13 +12,14 @@ resolved in `Cargo.lock`, not from a licence audit. Transitive dependencies are 
 
 | Crate | Version | Declared licence | Used by |
 |---|---|---|---|
-| `serde` | 1.0.229 | MIT OR Apache-2.0 | studio-domain |
-| `serde_json` | 1.0.154 | MIT OR Apache-2.0 | studio-domain, studio-engine, xtask |
+| `serde` | 1.0.229 | MIT OR Apache-2.0 | studio-domain, studio-engine, studio-app |
+| `serde_json` | 1.0.154 | MIT OR Apache-2.0 | studio-domain, studio-engine, studio-app, xtask |
 | `thiserror` | 2.0.21 | MIT OR Apache-2.0 | studio-domain, studio-engine |
 | `slint` | 1.19.0 | GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0 | studio-app |
 | `slint-build` | 1.19.0 | GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0 | studio-app (build) |
 | `rfd` | 0.18.0 | MIT | studio-app |
 | `tempfile` | 3.27.0 | MIT OR Apache-2.0 | studio-engine |
+| `directories` | 6.0.0 | MIT OR Apache-2.0 | studio-app |
 | `splot-encode`, `splot-decode`, `splot-validate`, `splot-core` | git `main`, commit in `Cargo.lock` | PolyForm-Noncommercial-1.0.0 (same owner) | studio-engine |
 
 ## Slint

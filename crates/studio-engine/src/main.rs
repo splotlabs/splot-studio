@@ -183,6 +183,10 @@ fn line(event: &Event, started: Instant) {
     let at = started.elapsed().as_secs_f64();
     let text = match event {
         Event::Stage { stage } => format!("{at:8.3}s stage {stage:?}"),
+        Event::Working { partial } => match partial.to_path_buf() {
+            Ok(path) => format!("{at:8.3}s working {}", path.display()),
+            Err(error) => format!("{at:8.3}s working ({error})"),
+        },
         Event::Progress { progress } => format!(
             "{at:8.3}s progress read={} encoded={} bytes={}",
             progress.frames_read, progress.frames_encoded, progress.bytes_written
