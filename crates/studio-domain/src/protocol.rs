@@ -4,7 +4,10 @@
 //! The control protocol between the app and the engine.
 //!
 //! A frame is a little-endian `u32` byte length followed by that many bytes of
-//! UTF-8 JSON holding one [`Envelope`]. Control only: pixels never travel here.
+//! UTF-8 JSON holding one [`Envelope`]. Pixels never travel inside JSON: an
+//! [`Event::Picture`] frame is followed immediately by its raw pixel bytes,
+//! whose length the header fixes and [`MAX_PICTURE_BYTES`] bounds. Use
+//! [`write_picture`] and [`read_event`] for the engine-to-app direction.
 //! The length is checked against [`MAX_MESSAGE_BYTES`] before any allocation,
 //! and the protocol version before the body is interpreted, so a mismatched
 //! app/engine pair fails with [`ProtocolError::IncompatibleVersion`] instead
@@ -17,10 +20,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::job::{Failure, JobReport, JobSpec, Progress, SourceFacts, Stage, WirePath};
+use crate::preview::{
+    MAX_PICTURE_BYTES, PictureBox, PictureFailure, PictureFrame, PictureHeader, PictureTarget,
+    PictureView,
+};
 use crate::settings::OutputKind;
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -45,6 +52,16 @@ pub enum ProtocolError {
     IncompatibleVersion {
         /// The version the peer sent.
         theirs: u32,
+    },
+    /// A picture header's size is out of range or disagrees with its pixels.
+    #[error("picture is {width}x{height} with {bytes} bytes of pixels")]
+    InvalidPicture {
+        /// The declared width.
+        width: u16,
+        /// The declared height.
+        height: u16,
+        /// The pixel bytes offered, or `0` when none were.
+        bytes: usize,
     },
     /// The body is not a message this build understands.
     #[error("malformed or unknown message: {0}")]
@@ -113,11 +130,51 @@ pub enum Command {
     Start {
         /// The job.
         job: JobSpec,
+        /// Ask for [`Event::Picture`]s of the output so far, no larger than
+        /// this box. They never delay the job: the engine sends the newest
+        /// picture it has when the app can take one and skips the rest.
+        live: Option<PictureBox>,
     },
     /// Asks the running job to stop. [`Event::CancelRequested`] acknowledges
     /// the request; only [`Event::Cancelled`] means the job has stopped.
     /// Closing the worker's input has the same effect.
     Cancel,
+    /// Preview process only. Asks for one picture. Answered by one
+    /// [`Event::Picture`] or [`Event::PictureUnavailable`] with the same
+    /// generation, unless a newer `Picture` or `Play` arrives first: then the
+    /// engine may drop this request without answering. Stops playback.
+    Picture {
+        /// Chosen by the app and increasing; echoed on the answer.
+        generation: u64,
+        /// What to show.
+        target: PictureTarget,
+        /// Which frame.
+        frame: PictureFrame,
+        /// Which part of it.
+        view: PictureView,
+        /// The largest picture wanted.
+        size: PictureBox,
+    },
+    /// Preview process only. Plays from `from` at the stream's own frame
+    /// timing: a run of [`Event::Picture`]s with this generation, each sent
+    /// when its frame is due, late frames skipped, ended by
+    /// [`Event::PlaybackEnded`] or [`Event::PictureUnavailable`]. Video only.
+    /// Any newer `Picture`, `Play` or `StopPlayback` ends it.
+    Play {
+        /// Chosen by the app and increasing; echoed on every answer.
+        generation: u64,
+        /// What to play.
+        target: PictureTarget,
+        /// The first frame, zero-based.
+        from: u64,
+        /// Which part of each frame.
+        view: PictureView,
+        /// The largest picture wanted.
+        size: PictureBox,
+    },
+    /// Preview process only. Stops playback; answered by
+    /// [`Event::PlaybackEnded`] when something was playing.
+    StopPlayback,
 }
 
 /// Why the engine refused a command.
@@ -128,7 +185,8 @@ pub enum ErrorCode {
     IncompatibleVersion,
     /// The frame or its body could not be decoded.
     Malformed,
-    /// A job is already running, or there is none to cancel.
+    /// A job is already running, there is none to cancel, or this kind of
+    /// engine process does not serve the command.
     WrongState,
 }
 
@@ -176,6 +234,29 @@ pub enum Event {
     },
     /// [`Command::Cancel`] was received. The job is still stopping.
     CancelRequested,
+    /// One picture. Its pixels follow this frame on the stream; see
+    /// [`PictureHeader`]. Pictures are skippable: the app shows only the
+    /// newest of its newest generation.
+    Picture {
+        /// What the pixels are.
+        picture: PictureHeader,
+    },
+    /// The requested picture or playback cannot be produced.
+    PictureUnavailable {
+        /// The generation of the request.
+        generation: u64,
+        /// The machine-readable reason.
+        code: PictureFailure,
+        /// A human-readable explanation.
+        message: String,
+    },
+    /// Playback stopped, at the end of the stream or on request.
+    PlaybackEnded {
+        /// The generation of the `Play` request.
+        generation: u64,
+        /// The last frame that was sent, if any was.
+        frame: Option<u64>,
+    },
     /// Terminal: the verified file is at its destination.
     Completed {
         /// What was produced and checked.
@@ -297,6 +378,73 @@ pub fn read_message<T: DeserializeOwned>(
     read_frame(reader)?.map(|frame| decode(&frame)).transpose()
 }
 
+/// Writes an [`Event::Picture`] frame followed by its pixels, then flushes.
+///
+/// # Errors
+/// Returns [`ProtocolError::InvalidPicture`] when the header's size is out of
+/// range or `pixels` is not exactly the length it promises, before anything
+/// is written; otherwise see [`write_message`].
+pub fn write_picture(
+    writer: &mut impl Write,
+    request_id: u64,
+    picture: PictureHeader,
+    pixels: &[u8],
+) -> Result<(), ProtocolError> {
+    if picture.payload_len().map(|len| len as usize) != Some(pixels.len()) {
+        return Err(ProtocolError::InvalidPicture {
+            width: picture.width,
+            height: picture.height,
+            bytes: pixels.len(),
+        });
+    }
+    let envelope = Envelope::new(request_id, Event::Picture { picture });
+    let body = serde_json::to_vec(&envelope)?;
+    let len = u32::try_from(body.len()).unwrap_or(u32::MAX);
+    if len == 0 || len > MAX_MESSAGE_BYTES {
+        return Err(ProtocolError::InvalidLength { len });
+    }
+    writer.write_all(&len.to_le_bytes())?;
+    writer.write_all(&body)?;
+    writer.write_all(pixels)?;
+    writer.flush()?;
+    Ok(())
+}
+
+/// An event and, for an [`Event::Picture`], its pixels.
+pub type EventFrame = (Envelope<Event>, Option<Vec<u8>>);
+
+/// Reads one event and, for an [`Event::Picture`], the pixels that follow it.
+/// Every reader of engine output must use this, or a picture's pixels would
+/// be taken for the next frame. `Ok(None)` is a clean end of stream.
+///
+/// # Errors
+/// Returns [`ProtocolError::InvalidPicture`] before allocating for a picture
+/// whose size is out of range, [`ProtocolError::Truncated`] when the stream
+/// ends inside the pixels, and otherwise see [`read_message`].
+pub fn read_event(reader: &mut impl Read) -> Result<Option<EventFrame>, ProtocolError> {
+    let Some(envelope) = read_message::<Event>(reader)? else {
+        return Ok(None);
+    };
+    let Event::Picture { picture } = &envelope.body else {
+        return Ok(Some((envelope, None)));
+    };
+    let len = picture
+        .payload_len()
+        .filter(|len| *len <= MAX_PICTURE_BYTES)
+        .ok_or(ProtocolError::InvalidPicture {
+            width: picture.width,
+            height: picture.height,
+            bytes: 0,
+        })?;
+    // `len` is at most MAX_PICTURE_BYTES, so this allocation is bounded.
+    let mut pixels = vec![0_u8; len as usize];
+    reader.read_exact(&mut pixels).map_err(|e| match e.kind() {
+        io::ErrorKind::UnexpectedEof => ProtocolError::Truncated,
+        _ => ProtocolError::Io(e),
+    })?;
+    Ok(Some((envelope, Some(pixels))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,6 +479,88 @@ mod tests {
             self.0 = rest;
             Ok(1)
         }
+    }
+
+    fn picture(width: u16, height: u16) -> PictureHeader {
+        use crate::preview::{ColorBasis, ColorMatrix, PictureOrigin};
+        PictureHeader {
+            generation: 3,
+            origin: PictureOrigin::Live,
+            frame: 9,
+            time: None,
+            frame_count: None,
+            width,
+            height,
+            frame_width: 64,
+            frame_height: 32,
+            view: PictureView::Fit,
+            basis: ColorBasis {
+                matrix: ColorMatrix::Bt709,
+                assumed: false,
+            },
+        }
+    }
+
+    #[test]
+    fn a_picture_carries_its_pixels_and_the_next_event_follows() {
+        let pixels: Vec<u8> = (0..24).collect();
+        let mut bytes = Vec::new();
+        assert!(write_picture(&mut bytes, 5, picture(4, 2), &pixels).is_ok());
+        assert!(write_message(&mut bytes, &Envelope::new(5, Event::Cancelled)).is_ok());
+        let mut reader = OneByte(&bytes);
+        let first = read_event(&mut reader);
+        assert!(matches!(
+            first,
+            Ok(Some((ref envelope, Some(ref got))))
+                if *got == pixels
+                    && envelope.body == Event::Picture { picture: picture(4, 2) }
+        ));
+        assert!(matches!(
+            read_event(&mut reader),
+            Ok(Some((ref envelope, None))) if envelope.body == Event::Cancelled
+        ));
+        assert!(matches!(read_event(&mut reader), Ok(None)));
+    }
+
+    #[test]
+    fn a_picture_with_the_wrong_pixels_is_never_written() {
+        let mut bytes = Vec::new();
+        for (header, pixels) in [(picture(4, 2), 23), (picture(0, 2), 0), (picture(4, 2), 0)] {
+            let got = write_picture(&mut bytes, 1, header, &vec![0; pixels]);
+            assert!(matches!(got, Err(ProtocolError::InvalidPicture { .. })));
+        }
+        assert_eq!(bytes, [] as [u8; 0]);
+    }
+
+    #[test]
+    fn a_bad_picture_header_is_rejected_before_its_pixels_are_read() {
+        let envelope = Envelope::new(
+            1,
+            Event::Picture {
+                picture: picture(0, 9),
+            },
+        );
+        let mut bytes = Vec::new();
+        assert!(write_message(&mut bytes, &envelope).is_ok());
+        assert!(matches!(
+            read_event(&mut bytes.as_slice()),
+            Err(ProtocolError::InvalidPicture {
+                width: 0,
+                height: 9,
+                bytes: 0
+            })
+        ));
+    }
+
+    #[test]
+    fn a_stream_that_ends_inside_the_pixels_is_truncated() {
+        let mut bytes = Vec::new();
+        assert!(write_picture(&mut bytes, 1, picture(4, 2), &[7; 24]).is_ok());
+        bytes.truncate(bytes.len() - 1);
+        assert!(matches!(
+            read_event(&mut bytes.as_slice()),
+            Err(ProtocolError::Truncated)
+        ));
     }
 
     #[test]

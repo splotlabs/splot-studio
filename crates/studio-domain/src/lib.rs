@@ -3,7 +3,7 @@
 
 //! `studio-domain` — values shared by the Splot Studio app and engine.
 //!
-//! Requested encoder [`settings`], [`job`] values and the versioned control [`protocol`] the
+//! Requested encoder [`settings`], [`job`] values, [`preview`] pictures and the versioned control [`protocol`] the
 //! app and engine speak over inherited pipes. This crate holds values and pure
 //! policy only: no Slint, codec, `FFmpeg`, SQL or process-management types.
 //!
@@ -13,5 +13,6 @@
 #![forbid(unsafe_code)]
 
 pub mod job;
+pub mod preview;
 pub mod protocol;
 pub mod settings;
