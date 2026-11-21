@@ -28,7 +28,7 @@ const LINUX_SYSTEM: [&str; 7] = [
 /// Windows system DLLs (all in `System32` on Windows 10 and 11). The C
 /// runtime is linked statically (`+crt-static`), so `vcruntime*.dll` and
 /// `msvcp*.dll` are deliberately absent: they are not on a clean machine.
-const WINDOWS_SYSTEM: [&str; 42] = [
+const WINDOWS_SYSTEM: [&str; 48] = [
     "kernel32.dll",
     "kernelbase.dll",
     "ntdll.dll",
@@ -71,6 +71,12 @@ const WINDOWS_SYSTEM: [&str; 42] = [
     "msimg32.dll",
     "psapi.dll",
     "winspool.drv",
+    "combase.dll",
+    "dwrite.dll",
+    "d2d1.dll",
+    "dcomp.dll",
+    "usp10.dll",
+    "rpcrt4.dll",
 ];
 
 /// What the tools said about one executable.
