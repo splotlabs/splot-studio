@@ -286,6 +286,7 @@ mod tests {
             repack: None,
             time_base,
             matrix: None,
+            content: splot_encode::ContentDescription::default(),
         }
     }
 

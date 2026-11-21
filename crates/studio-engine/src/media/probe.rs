@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde::de::IgnoredAny;
 use serde_json::Value;
 use splot_encode::y4m::{Y4mColorRange, Y4mHeader};
-use splot_encode::{MAX_FRAME_DIMENSION, PixelFormat};
+use splot_encode::{ContentDescription, MAX_FRAME_DIMENSION, PixelFormat};
 use studio_domain::job::{
     ChromaLayout, Disclosure, FailureCode, Omissions, Rational, SourceFacts, SourceFingerprint,
     SourceReader, VideoTrack,
@@ -65,6 +65,8 @@ pub struct Probed {
     pub time_base: (i64, i64),
     /// The YCbCr matrix the stream states, when pictures can use it.
     pub matrix: Option<ColorMatrix>,
+    /// The colour, range and pixel shape the stream states, for the encoder.
+    pub content: ContentDescription,
 }
 
 #[derive(Debug, Deserialize)]
@@ -314,6 +316,7 @@ fn accept(
         repack: accepted.repack,
         time_base: accepted.time_base,
         matrix: stated(selected.color_space.as_deref()).and_then(picture::ffmpeg_matrix),
+        content: accepted.content,
     })
 }
 
@@ -364,6 +367,7 @@ struct Accepted {
     repack: Option<&'static str>,
     square: bool,
     time_base: (i64, i64),
+    content: ContentDescription,
     disclosures: Vec<Disclosure>,
 }
 
@@ -387,7 +391,7 @@ fn pixel_format(name: &str) -> Option<(PixelFormat, u8, Option<&'static str>)> {
 
 fn pixel_format_refusal(name: &str) -> String {
     let reason = if name.starts_with("yuvj") {
-        "full-range (JPEG) samples cannot be signalled by this encoder"
+        "full-range (JPEG) samples are not supported yet"
     } else if name.contains("yuva") || name.contains("rgba") || name.contains("bgra") {
         "it has an alpha channel"
     } else if name.contains("rgb") || name.contains("bgr") || name.starts_with("gbr") {
@@ -482,7 +486,7 @@ fn contract(stream: &Stream, diagnostics: &str) -> Result<Accepted, Stop> {
         Some((num, den)) if num == den => true,
         Some((num, den)) => {
             return Err(unsupported(format!(
-                "non-square pixels ({num}:{den}) cannot be signalled by this encoder"
+                "non-square pixels ({num}:{den}) are not supported yet"
             )));
         }
     };
@@ -533,17 +537,8 @@ fn contract(stream: &Stream, diagnostics: &str) -> Result<Accepted, Stop> {
         chroma_siting: None,
     };
     source::check_contract(&header)?;
-    let colour = [
-        &stream.color_range,
-        &stream.color_space,
-        &stream.color_transfer,
-        &stream.color_primaries,
-    ];
-    let mut disclosures = vec![if colour.iter().any(|v| stated(v.as_deref()).is_some()) {
-        Disclosure::ColorNotCarried
-    } else {
-        Disclosure::ColorUnspecified
-    }];
+    let (content, colour) = content(stream, &header);
+    let mut disclosures: Vec<Disclosure> = colour.into_iter().collect();
     if interlace == '?' {
         disclosures.push(Disclosure::ScanUnspecified);
     }
@@ -559,8 +554,107 @@ fn contract(stream: &Stream, diagnostics: &str) -> Result<Accepted, Stop> {
         repack,
         square,
         time_base,
+        content,
         disclosures,
     })
+}
+
+/// `FFmpeg`'s names of the H.273 `ColourPrimaries` code points.
+const PRIMARIES: &[(&str, u8)] = &[
+    ("bt709", 1),
+    ("bt470m", 4),
+    ("bt470bg", 5),
+    ("smpte170m", 6),
+    ("smpte240m", 7),
+    ("film", 8),
+    ("bt2020", 9),
+    ("smpte428", 10),
+    ("smpte431", 11),
+    ("smpte432", 12),
+    ("ebu3213", 22),
+];
+
+/// `FFmpeg`'s names of the H.273 `TransferCharacteristics` code points, as
+/// `ffprobe` prints them (4 and 5 are not the option names `gamma22` and
+/// `gamma28`). PQ and HLG are refused before this table is read.
+const TRANSFERS: &[(&str, u8)] = &[
+    ("bt709", 1),
+    ("bt470m", 4),
+    ("bt470bg", 5),
+    ("smpte170m", 6),
+    ("smpte240m", 7),
+    ("linear", 8),
+    ("log100", 9),
+    ("log316", 10),
+    ("iec61966-2-4", 11),
+    ("bt1361e", 12),
+    ("iec61966-2-1", 13),
+    ("bt2020-10", 14),
+    ("bt2020-12", 15),
+    ("smpte428", 17),
+];
+
+/// `FFmpeg`'s names of the H.273 `MatrixCoefficients` code points.
+const MATRICES: &[(&str, u8)] = &[
+    ("gbr", 0),
+    ("bt709", 1),
+    ("fcc", 4),
+    ("bt470bg", 5),
+    ("smpte170m", 6),
+    ("smpte240m", 7),
+    ("ycgco", 8),
+    ("bt2020nc", 9),
+    ("bt2020c", 10),
+    ("smpte2085", 11),
+    ("chroma-derived-nc", 12),
+    ("chroma-derived-c", 13),
+    ("ictcp", 14),
+    ("ipt-c2", 15),
+    ("ycgco-re", 16),
+    ("ycgco-ro", 17),
+];
+
+/// What `stream` states for the encoder to write, over the range and pixel
+/// shape of `header`, and the disclosure when it states no primaries,
+/// transfer or matrix, or a value with no code point.
+fn content(stream: &Stream, header: &Y4mHeader) -> (ContentDescription, Option<Disclosure>) {
+    let mut content = header.content_description();
+    let mut stated_any = false;
+    let mut uncoded = false;
+    for (value, names, code_point) in [
+        (
+            &stream.color_primaries,
+            PRIMARIES,
+            &mut content.color_primaries,
+        ),
+        (
+            &stream.color_transfer,
+            TRANSFERS,
+            &mut content.transfer_characteristics,
+        ),
+        (
+            &stream.color_space,
+            MATRICES,
+            &mut content.matrix_coefficients,
+        ),
+    ] {
+        let Some(name) = stated(value.as_deref()) else {
+            continue;
+        };
+        stated_any = true;
+        match names.iter().find(|(known, _)| *known == name) {
+            Some(&(_, code)) => *code_point = code,
+            None => uncoded = true,
+        }
+    }
+    let disclosure = if uncoded {
+        Some(Disclosure::ColorNotCarried)
+    } else if stated_any {
+        None
+    } else {
+        Some(Disclosure::ColorUnspecified)
+    };
+    (content, disclosure)
 }
 
 /// Refuses PQ and HLG.
@@ -696,6 +790,58 @@ mod tests {
     const VIDEO: &str = r#"{"index":1,"codec_type":"video","codec_name":"h264","width":64,
         "height":48,"pix_fmt":"yuv420p","r_frame_rate":"30000/1001","time_base":"1/90000",
         "field_order":"progressive","sample_aspect_ratio":"1:1","start_pts":0}"#;
+
+    /// Stated colour reaches the encoder as H.273 code points; a name with
+    /// no code point is disclosed and left unspecified.
+    #[test]
+    fn stated_colour_becomes_code_points() {
+        let with = |colour: &str| {
+            let stream = VIDEO.replacen('{', &format!("{{{colour},"), 1);
+            let probed = accept(
+                &report(&format!(r#"{{"streams":[{stream}]}}"#)),
+                FINGERPRINT,
+                None,
+                "",
+            );
+            let Ok(probed) = probed else {
+                unreachable!("{probed:?}");
+            };
+            let content = probed.content;
+            (
+                (
+                    content.color_primaries,
+                    content.transfer_characteristics,
+                    content.matrix_coefficients,
+                ),
+                (content.full_range, content.sample_aspect_ratio),
+                probed.facts.disclosures,
+            )
+        };
+        let square_limited = (false, Some((1, 1)));
+        assert_eq!(
+            with(
+                r#""color_range":"tv","color_space":"bt2020nc","color_transfer":"bt2020-10",
+                "color_primaries":"bt2020""#
+            ),
+            ((9, 14, 9), square_limited, vec![])
+        );
+        assert_eq!(
+            with(r#""color_space":"smpte170m""#),
+            ((2, 2, 6), square_limited, vec![])
+        );
+        assert_eq!(
+            with(r#""color_space":"bt709","color_primaries":"future""#),
+            ((2, 2, 1), square_limited, vec![Disclosure::ColorNotCarried])
+        );
+        assert_eq!(
+            with(r#""color_range":"tv","color_space":"unknown""#),
+            (
+                (2, 2, 2),
+                square_limited,
+                vec![Disclosure::ColorUnspecified]
+            )
+        );
+    }
 
     /// An attached picture first does not become the default selection.
     #[test]

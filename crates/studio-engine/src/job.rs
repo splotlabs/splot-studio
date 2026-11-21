@@ -18,7 +18,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use splot_encode::{
-    BitDepth, CancelToken, Config, Encoder, PixelFormat, Preset, RateControlMode, SourceFrame,
+    BitDepth, CancelToken, Config, ContentDescription, Encoder, PixelFormat, Preset,
+    RateControlMode, SourceFrame,
 };
 use studio_domain::job::{
     Check, CheckOutcome, Failure, FailureCode, JobReport, JobSpec, Progress, SourceReader, Stage,
@@ -162,7 +163,7 @@ fn execute(
              chapters it leaves out",
         ));
     }
-    let config = config(&source.header, job.settings)?;
+    let config = config(&source.header, source.content, job.settings)?;
     if job.settings.output == OutputKind::Ivf
         && (u16::try_from(config.width).is_err() || u16::try_from(config.height).is_err())
     {
@@ -272,14 +273,19 @@ fn checked(
 }
 
 /// The encoder configuration of a job on a source with `header`: the
-/// source's geometry, depth, chroma and rational frame rate, constant
+/// source's geometry, depth, chroma, rational frame rate and `content`
+/// (the colour description the output carries), constant
 /// quality at `settings.crf`, and codec defaults for everything else.
 /// Built once per job and validated by the codec.
 ///
 /// # Errors
 /// [`FailureCode::InvalidSettings`] when the codec rejects it, or
 /// [`FailureCode::UnsupportedSource`] for a depth other than 8 or 10.
-pub fn config(header: &Y4mHeader, settings: EncoderSettings) -> Result<Config, Stop> {
+pub fn config(
+    header: &Y4mHeader,
+    content: ContentDescription,
+    settings: EncoderSettings,
+) -> Result<Config, Stop> {
     let invalid =
         |e: splot_encode::Error| Stop::failed(FailureCode::InvalidSettings, e.to_string());
     let mut config = Config::new(header.width, header.height);
@@ -295,6 +301,7 @@ pub fn config(header: &Y4mHeader, settings: EncoderSettings) -> Result<Config, S
     };
     config.chroma = header.format;
     config.frame_rate = header.frame_rate;
+    config.content = content;
     config.rate_control = RateControlMode::Crf {
         crf: settings.crf.get(),
     };
