@@ -42,8 +42,8 @@ rotation or cropping, RGB or alpha, encrypted streams, network and playlist inpu
 - Packages are unsigned and need an x86-64-v3 processor (AVX2) on Windows and Linux.
 
 Known defects are in the [issues](https://github.com/splotlabs/splot-studio/issues); what
-stands between the test builds and a real release is in
-[`docs/release/CHECKLIST.md`](docs/release/CHECKLIST.md).
+stands between the test builds and a real release is tracked in
+[#30](https://github.com/splotlabs/splot-studio/issues/30).
 
 **Crates**
 

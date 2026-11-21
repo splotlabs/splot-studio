@@ -33,8 +33,8 @@ excluded with acknowledgement. MKV/audio/subtitle output is a later gated phase.
 Eight-bit and ten-bit SDR are equal targets. HDR/HLG, unproven VFR, live capture,
 network sources, and partial-bitstream resume are not silently implemented.
 
-Planned work and known defects are GitHub issues; release blockers are in
-`docs/release/CHECKLIST.md`. Do one issue per change. Do not reopen the
+Planned work, known defects and release blockers are GitHub issues (label
+`release-blocker`). Do one issue per change. Do not reopen the
 Slint/toolkit choice.
 
 ## Before editing
