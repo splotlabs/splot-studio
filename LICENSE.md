@@ -4,7 +4,7 @@ First-party material in this repository is offered by **Bartosz Tomczyk**, a nat
 
 Required Notice: Copyright (c) 2026 Bartosz Tomczyk.
 
-This notice identifies Bartosz Tomczyk's original material. Contributions and third-party components keep their own ownership, notices and licence terms. Slint, FFmpeg and the other dependencies are not covered by this licence; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+This notice identifies Bartosz Tomczyk's original material. Material that other people contribute under the [SplotLabs Contribution Terms](https://github.com/splotlabs/.github/blob/main/CLA.md) is licensed by its authors under the MIT No Attribution License (MIT-0). That licence covers only the contributor's own original material, as the repository history identifies it. It does not make any file, crate or this repository MIT-0. Third-party components keep their own ownership, notices and licence terms. Slint, FFmpeg and the other dependencies are not covered by this licence; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 The standard PolyForm Noncommercial License 1.0.0 below governs the permissions it grants. For uses outside those permissions, contact **bartekplus@gmail.com** about an alternative commercial licence. This scope notice does not narrow the permissions granted by the standard licence. An alternative agreement applies only to rights Bartosz Tomczyk is authorized to grant.
 
