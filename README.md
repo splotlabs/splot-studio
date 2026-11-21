@@ -52,6 +52,17 @@ Rules for contributors and coding agents are in [`AGENTS.md`](AGENTS.md).
 ## Licence
 
 Source-available, not open source. Original project material is licensed under the
-[PolyForm Noncommercial License 1.0.0](LICENSE.md); commercial use requires a separate written
-licence from Bartosz Tomczyk. Third-party components keep their own licences, see
-[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+[PolyForm Noncommercial License 1.0.0](LICENSE.md). Uses outside that licence, which includes
+typical commercial deployments, need a separate written licence from Bartosz Tomczyk
+(bartekplus@gmail.com). SplotLabs and splot are project names he uses, not a separate company.
+Third-party components keep their own licences, see
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md); a commercial licence for Splot Studio does
+not cover them.
+
+## Contributing
+
+Read the [contribution policy](https://github.com/splotlabs/.github/blob/main/CONTRIBUTING.md)
+first. Contributions are accepted under a non-exclusive
+[Contributor Licence Agreement](https://github.com/splotlabs/.github/blob/main/CLA.md) with
+Bartosz Tomczyk. You keep your copyright. He receives the right to license your contribution
+under alternative commercial terms and future public licences.
