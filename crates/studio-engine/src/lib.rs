@@ -8,7 +8,12 @@
 //! [`media`] tools) and runs one [`job`] that encodes the 8-bit or 10-bit
 //! frames of one video stream with the pinned Splot encoder into AV2 IVF or
 //! an AV2 Annex B length-delimited OBU stream, [`verify`]s the result, and
-//! publishes it through a no-clobber [`output`] transaction.
+//! publishes it through a no-clobber [`output`] transaction. While it runs,
+//! [`live`] pictures of the packets written so far can be sent.
+//!
+//! The [`preview`] process serves pictures and playback of sources and of
+//! finished outputs ([`stream`] decodes them with the Splot decoder), all
+//! through one display transform, [`picture`].
 //!
 //! Licensed under `PolyForm` Noncommercial 1.0.0; commercial use requires a
 //! separate written license from Bartosz Tomczyk.
@@ -17,9 +22,13 @@
 
 pub mod cli;
 pub mod job;
+pub mod live;
 pub mod media;
 pub mod output;
+pub mod picture;
+pub mod preview;
 pub mod source;
+pub mod stream;
 pub mod verify;
 pub mod worker;
 

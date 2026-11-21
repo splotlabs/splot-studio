@@ -27,6 +27,15 @@
 //! journal cannot be written), `many` (eight rows, the list scrolls) and
 //! `restored` (the list after the app stopped mid-job). `already-open` is the
 //! window a second instance shows.
+//!
+//! The picture area is drawn by the app's real `Preview`, its requests
+//! answered with painted test pictures (a landscape, coarser on the result
+//! side) instead of engine pictures; a converting file shows a live
+//! picture. `preview-loading` leaves them unanswered; `preview-live`
+//! (converting, as `running`),
+//! `preview-compare` (held on a result), `preview-native` (actual pixels),
+//! `preview-unavailable` (the output file is gone) and `preview-untimed` (no
+//! frame timing) show its other states.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -34,7 +43,9 @@ use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, Rgba8Pixel, SharedPixelBuffer};
 use studio_app::activity::Input;
+use studio_app::engine::Picture;
 use studio_app::journal::{Journal, JournalCause, JournalItem, JournalPartial, JournalState};
+use studio_app::preview::{self, Preview};
 use studio_app::recovery::{Disk, Kind};
 use studio_app::source::ProbeFailure;
 use studio_app::state::{AppState, Effect, Intent, Startup};
@@ -44,7 +55,11 @@ use studio_domain::job::{
     JobSpec, Omissions, Progress, Rational, SourceFacts, SourceFingerprint, SourceReader, Stage,
     VideoTrack, WirePath,
 };
-use studio_domain::protocol::{Capabilities, Event, MediaTool, MediaToolOrigin};
+use studio_domain::preview::{
+    ColorBasis, ColorMatrix, MediaTime, PictureBox, PictureFailure, PictureFrame, PictureHeader,
+    PictureOrigin, PictureTarget, PictureView,
+};
+use studio_domain::protocol::{Capabilities, Command, Event, MediaTool, MediaToolOrigin};
 use studio_domain::settings::OutputKind;
 
 const SOURCE: &str = "/home/user/Videos/park walk.y4m";
@@ -704,11 +719,228 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         }
     }
-    let state = scenario(name, long, now)?;
+    let base = match name {
+        "preview-loading" | "preview-native" | "preview-untimed" => "probed",
+        "preview-live" => "running",
+        "preview-compare" | "preview-unavailable" => "completed",
+        other => other,
+    };
+    let state = scenario(base, long, now)?;
     studio_app::render(&window, &state, now);
+    let preview = picture_area(&window, &state, name);
+    let all = preview::Dirty {
+        picture: true,
+        view: true,
+        thumbs: true,
+    };
+    studio_app::render_preview(&window, &state, &preview, all);
     window.set_engine_identity("renderer snapshot, no engine ran".into());
     window.show()?;
     capture(&window, out)
+}
+
+/// The picture area for `state`, its requests answered with painted
+/// pictures as `name` says.
+fn picture_area(window: &studio_app::AppWindow, state: &AppState, name: &str) -> Preview {
+    let mut preview = Preview::new();
+    let size = |w: i32, h: i32| {
+        PictureBox::clamped(u32::try_from(w).unwrap_or(1), u32::try_from(h).unwrap_or(1))
+    };
+    let mut effects = preview.sync(preview::scene(state));
+    effects.extend(preview.input(preview::Input::Resized {
+        stage: size(window.get_stage_px_width(), window.get_stage_px_height()),
+        thumb: size(window.get_thumb_px_width(), window.get_thumb_px_height()),
+    }));
+    match name {
+        "preview-loading" => return preview,
+        // The output file was moved away.
+        "preview-unavailable" => {
+            for effect in effects {
+                if let Command::Picture { generation, .. } = effect.command {
+                    preview.unavailable(
+                        generation,
+                        PictureFailure::Unreadable,
+                        "No such file or directory (os error 2)",
+                    );
+                }
+            }
+            return preview;
+        }
+        _ => {}
+    }
+    let timed = name != "preview-untimed";
+    answer(&mut preview, effects, timed);
+    // A converting file shows its newest live picture.
+    if let Some(preview::Subject::Live { job, .. }) = preview::scene(state).stage {
+        let size = preview.live_box();
+        preview.live(
+            job,
+            paint(0, PictureOrigin::Live, 116, PictureView::Fit, size, timed),
+        );
+    }
+    match name {
+        "preview-compare" => {
+            let effects = preview.input(preview::Input::Compare(true));
+            answer(&mut preview, effects, timed);
+        }
+        "preview-native" => {
+            let effects = preview.input(preview::Input::ToggleNative);
+            answer(&mut preview, effects, timed);
+        }
+        _ => {}
+    }
+    preview
+}
+
+/// Answers every picture request, and those that follow, with a painted
+/// picture of the frame asked for (the poster is frame 42).
+fn answer(preview: &mut Preview, mut effects: Vec<preview::Effect>, timed: bool) {
+    while let Some(effect) = effects.pop() {
+        if let Command::Picture {
+            generation,
+            target,
+            frame,
+            view,
+            size,
+        } = effect.command
+        {
+            let origin = match target {
+                PictureTarget::Source { .. } => PictureOrigin::Source,
+                PictureTarget::Result { .. } => PictureOrigin::Result,
+            };
+            let index = match frame {
+                PictureFrame::Poster => 42,
+                PictureFrame::Index { index } => index,
+            };
+            effects.extend(preview.picture(paint(generation, origin, index, view, size, timed)));
+        }
+    }
+}
+
+/// The painted test frame is 1920x1080.
+const FRAME: (u32, u32) = (1920, 1080);
+
+/// A landscape at `frame`, as the engine would send it for `view` in
+/// `size`: fitted (never enlarged) or a one-to-one crop. The result side is
+/// coarser, as a lossy encode can be.
+// A test picture: every value is bounded by the frame size or 0..=255.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn paint(
+    generation: u64,
+    origin: PictureOrigin,
+    frame: u64,
+    view: PictureView,
+    size: PictureBox,
+    timed: bool,
+) -> Picture {
+    let (fw, fh) = FRAME;
+    let (width, height, x0, y0, step) = match view {
+        PictureView::Fit => {
+            let scale = (f64::from(size.width) / f64::from(fw))
+                .min(f64::from(size.height) / f64::from(fh))
+                .min(1.0);
+            let w = (f64::from(fw) * scale).round().max(1.0);
+            let h = (f64::from(fh) * scale).round().max(1.0);
+            (w as u16, h as u16, 0, 0, 1.0 / scale)
+        }
+        PictureView::Native { x, y } => {
+            let w = size.width.min(fw as u16);
+            let h = size.height.min(fh as u16);
+            let x = x.min(fw - u32::from(w));
+            let y = y.min(fh - u32::from(h));
+            (w, h, x, y, 1.0)
+        }
+    };
+    let coarse = origin != PictureOrigin::Source;
+    let shift = frame as f64 * 3.0;
+    let mut bytes = Vec::with_capacity(usize::from(width) * usize::from(height) * 3);
+    for row in 0..height {
+        for col in 0..width {
+            let mut fx = f64::from(x0) + f64::from(col) * step;
+            let mut fy = f64::from(y0) + f64::from(row) * step;
+            if coarse {
+                fx = (fx / 6.0).floor() * 6.0;
+                fy = (fy / 6.0).floor() * 6.0;
+            }
+            bytes.extend_from_slice(&landscape(fx, fy, shift, coarse));
+        }
+    }
+    let header = PictureHeader {
+        generation,
+        origin,
+        frame,
+        time: timed.then_some(MediaTime {
+            num: frame * 1001,
+            den: 30000,
+        }),
+        frame_count: Some(300),
+        width,
+        height,
+        frame_width: fw,
+        frame_height: fh,
+        view: match view {
+            PictureView::Fit => PictureView::Fit,
+            PictureView::Native { .. } => PictureView::Native { x: x0, y: y0 },
+        },
+        basis: ColorBasis {
+            matrix: ColorMatrix::Bt709,
+            assumed: true,
+        },
+    };
+    Picture::new(generation, header, &bytes).unwrap_or_else(|| unreachable!("painted to size"))
+}
+
+/// One pixel of the landscape at frame coordinates `x`, `y`.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::many_single_char_names
+)]
+fn landscape(x: f64, y: f64, shift: f64, coarse: bool) -> [u8; 3] {
+    let (w, h) = (f64::from(FRAME.0), f64::from(FRAME.1));
+    let mix = |a: [f64; 3], b: [f64; 3], t: f64| {
+        let t = t.clamp(0.0, 1.0);
+        [
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t,
+        ]
+    };
+    let horizon = h * 0.58;
+    // Sky to haze, with a low sun.
+    let mut c = mix([46.0, 92.0, 158.0], [244.0, 196.0, 150.0], y / horizon);
+    let (sx, sy) = (w * 0.68, h * 0.47);
+    let d = ((x - sx).powi(2) + (y - sy).powi(2)).sqrt();
+    if d < 70.0 {
+        c = [255.0, 236.0, 196.0];
+    } else if d < 260.0 {
+        c = mix([255.0, 222.0, 170.0], c, (d - 70.0) / 190.0);
+    }
+    // Far hills, near hills, then water with the sun's reflection.
+    let far = horizon - 60.0 - 50.0 * ((x + shift) / 260.0).sin() - 25.0 * (x / 97.0).cos();
+    let near = horizon + 40.0 - 70.0 * ((x - shift * 2.0) / 410.0).sin().abs();
+    if y > far {
+        c = mix([96.0, 112.0, 150.0], [70.0, 84.0, 110.0], (y - far) / 120.0);
+    }
+    if y > near {
+        c = mix([52.0, 88.0, 60.0], [24.0, 46.0, 34.0], (y - near) / 200.0);
+    }
+    if y > h * 0.8 {
+        let ripple = 0.5 + 0.5 * ((y * 0.35) + (x / 40.0).sin() * 2.0).sin();
+        c = mix([30.0, 58.0, 92.0], [70.0, 110.0, 150.0], ripple * 0.6);
+        if (x - sx).abs() < 60.0 + (y - h * 0.8) * 0.4 && ripple > 0.55 {
+            c = mix(c, [255.0, 220.0, 170.0], 0.7);
+        }
+    }
+    if coarse {
+        // Fewer levels, as banding in a low-rate encode.
+        c = c.map(|v| (v / 12.0).round() * 12.0);
+    }
+    c.map(|v| v.clamp(0.0, 255.0) as u8)
 }
 
 /// Waits for the first frames, then writes `component`'s pixels to `out`.

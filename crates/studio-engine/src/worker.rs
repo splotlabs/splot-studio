@@ -3,12 +3,16 @@
 
 //! The worker session: framed commands in, framed events out.
 //!
-//! Three threads. The caller's thread reads commands and never runs codec
-//! work, so `Cancel` is seen while the encoder is busy. One job thread runs
-//! the single job. One writer thread owns the output stream, so frames never
-//! interleave and a peer that stops reading blocks only the writer: the job
-//! only ever replaces a progress slot or appends one of its few stage and
-//! terminal events, and neither of those is dropped.
+//! Three threads, and a fourth for live pictures. The caller's thread
+//! reads commands and never runs codec work, so `Cancel` is seen while the
+//! encoder is busy. One job thread runs the single job. One writer thread
+//! owns the output stream, so frames never interleave and a peer that stops
+//! reading blocks only the writer: the job only ever replaces a progress
+//! slot or appends one of its few stage and terminal events, and neither of
+//! those is dropped. With `Start.live`, the [`crate::live`] thread decodes
+//! the packets the job has written and replaces a one-picture slot, which
+//! the writer empties only when no event is waiting; the job hands it
+//! packets without ever waiting, and the thread ends with the job.
 //!
 //! A cancel (the `Cancel` command, the end of input or a failed output) is
 //! cooperative: it sets the job's flag, which the job polls between frames
@@ -37,13 +41,17 @@ use std::time::{Duration, Instant};
 
 use splot_encode::CancelToken;
 use studio_domain::job::{Failure, FailureCode, JobSpec};
+use studio_domain::preview::{
+    MAX_PICTURE_HEIGHT, MAX_PICTURE_WIDTH, PictureBox, PictureFailure, PictureHeader,
+};
 use studio_domain::protocol::{
     Command, Envelope, ErrorCode, Event, ProtocolError, decode, read_frame, write_message,
+    write_picture,
 };
 use thiserror::Error;
 
 use crate::job::{self, Control, JOB_STACK_BYTES, Stop};
-use crate::{build_identity, capabilities, source};
+use crate::{build_identity, capabilities, live, source};
 
 /// The shortest gap between two progress events.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -171,7 +179,7 @@ fn serve<'scope>(
                 };
                 outbox.reply(id, event);
             }
-            Command::Start { job: spec } => {
+            Command::Start { job: spec, live } => {
                 if job.is_some() {
                     outbox.reply(
                         id,
@@ -182,7 +190,7 @@ fn serve<'scope>(
                     );
                     continue;
                 }
-                match start(scope, outbox, id, spec) {
+                match start(scope, outbox, id, spec, live) {
                     Ok(handle) => job = Some(handle),
                     Err(error) => outbox.job_end(
                         id,
@@ -200,6 +208,13 @@ fn serve<'scope>(
                     return (Ok(()), true);
                 }
             }
+            Command::Picture { .. } | Command::Play { .. } | Command::StopPlayback => outbox.reply(
+                id,
+                refusal(
+                    ErrorCode::WrongState,
+                    "a job worker does not serve pictures; the preview process does",
+                ),
+            ),
         }
     };
     // The end of input, or an unreadable one, means nobody can cancel later.
@@ -219,8 +234,12 @@ fn start<'scope>(
     outbox: &'scope Outbox,
     id: u64,
     spec: JobSpec,
+    live: Option<PictureBox>,
 ) -> std::io::Result<ScopedJoinHandle<'scope, ()>> {
     outbox.begin_job(id);
+    if let Some(size) = live {
+        start_live(scope, outbox, id, size);
+    }
     thread::Builder::new()
         .name("studio-job".to_owned())
         .stack_size(JOB_STACK_BYTES)
@@ -238,6 +257,50 @@ fn start<'scope>(
                 });
             outbox.job_end(id, end);
         })
+}
+
+/// Starts the live decoder for the job. Without it the job runs as it
+/// would without `live`, and the app is told why there are no pictures.
+fn start_live<'scope>(
+    scope: &'scope Scope<'scope, '_>,
+    outbox: &'scope Outbox,
+    id: u64,
+    size: PictureBox,
+) {
+    let unavailable = |code, message: String| {
+        outbox.job_event(
+            id,
+            Event::PictureUnavailable {
+                generation: 0,
+                code,
+                message,
+            },
+        );
+    };
+    if !size.is_valid() {
+        return unavailable(
+            PictureFailure::InvalidRequest,
+            format!(
+                "the live picture box {}x{} is outside 1x1 to {MAX_PICTURE_WIDTH}x{MAX_PICTURE_HEIGHT}",
+                size.width, size.height
+            ),
+        );
+    }
+    let (feed, units) = live::Feed::new();
+    let spawned = thread::Builder::new()
+        .name("studio-live".to_owned())
+        .spawn_scoped(scope, move || {
+            live::run(&units, size, &|header, pixels| {
+                outbox.live_picture(header, pixels);
+            });
+        });
+    match spawned {
+        Ok(_) => *outbox.feed() = Some(feed),
+        Err(error) => unavailable(
+            PictureFailure::Unreadable,
+            format!("cannot start the live picture thread: {error}"),
+        ),
+    }
 }
 
 fn refusal(code: ErrorCode, message: impl Into<String>) -> Event {
@@ -275,6 +338,9 @@ struct Outbox {
     changed: Condvar,
     /// Set by `Cancel`, the end of input, or a failed output.
     cancel: AtomicBool,
+    /// The job's packets go here while live pictures are wanted. Dropped
+    /// when the job ends, which ends the live thread.
+    live: Mutex<Option<live::Feed>>,
 }
 
 #[derive(Debug, Default)]
@@ -283,6 +349,8 @@ struct State {
     queue: VecDeque<Envelope<Event>>,
     /// The newest progress, not yet written. Replaced, never queued.
     progress: Option<Envelope<Event>>,
+    /// The newest live picture, not yet written. Replaced, never queued.
+    picture: Option<(PictureHeader, Vec<u8>)>,
     job: JobState,
     /// The `request_id` of the job's `Start`.
     job_id: u64,
@@ -325,6 +393,20 @@ impl Outbox {
         self.changed.notify_all();
     }
 
+    fn feed(&self) -> MutexGuard<'_, Option<live::Feed>> {
+        self.live.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Offers a live picture. Never waits; replaces one not yet written.
+    fn live_picture(&self, header: PictureHeader, pixels: Vec<u8>) {
+        let mut state = self.lock();
+        if state.job == JobState::Running && !state.broken {
+            state.picture = Some((header, pixels));
+        }
+        drop(state);
+        self.changed.notify_all();
+    }
+
     fn begin_job(&self, request_id: u64) {
         let mut state = self.lock();
         state.job = JobState::Running;
@@ -360,8 +442,11 @@ impl Outbox {
             state.flush_progress();
             state.push(Envelope::new(request_id, event));
             state.job = JobState::Ended;
+            state.picture = None;
         }
         drop(state);
+        // Ends the live thread.
+        self.feed().take();
         self.changed.notify_all();
     }
 
@@ -392,6 +477,7 @@ impl Outbox {
             let _ = fs::remove_file(temp);
         }
         state.progress = None;
+        state.picture = None;
         let id = state.job_id;
         state.push(Envelope::new(id, Event::Cancelled));
         state.job = JobState::Ended;
@@ -431,7 +517,8 @@ impl Outbox {
     }
 
     /// The writer thread: writes until closed and empty. Progress is held
-    /// back to one per [`PROGRESS_INTERVAL`]; the rest is written at once.
+    /// back to one per [`PROGRESS_INTERVAL`]; the rest is written at once,
+    /// a live picture only when no event is waiting.
     fn write_all(&self, mut output: impl Write) -> Result<(), ProtocolError> {
         let mut next_progress = Instant::now();
         let mut state = self.lock();
@@ -443,6 +530,15 @@ impl Outbox {
             {
                 next_progress = Instant::now() + PROGRESS_INTERVAL;
                 envelope
+            } else if let Some((header, pixels)) = state.picture.take() {
+                let id = state.job_id;
+                drop(state);
+                self.changed.notify_all();
+                if let Err(error) = write_picture(&mut output, id, header, &pixels) {
+                    return Err(self.broke(error));
+                }
+                state = self.lock();
+                continue;
             } else if state.progress.is_some() {
                 let wait = next_progress.saturating_duration_since(Instant::now());
                 state = self
@@ -463,18 +559,24 @@ impl Outbox {
             drop(state);
             self.changed.notify_all();
             if let Err(error) = write_message(&mut output, &envelope) {
-                let mut state = self.lock();
-                state.broken = true;
-                state.queue.clear();
-                state.progress = None;
-                // Nobody can hear the job any more.
-                self.stop(&state);
-                drop(state);
-                self.changed.notify_all();
-                return Err(error);
+                return Err(self.broke(error));
             }
             state = self.lock();
         }
+    }
+
+    /// The output failed: discards every event and cancels the job.
+    fn broke(&self, error: ProtocolError) -> ProtocolError {
+        let mut state = self.lock();
+        state.broken = true;
+        state.queue.clear();
+        state.progress = None;
+        state.picture = None;
+        // Nobody can hear the job any more.
+        self.stop(&state);
+        drop(state);
+        self.changed.notify_all();
+        error
     }
 }
 
@@ -509,6 +611,18 @@ impl Control for Outbox {
         let free = state.job == JobState::Running && !self.cancel.load(Ordering::Relaxed);
         state.publishing = free;
         free
+    }
+
+    fn stream_started(&self, stream: live::Stream) {
+        if let Some(feed) = self.feed().as_mut() {
+            feed.stream(stream);
+        }
+    }
+
+    fn packet_written(&self, unit: &[u8]) {
+        if let Some(feed) = self.feed().as_mut() {
+            feed.packet(unit);
+        }
     }
 }
 

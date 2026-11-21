@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
 //! The app without its window: the [`AppState`], the engine workers it
-//! asks for, and the journal it is saved to.
+//! asks for, the [`Preview`] and its engine process, and the journal it is
+//! saved to.
 //!
 //! [`Session::dispatch`] applies an intent and carries out its effects:
 //! starting probe and job workers, talking to them, removing a dead
@@ -19,12 +20,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use studio_domain::job::WirePath;
-use studio_domain::protocol::{BuildIdentity, Command, Event};
+use studio_domain::protocol::{BuildIdentity, Command, Envelope, Event, ProtocolError};
 use studio_domain::settings::OutputKind;
 
 use crate::activity::{self, Changed};
-use crate::engine::{self, Delivery, Ending, EngineStatus, Worker};
+use crate::engine::{self, Delivery, Ending, EngineStatus, Role, Worker};
 use crate::journal::{self, Writer};
+use crate::preview::{self, Dirty, Preview};
 use crate::recovery::{self, RealDisk};
 use crate::source::ProbeFailure;
 use crate::state::{AppState, Effect, Intent};
@@ -41,6 +43,8 @@ pub enum Route {
     Probe(u64),
     /// A job, by request id.
     Job(u64),
+    /// The preview process, by how many were started before it.
+    Preview(u64),
 }
 
 /// How worker deliveries leave their reader threads.
@@ -76,6 +80,8 @@ pub struct Outcome {
     pub ui: Vec<UiEffect>,
     /// What to redraw.
     pub changed: Changed,
+    /// What of the picture area to redraw.
+    pub preview: Dirty,
 }
 
 /// The state, its workers and its journal.
@@ -86,6 +92,10 @@ pub struct Session {
     hello: Option<Worker>,
     probe: Option<(u64, Worker)>,
     job: Option<(u64, Worker)>,
+    preview: Preview,
+    /// The preview process, started on first need, with its spawn number.
+    previewer: Option<(u64, Worker)>,
+    previewers_started: u64,
     journal: Option<Writer>,
     /// The journal bytes last submitted.
     saved: Option<Vec<u8>>,
@@ -110,6 +120,9 @@ impl Session {
             hello: None,
             probe: None,
             job: None,
+            preview: Preview::new(),
+            previewer: None,
+            previewers_started: 0,
             journal,
             saved: None,
             shut_down: false,
@@ -122,6 +135,27 @@ impl Session {
     #[must_use]
     pub const fn state(&self) -> &AppState {
         &self.state
+    }
+
+    /// The picture area.
+    #[must_use]
+    pub const fn preview(&self) -> &Preview {
+        &self.preview
+    }
+
+    /// The user did something to the picture area or the window.
+    pub fn preview_input(&mut self, input: preview::Input) -> Outcome {
+        let mut outcome = Outcome {
+            ui: Vec::new(),
+            changed: Changed::Nothing,
+            preview: Dirty::default(),
+        };
+        if !self.shut_down {
+            let effects = self.preview.input(input);
+            self.send_preview(effects);
+            outcome.preview = self.preview.take_dirty();
+        }
+        outcome
     }
 
     /// Sends the startup `Hello`.
@@ -140,6 +174,7 @@ impl Session {
                 Outcome {
                     ui: Vec::new(),
                     changed: Changed::Nothing,
+                    preview: Dirty::default(),
                 }
             }
             Err(e) => {
@@ -174,6 +209,7 @@ impl Session {
         let mut outcome = Outcome {
             ui: Vec::new(),
             changed: Changed::Nothing,
+            preview: Dirty::default(),
         };
         if self.shut_down {
             return outcome;
@@ -200,7 +236,10 @@ impl Session {
         }
         if outcome.changed == Changed::Phase {
             self.persist();
+            let effects = self.preview.sync(preview::scene(&self.state));
+            self.send_preview(effects);
         }
+        outcome.preview = self.preview.take_dirty();
         outcome
     }
 
@@ -209,6 +248,7 @@ impl Session {
         let nothing = Outcome {
             ui: Vec::new(),
             changed: Changed::Nothing,
+            preview: Dirty::default(),
         };
         if self.shut_down {
             return nothing;
@@ -226,6 +266,10 @@ impl Session {
             Route::Probe(id) => {
                 let result = match delivery {
                     Delivery::Event(e) if e.request_id != id => return nothing,
+                    Delivery::Pictures(slot) => {
+                        let _ = slot.take();
+                        return nothing;
+                    }
                     Delivery::Event(e) => match e.body {
                         Event::Probed { facts } => Ok(facts),
                         Event::Failed { failure } => Err(ProbeFailure::from(failure)),
@@ -261,7 +305,20 @@ impl Session {
                         );
                         return nothing;
                     }
+                    Delivery::Event(Envelope {
+                        body: Event::PictureUnavailable { message, .. },
+                        ..
+                    }) => {
+                        self.preview.live_unavailable(id, &message);
+                        return self.preview_outcome();
+                    }
                     Delivery::Event(e) => activity::Input::Event(e.body),
+                    Delivery::Pictures(slot) => {
+                        if let Some(picture) = slot.take().filter(|p| p.request_id == id) {
+                            self.preview.live(id, picture);
+                        }
+                        return self.preview_outcome();
+                    }
                     Delivery::Ended(ending) => {
                         if self.job.as_ref().is_some_and(|(current, _)| *current == id) {
                             self.job = None;
@@ -272,6 +329,80 @@ impl Session {
                     }
                 };
                 self.dispatch(Intent::Job { id, input }, now)
+            }
+            Route::Preview(spawn) => self.deliver_preview(spawn, delivery),
+        }
+    }
+
+    fn preview_outcome(&mut self) -> Outcome {
+        Outcome {
+            ui: Vec::new(),
+            changed: Changed::Nothing,
+            preview: self.preview.take_dirty(),
+        }
+    }
+
+    /// One delivery from preview process number `spawn`; older processes
+    /// are ignored.
+    fn deliver_preview(&mut self, spawn: u64, delivery: Delivery) -> Outcome {
+        let current = self.previewer.as_ref().is_some_and(|(n, _)| *n == spawn);
+        let effects = match delivery {
+            Delivery::Pictures(slot) => match slot.take() {
+                Some(picture) if current => self.preview.picture(picture),
+                _ => Vec::new(),
+            },
+            _ if !current => Vec::new(),
+            Delivery::Event(envelope) => match envelope.body {
+                Event::PictureUnavailable {
+                    generation,
+                    code,
+                    message,
+                } => self.preview.unavailable(generation, code, &message),
+                Event::PlaybackEnded { generation, frame } => {
+                    self.preview.playback_ended(generation, frame)
+                }
+                Event::Error { message, .. } => {
+                    self.previewer = None;
+                    self.preview.refused(&message)
+                }
+                // Nothing else is sent to the preview process's requests.
+                _ => Vec::new(),
+            },
+            Delivery::Ended(ending) => {
+                self.previewer = None;
+                let incompatible = matches!(
+                    ending.error,
+                    Some(ProtocolError::IncompatibleVersion { .. })
+                );
+                self.preview
+                    .process_ended(&ending_text(&ending), incompatible)
+            }
+        };
+        self.send_preview(effects);
+        self.preview_outcome()
+    }
+
+    /// Sends preview commands, starting the preview process first if none
+    /// runs. A process that cannot be written to ends by itself; its end
+    /// of stream is what reports it.
+    fn send_preview(&mut self, effects: Vec<preview::Effect>) {
+        for effect in effects {
+            if self.previewer.is_none() {
+                let spawn = self.previewers_started;
+                self.previewers_started += 1;
+                match self.spawn_as(Role::Preview, Route::Preview(spawn)) {
+                    Ok(worker) => self.previewer = Some((spawn, worker)),
+                    Err(why) => {
+                        // Gives up, so nothing further is returned.
+                        let _ = self.preview.spawn_failed(&why);
+                        return;
+                    }
+                }
+            }
+            if let Some((_, worker)) = &mut self.previewer
+                && worker.send(effect.request_id, effect.command).is_err()
+            {
+                worker.close_input();
             }
         }
     }
@@ -319,8 +450,9 @@ impl Session {
             }
             Effect::Start { id, job } => {
                 let started = self.spawn(Route::Job(id)).and_then(|mut worker| {
+                    let live = Some(self.preview.live_box());
                     worker
-                        .send(id, Command::Start { job })
+                        .send(id, Command::Start { job, live })
                         .map_err(|e| format!("could not send the job: {e}"))?;
                     Ok(worker)
                 });
@@ -365,9 +497,14 @@ impl Session {
     }
 
     fn spawn(&self, route: Route) -> Result<Worker, String> {
+        self.spawn_as(Role::Worker, route)
+    }
+
+    fn spawn_as(&self, role: Role, route: Route) -> Result<Worker, String> {
         let engine = self.engine.as_ref().map_err(Clone::clone)?;
         let post = Arc::clone(&self.post);
-        Worker::spawn(engine, move |delivery| post(route, delivery)).map_err(|e| e.to_string())
+        Worker::spawn(engine, role, move |delivery| post(route, delivery))
+            .map_err(|e| e.to_string())
     }
 
     /// Submits the journal if it differs from the last one submitted.
@@ -407,6 +544,7 @@ impl Session {
             self.job.take().map(|(_, w)| w),
             self.probe.take().map(|(_, w)| w),
             self.hello.take(),
+            self.previewer.take().map(|(_, w)| w),
         ];
         for worker in workers.into_iter().flatten() {
             worker.shutdown(engine::EXIT_GRACE);

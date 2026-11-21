@@ -9,9 +9,12 @@
 
 import { AboutSlint, Button, ComboBox, Palette, ScrollView, SpinBox } from "std-widgets.slint";
 import { Tokens } from "tokens.slint";
+import { FocusRing, KeyboardFocus } from "focus.slint";
+import { IconButton, Scrubber, Stage, StageState, ToggleChip } from "stage.slint";
 
-// Re-exported so Rust can pin the appearance for renderer snapshots.
-export { Palette }
+// Re-exported so Rust can pin the appearance for renderer snapshots, and the
+// picture area's state for Rust to set.
+export { Palette, StageState }
 
 // How a status line should read; the text always says the same thing in words.
 export enum Tone { neutral, success, warning, error }
@@ -128,33 +131,6 @@ component StatusDot inherits Rectangle {
     border-radius: 4px;
     background: Tones.color(root.tone);
     accessible-role: none;
-}
-
-// The outline of a Splot-drawn control that has keyboard focus.
-component FocusRing inherits Rectangle {
-    in property <bool> shown;
-    in property <length> radius;
-    // Placed by the user: 3px outside the control on every side.
-    border-radius: root.radius + 3px;
-    border-width: root.shown ? 2px : 0px;
-    border-color: Tokens.focus-ring;
-}
-
-// Focus from the keyboard shows a ring; focus from a click does not.
-component KeyboardFocus inherits FocusScope {
-    out property <bool> ring: self.has-focus && self.from-keyboard;
-    property <bool> from-keyboard;
-    focus-gained(reason) => {
-        self.from-keyboard = reason == FocusReason.tab-navigation;
-    }
-    focus-lost => {
-        self.from-keyboard = false;
-    }
-
-    // Lets a subclass mark keyboard use after a click focused it.
-    public function keyboard-used() {
-        self.from-keyboard = true;
-    }
 }
 
 // The one accent-filled action. Enter or Space activates it.
@@ -550,6 +526,8 @@ component StateIcon inherits Rectangle {
 // under Advanced.
 component FileRow inherits Rectangle {
     in property <QueueRow> file;
+    // The source's poster frame, or an empty image until it arrives.
+    in property <image> thumb;
     in property <bool> selected;
     // The list has keyboard focus and this is the selected row.
     in property <bool> ring;
@@ -584,9 +562,36 @@ component FileRow inherits Rectangle {
         padding-right: Tokens.space-2;
         spacing: Tokens.space-3;
 
-        StateIcon {
-            state: root.file.state;
+        // The poster frame, letterboxed, with the state icon on its corner.
+        Rectangle {
+            width: 64px;
+            height: 36px;
             y: (parent.height - self.height) / 2;
+            border-radius: Tokens.radius-small;
+            background: Tokens.stage;
+            accessible-role: none;
+
+            Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.thumb;
+                image-fit: contain;
+                accessible-role: none;
+            }
+
+            // Inside the row: the thumbnail is centred in 48px.
+            Rectangle {
+                x: parent.width - 15px;
+                y: parent.height - 15px;
+                width: 20px;
+                height: 20px;
+                border-radius: 10px;
+                background: root.background == transparent ? Tokens.track : root.background;
+
+                StateIcon {
+                    state: root.file.state;
+                }
+            }
         }
 
         VerticalLayout {
@@ -680,7 +685,7 @@ component FileRow inherits Rectangle {
     }
 
     if !root.last && root.file.state != RowState.converting: Rectangle {
-        x: Tokens.space-3 + 16px + Tokens.space-3;
+        x: Tokens.space-3 + 64px + Tokens.space-3;
         y: parent.height - 1px;
         width: parent.width - self.x;
         height: 1px;
@@ -702,6 +707,8 @@ component FileRow inherits Rectangle {
 // run. At most `visible-rows` are shown; the rest scroll inside the list.
 component FileList inherits KeyboardFocus {
     in property <[QueueRow]> rows;
+    // Row thumbnails by index; missing ones show the empty frame.
+    in property <[image]> thumbs;
     in property <int> selected;
     in property <bool> actions-enabled;
     in property <int> visible-rows: 5;
@@ -785,6 +792,7 @@ component FileList inherits KeyboardFocus {
             width: scroll.visible-width;
             height: root.row-height;
             file: row;
+            thumb: root.thumbs[i];
             index: i;
             count: root.count;
             last: i == root.count - 1;
@@ -923,6 +931,46 @@ export component AppWindow inherits Window {
     // View state. In-out so renderer snapshots can open it.
     in-out property <bool> advanced-open;
 
+    // The picture area. Rust sets everything; only the slider position is
+    // also moved here while dragging.
+    in property <StageState> stage-state;
+    in property <image> stage-image;
+    // The picture is actual pixels, one per physical pixel.
+    in property <bool> stage-native;
+    // "Original", "AV2 result · colours assumed (BT.709)", "Live · frame 117 of 300".
+    in property <string> stage-badge;
+    // "Hold to see the original", or empty.
+    in property <string> stage-hint;
+    in property <string> stage-message;
+    in property <string> stage-accessible;
+    // The transport row is shown, and usable.
+    in property <bool> stage-transport;
+    in property <bool> stage-navigable;
+    // The frame count; 0 when it is not known (no scrubber then).
+    in property <int> stage-frames;
+    in property <float> stage-position;
+    // "12 / 300" and "0:00.40".
+    in property <string> stage-frame-text;
+    in property <string> stage-time-text;
+    in property <bool> stage-can-play;
+    in property <bool> stage-playing;
+    // Why Play is not offered, when it is not.
+    in property <string> stage-play-note;
+    in property <bool> stage-can-compare;
+    in property <bool> stage-comparing;
+    in property <bool> stage-can-native;
+    in property <bool> stage-native-on;
+    // Row thumbnails, by row index.
+    in property <[image]> row-thumbs;
+    // What preview pictures are: under Advanced.
+    in property <string> preview-note;
+    // The picture area and a row thumbnail in physical pixels: what Rust asks
+    // the engine for. They change with the scale factor only.
+    out property <int> stage-px-width: round(root.main-width / 1phx);
+    out property <int> stage-px-height: round(root.main-width * 9 / 16 / 1phx);
+    out property <int> thumb-px-width: round(64px / 1phx);
+    out property <int> thumb-px-height: round(36px / 1phx);
+
     callback open-requested();
     callback change-requested();
     callback row-selected(int);
@@ -943,6 +991,20 @@ export component AppWindow inherits Window {
     callback reset-requested();
     callback omissions-confirmed();
     callback omissions-declined();
+    callback stage-geometry-changed();
+    callback stage-compare(bool);
+    callback stage-step(int);
+    callback stage-seek(int);
+    callback stage-end();
+    callback stage-play-pause();
+    callback stage-toggle-native();
+    callback stage-pan(length, length);
+    changed stage-px-width => {
+        root.stage-geometry-changed();
+    }
+    changed stage-px-height => {
+        root.stage-geometry-changed();
+    }
 
     // Also used by the renderer-snapshot example to capture the dialog.
     public function show-about() {
@@ -965,6 +1027,8 @@ export component AppWindow inherits Window {
     property <length> main-width: 416px;
     property <length> advanced-width: 312px;
     property <length> card-padding: Tokens.space-6;
+    property <length> form-label-width: 64px;
+    property <bool> show-settings: !(root.view-mode == ViewMode.single && root.job-view == JobView.completed);
 
     title: root.view-mode == ViewMode.list ? root.list-title + " — Splot Studio"
         : root.has-source ? root.source-name + " — Splot Studio" : "Splot Studio";
@@ -976,7 +1040,15 @@ export component AppWindow inherits Window {
     // is pinned explicitly; the offset above the content is copied by
     // `changed`/`init`, outside the layout bindings, so the constraints do not
     // depend on the window's own layout.
-    out property <length> fitted-height: frame.absolute-position.y + content.preferred-height;
+    //
+    // The window is never taller than `max-window-height`, so it fits a
+    // 1366x768 display under a task bar and a title bar. Content taller than
+    // that (several files, long messages, large text) scrolls inside the
+    // card; Slint scrolls a control that receives focus into view.
+    property <length> max-window-height: 680px;
+    property <length> visible-content-height: min(content.preferred-height, max(Tokens.space-8 * 4, root.max-window-height - root.fit-offset));
+    property <length> fit-offset;
+    out property <length> fitted-height: frame.absolute-position.y + min(content.preferred-height, max(Tokens.space-8 * 4, root.max-window-height - frame.absolute-position.y));
     out property <length> fitted-width: content.preferred-width;
     property <length> fit-height;
     // Rust re-asserts the fitted size: a compositor may answer an earlier
@@ -984,6 +1056,7 @@ export component AppWindow inherits Window {
     callback fit-changed();
     changed fitted-height => {
         self.fit-height = self.fitted-height;
+        self.fit-offset = frame.absolute-position.y;
         root.fit-changed();
     }
     changed fitted-width => {
@@ -991,6 +1064,7 @@ export component AppWindow inherits Window {
     }
     init => {
         self.fit-height = self.fitted-height;
+        self.fit-offset = frame.absolute-position.y;
     }
     min-width: content.preferred-width;
     max-width: content.preferred-width;
@@ -1034,20 +1108,32 @@ export component AppWindow inherits Window {
     frame := VerticalLayout {
         min-width: content.preferred-width;
         max-width: content.preferred-width;
-        min-height: content.preferred-height;
-        max-height: content.preferred-height;
+        min-height: root.visible-content-height;
+        max-height: root.visible-content-height;
+
+        card-scroll := ScrollView {
+            content-width: content.preferred-width;
+            content-height: content.preferred-height;
+            horizontal-scrollbar-policy: always-off;
 
                 content := HorizontalLayout {
-                    padding: root.card-padding;
+                    width: self.preferred-width;
+                    height: self.preferred-height;
+                    padding-left: root.card-padding;
+                    padding-right: root.card-padding;
+                    padding-top: root.card-padding - Tokens.space-1;
+                    padding-bottom: root.card-padding - Tokens.space-1;
                     alignment: start;
 
                     // Simple column
                     VerticalLayout {
                         width: root.main-width;
-                        spacing: Tokens.space-4 + Tokens.space-1;
+                        spacing: Tokens.space-4;
                         alignment: start;
 
-                        HorizontalLayout {
+                        // The brand greets an empty window; once a file is open
+                        // the picture leads and the title bar names the app.
+                        if !root.has-source: HorizontalLayout {
                             alignment: start;
 
                             Wordmark { }
@@ -1063,6 +1149,126 @@ export component AppWindow inherits Window {
                                 font-weight: notice.tone == Tone.neutral ? Tokens.weight-regular : Tokens.weight-semibold;
                                 wrap: word-wrap;
                                 accessible-live-region: polite;
+                            }
+                        }
+
+                        // The picture area, on top of the card once a file is open.
+                        if root.has-source && root.stage-state != StageState.none: VerticalLayout {
+                            spacing: Tokens.space-1;
+
+                            Stage {
+                                height: root.stage-state == StageState.unavailable ? 4 * Tokens.space-6 : root.main-width * 9 / 16;
+                                state: root.stage-state;
+                                picture: root.stage-image;
+                                native: root.stage-native;
+                                badge: root.stage-badge;
+                                hint: root.stage-hint;
+                                message: root.stage-message;
+                                can-compare: root.stage-can-compare;
+                                comparing: root.stage-comparing;
+                                navigable: root.stage-navigable;
+                                accessible-text: root.stage-accessible;
+                                compare(on) => {
+                                    root.stage-compare(on);
+                                }
+                                step(delta) => {
+                                    root.stage-step(delta);
+                                }
+                                seek-start => {
+                                    root.stage-seek(0);
+                                }
+                                seek-end => {
+                                    root.stage-end();
+                                }
+                                play-pause => {
+                                    root.stage-play-pause();
+                                }
+                                pan(dx, dy) => {
+                                    root.stage-pan(dx, dy);
+                                }
+                            }
+
+                            // Frame stepping, the scrubber, play and actual pixels.
+                            // The step buttons are no Tab stops: the picture's
+                            // own Left and Right keys do the same.
+                            if root.stage-transport: HorizontalLayout {
+                                spacing: Tokens.space-1;
+
+                                IconButton {
+                                    label: "Previous frame";
+                                    description: "Left arrow on the picture";
+                                    enabled: root.stage-navigable;
+                                    tab-stop: false;
+                                    icon: "M 3 3 L 4.8 3 L 4.8 13 L 3 13 Z M 13 3 L 13 13 L 6.2 8 Z";
+                                    clicked => {
+                                        root.stage-step(-1);
+                                    }
+                                }
+
+                                IconButton {
+                                    label: root.stage-playing ? "Pause" : "Play";
+                                    description: root.stage-play-note != "" ? root.stage-play-note : "Plays the video only, without sound (Space on the picture)";
+                                    enabled: root.stage-can-play || root.stage-playing;
+                                    icon: root.stage-playing ? "M 3.5 2.5 L 6.6 2.5 L 6.6 13.5 L 3.5 13.5 Z M 9.4 2.5 L 12.5 2.5 L 12.5 13.5 L 9.4 13.5 Z" : "M 4.2 2.4 L 13.6 8 L 4.2 13.6 Z";
+                                    clicked => {
+                                        root.stage-play-pause();
+                                    }
+                                }
+
+                                IconButton {
+                                    label: "Next frame";
+                                    description: "Right arrow on the picture";
+                                    enabled: root.stage-navigable;
+                                    tab-stop: false;
+                                    icon: "M 11.2 3 L 13 3 L 13 13 L 11.2 13 Z M 3 3 L 9.8 8 L 3 13 Z";
+                                    clicked => {
+                                        root.stage-step(1);
+                                    }
+                                }
+
+                                if root.stage-frames > 1: Scrubber {
+                                    count: root.stage-frames;
+                                    value: root.stage-position;
+                                    value-text: root.stage-frame-text;
+                                    enabled: root.stage-navigable;
+                                    seek(frame) => {
+                                        root.stage-seek(frame);
+                                    }
+                                }
+
+                                if root.stage-frames <= 1: Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+
+                                Text {
+                                    horizontal-stretch: 0;
+                                    min-width: self.preferred-width;
+                                    text: root.stage-frame-text + (root.stage-time-text != "" ? "  ·  " + root.stage-time-text : "");
+                                    color: Tokens.text-secondary;
+                                    font-size: Tokens.type-caption * 1rem;
+                                    vertical-alignment: center;
+                                    accessible-role: none;
+                                }
+
+                                Rectangle {
+                                    width: Tokens.space-1;
+                                }
+
+                                ToggleChip {
+                                    text: "1:1";
+                                    label: "Actual pixels";
+                                    description: "Shows the frame's own pixels, one to one, from the centre. Scroll on the picture to move.";
+                                    checked: root.stage-native-on;
+                                    enabled: root.stage-can-native;
+                                    y: (parent.height - self.height) / 2;
+                                    toggled => {
+                                        root.stage-toggle-native();
+                                    }
+                                }
+                            }
+
+                            if root.stage-transport && root.stage-play-note != "": Caption {
+                                text: root.stage-play-note;
                             }
                         }
 
@@ -1162,6 +1368,9 @@ export component AppWindow inherits Window {
 
                                     FileList {
                                         rows: root.rows;
+                                        thumbs: root.row-thumbs;
+                                        // The picture above takes the room of two rows.
+                                        visible-rows: 3;
                                         selected: root.selected-row;
                                         actions-enabled: !root.sheet-open;
                                         row-selected(i) => {
@@ -1186,18 +1395,10 @@ export component AppWindow inherits Window {
                         if root.view-mode == ViewMode.single: VerticalLayout {
                                 spacing: Tokens.space-2;
 
-                            Rectangle {
-                                border-radius: Tokens.radius-medium + 2px;
-                                background: Tokens.track;
-                                border-width: 1px;
-                                border-color: root.source-view == SourceView.unreadable ? Tones.color(root.source-problem-tone) : Tokens.border;
-
+                            // The file under its picture: name, facts, Change….
+                            VerticalLayout {
                                 VerticalLayout {
-                                    padding-left: Tokens.space-4;
-                                    padding-right: Tokens.space-2;
-                                    padding-top: Tokens.space-2 + 2px;
-                                    padding-bottom: Tokens.space-2 + 2px;
-                                    spacing: Tokens.space-2;
+                                    spacing: Tokens.space-1;
 
                                     HorizontalLayout {
                                         spacing: Tokens.space-3;
@@ -1275,80 +1476,83 @@ export component AppWindow inherits Window {
                             text: root.settings-note;
                         }
 
-                        // Quality
-                        VerticalLayout {
-                            spacing: Tokens.space-2;
+                        // Quality and Priority, labels beside their controls as in
+                        // a native form, so the card stays short under the picture.
+                        // A converted single file has no use for them until
+                        // another is chosen; Convert Another brings them back.
+                        if root.show-settings: HorizontalLayout {
+                            spacing: Tokens.space-3;
 
-                            HorizontalLayout {
-                                Label {
-                                    text: "Quality";
-                                    horizontal-stretch: 1;
-                                    accessible-role: none;
+                            Label {
+                                width: root.form-label-width;
+                                height: Tokens.control-height + 4px;
+                                text: "Quality";
+                                vertical-alignment: center;
+                                accessible-role: none;
+                            }
+
+                            VerticalLayout {
+                                spacing: Tokens.space-1;
+
+                                Segmented {
+                                    options: root.quality-labels;
+                                    selected: root.quality-index;
+                                    enabled: !root.locked;
+                                    label: root.quality-index < 0 ? "Quality: custom, rate factor " + root.crf : "Quality";
+                                    chosen(i) => {
+                                        root.quality-selected(i);
+                                    }
                                 }
 
                                 if root.quality-index < 0: Caption {
-                                    text: "Custom · rate factor " + root.crf;
-                                    wrap: no-wrap;
-                                    vertical-alignment: center;
-                                }
-                            }
-
-                            Segmented {
-                                options: root.quality-labels;
-                                selected: root.quality-index;
-                                enabled: !root.locked;
-                                label: root.quality-index < 0 ? "Quality: custom, rate factor " + root.crf : "Quality";
-                                chosen(i) => {
-                                    root.quality-selected(i);
-                                }
-                            }
-
-                            HorizontalLayout {
-                                Caption {
-                                    text: "Smaller file";
-                                    horizontal-stretch: 1;
+                                    text: "Custom · rate factor " + root.crf + " (set in Advanced)";
                                     wrap: no-wrap;
                                 }
 
-                                Caption {
-                                    text: "Closer to the source";
-                                    horizontal-alignment: right;
-                                    wrap: no-wrap;
+                                if root.quality-index >= 0: HorizontalLayout {
+                                    Caption {
+                                        text: "Smaller file";
+                                        horizontal-stretch: 1;
+                                        wrap: no-wrap;
+                                    }
+
+                                    Caption {
+                                        text: "Closer to the source";
+                                        horizontal-alignment: right;
+                                        wrap: no-wrap;
+                                    }
                                 }
                             }
                         }
 
-                        // Priority
-                        VerticalLayout {
-                            spacing: Tokens.space-2;
+                        if root.show-settings: HorizontalLayout {
+                            spacing: Tokens.space-3;
 
-                            HorizontalLayout {
-                                Label {
-                                    text: "Priority";
-                                    horizontal-stretch: 1;
-                                    accessible-role: none;
-                                }
-
-                                if root.priority-index < 0: Caption {
-                                    text: "Custom · speed preset " + root.preset;
-                                    wrap: no-wrap;
-                                    vertical-alignment: center;
-                                }
+                            Label {
+                                width: root.form-label-width;
+                                height: Tokens.control-height + 4px;
+                                text: "Priority";
+                                vertical-alignment: center;
+                                accessible-role: none;
                             }
 
-                            Segmented {
-                                options: root.priority-labels;
-                                selected: root.priority-index;
-                                enabled: !root.locked;
-                                label: "Priority";
-                                accessible-description: root.priority-caption;
-                                chosen(i) => {
-                                    root.priority-selected(i);
-                                }
-                            }
+                            VerticalLayout {
+                                spacing: Tokens.space-1;
 
-                            Caption {
-                                text: root.priority-caption;
+                                Segmented {
+                                    options: root.priority-labels;
+                                    selected: root.priority-index;
+                                    enabled: !root.locked;
+                                    label: root.priority-index < 0 ? "Priority: custom, speed preset " + root.preset : "Priority";
+                                    accessible-description: root.priority-caption;
+                                    chosen(i) => {
+                                        root.priority-selected(i);
+                                    }
+                                }
+
+                                Caption {
+                                    text: root.priority-index < 0 ? "Custom · speed preset " + root.preset + ". " + root.priority-caption : root.priority-caption;
+                                }
                             }
                         }
 
@@ -1846,6 +2050,10 @@ export component AppWindow inherits Window {
                                 VerticalLayout {
                                     spacing: Tokens.space-1;
 
+                                    if root.preview-note != "": Caption {
+                                        text: root.preview-note;
+                                    }
+
                                     Caption {
                                         text: "Engine: " + root.engine-identity;
                                     }
@@ -1857,6 +2065,7 @@ export component AppWindow inherits Window {
                             }
                     }
                 }
+        }
     }
 
     // The video-only confirmation. Modal: clicks outside it reach nothing,

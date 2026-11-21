@@ -34,6 +34,8 @@ pub enum Cli {
     Version,
     /// Serve the framed protocol on stdin/stdout.
     Worker,
+    /// Serve pictures and playback over the framed protocol on stdin/stdout.
+    Preview,
     /// Run one job in this process and print its events as text.
     Encode {
         /// The source: Y4M, or a media file `FFmpeg` reads.
@@ -85,6 +87,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Cli, UsageError
         Some("--help" | "-h") => Cli::Help,
         Some("--version" | "-V") => Cli::Version,
         Some("worker") => Cli::Worker,
+        Some("preview") => Cli::Preview,
         Some("encode") => return parse_encode(args),
         _ => return Err(UsageError::Unknown(first)),
     };
@@ -166,6 +169,7 @@ pub fn help_text() -> String {
 
 USAGE:
     {ENGINE_NAME} worker       serve the framed control protocol on stdin/stdout
+    {ENGINE_NAME} preview      serve pictures and playback on stdin/stdout
     {ENGINE_NAME} encode <source> <destination> [--output ivf|obu] [--preset 0-10] [--crf 1-63]
                        [--stream N] [--acknowledge-omissions]
                               print the source's inventory, run one job here and
@@ -186,7 +190,15 @@ FFmpeg is looked for beside this executable and in its ffmpeg/ directory; with
 {SYSTEM_OPT_IN}=1 set, also on PATH.
 
 'worker' reads length-prefixed JSON commands until end of input; stdout carries
-protocol frames only, diagnostics go to stderr.
+protocol frames only, diagnostics go to stderr. It runs one job, and with live
+pictures asked for, also decodes what the job has written (8-bit RGB, at most
+1280x720, about four a second).
+
+'preview' speaks the same protocol but runs no jobs: it answers Picture, Play
+and StopPlayback with 8-bit RGB pictures of a source (exactly the frames the
+encoder receives) or of a finished IVF/OBU file (decoded by the Splot decoder),
+and plays video only, at the stream's frame timing. A raw OBU file has no
+timing of its own. Pictures are an SDR approximation, not colour-managed.
 ",
         DEFAULT_PRESET.get(),
         DEFAULT_CRF.get()
@@ -230,6 +242,7 @@ mod tests {
         assert_eq!(parse(args(&["--help"])), Ok(Cli::Help));
         assert_eq!(parse(args(&["-V"])), Ok(Cli::Version));
         assert_eq!(parse(args(&["worker"])), Ok(Cli::Worker));
+        assert_eq!(parse(args(&["preview"])), Ok(Cli::Preview));
     }
 
     #[test]

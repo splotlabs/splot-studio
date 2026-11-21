@@ -14,7 +14,7 @@ use studio_domain::job::{CheckOutcome, JobSpec, SourceFacts, SourceReader, WireP
 use studio_domain::protocol::Event;
 use studio_domain::settings::EncoderSettings;
 use studio_engine::cli::{self, Cli};
-use studio_engine::{job, worker};
+use studio_engine::{job, preview, worker};
 
 /// Exit status for a runtime failure; 2 is a usage error.
 const FAILURE: u8 = 1;
@@ -25,6 +25,10 @@ fn main() -> ExitCode {
         Ok(Cli::Help) => print(&cli::help_text()),
         Ok(Cli::Version) => print(&cli::version_text()),
         Ok(Cli::Worker) => match worker::run(&mut io::stdin().lock(), io::stdout()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(&error, FAILURE),
+        },
+        Ok(Cli::Preview) => match preview::run(&mut io::stdin().lock(), io::stdout()) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => fail(&error, FAILURE),
         },

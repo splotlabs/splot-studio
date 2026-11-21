@@ -24,8 +24,10 @@ use studio_domain::job::{
     ChromaLayout, Disclosure, FailureCode, Omissions, Rational, SourceFacts, SourceFingerprint,
     SourceReader, VideoTrack,
 };
+use studio_domain::preview::ColorMatrix;
 
 use crate::job::Stop;
+use crate::media::seek::{Finder, Start};
 use crate::media::{self, decode::Decoder, probe::Probed};
 use crate::output::FileId;
 
@@ -93,8 +95,24 @@ pub struct Source {
     pub facts: SourceFacts,
     /// The opened file's identity, for the source ≠ destination check.
     pub id: FileId,
+    /// The YCbCr matrix the source states; Y4M states none.
+    pub matrix: Option<ColorMatrix>,
     path: PathBuf,
     frames: Frames,
+    /// The index of the frame [`Self::read_frame`] returns next.
+    position: u64,
+    /// For Y4M: what positioning needs.
+    seek: Option<Y4mSeek>,
+}
+
+/// A Y4M file reopened at any frame.
+#[derive(Debug)]
+struct Y4mSeek {
+    /// The stream header line, replayed before the frames.
+    line: Vec<u8>,
+    /// Bytes of one plain frame record, when every record is plain.
+    record: Option<u64>,
+    file: File,
 }
 
 #[derive(Debug)]
@@ -104,6 +122,8 @@ enum Frames {
     Media {
         probed: Box<Probed>,
         decoding: Option<Decoding>,
+        /// For pictures: how far frames are found, once looked up.
+        times: Option<Finder>,
     },
 }
 
@@ -111,7 +131,9 @@ enum Frames {
 struct Decoding {
     reader: FrameReader,
     decoder: Option<Decoder>,
-    expected: u64,
+    /// The scanned frame count; `None` for an unscanned preview decode,
+    /// which reads whatever the decoder delivers.
+    expected: Option<u64>,
     read: u64,
 }
 
@@ -142,6 +164,11 @@ pub fn open(path: &Path, selection: Selection) -> Result<Source, Stop> {
     if metadata.len() == 0 {
         return Err(invalid("the source is empty"));
     }
+    // A second handle for reopening at any frame (it shares the cursor,
+    // which every reopening sets).
+    let seek_file = file
+        .try_clone()
+        .map_err(|e| invalid(format!("cannot read the source: {e}")))?;
     let mut buffered = BufReader::new(Input::File(file));
     let starts_y4m = buffered
         .fill_buf()
@@ -154,11 +181,15 @@ pub fn open(path: &Path, selection: Selection) -> Result<Source, Stop> {
             header: probed.header,
             facts: probed.facts.clone(),
             id,
+            matrix: probed.matrix,
             path: path.to_path_buf(),
             frames: Frames::Media {
                 probed: Box::new(probed),
                 decoding: None,
+                times: None,
             },
+            position: 0,
+            seek: None,
         });
     }
     if selection.video_stream.is_some_and(|stream| stream != 0) {
@@ -199,13 +230,21 @@ pub fn open(path: &Path, selection: Selection) -> Result<Source, Stop> {
         frame_count,
         disclosures: disclosures(&tags),
     };
+    let seek = Y4mSeek {
+        line: line.clone(),
+        record: frame_count.map(|_| PLAIN_FRAME_HEADER.len() as u64 + frame_bytes),
+        file: seek_file,
+    };
     let reader = Y4mReader::new(Cursor::new(line).chain(buffered)).map_err(header_error)?;
     Ok(Source {
         header,
         facts,
         id,
+        matrix: None,
         path: path.to_path_buf(),
         frames: Frames::Y4m(reader),
+        position: 0,
+        seek: Some(seek),
     })
 }
 
@@ -234,7 +273,10 @@ impl Source {
     /// [`Stop::Cancelled`], or a failure of the scan, the decoder start or
     /// the header check.
     pub fn start(&mut self, cancel: &AtomicBool) -> Result<(), Stop> {
-        let Frames::Media { probed, decoding } = &mut self.frames else {
+        let Frames::Media {
+            probed, decoding, ..
+        } = &mut self.frames
+        else {
             return Ok(());
         };
         if decoding.is_some() {
@@ -243,24 +285,145 @@ impl Source {
         let tool = media::tool()?;
         let expected = media::scan::scan(tool, &self.path, probed, cancel)?;
         still_the_same(&self.path, &self.id, self.facts.fingerprint)?;
-        let (decoder, stdout) = media::decode::start(tool, &self.path, probed)?;
-        let mut buffered = BufReader::new(Input::Pipe(stdout));
-        let checked = read_header(&mut buffered).and_then(|(line, header, tags)| {
-            check_header(&header, &tags)?;
-            matches(&header, &probed.header)?;
-            Y4mReader::new(Cursor::new(line).chain(buffered)).map_err(header_error)
-        });
-        let reader = match checked {
-            Ok(reader) => reader,
-            Err(problem) => return Err(decoder.fail(problem)),
-        };
-        *decoding = Some(Decoding {
-            reader,
-            decoder: Some(decoder),
-            expected,
-            read: 0,
-        });
+        *decoding = Some(Decoding::start(
+            tool,
+            &self.path,
+            probed,
+            &Start::Count(0),
+            Some(expected),
+        )?);
         Ok(())
+    }
+
+    /// For pictures: makes frame `index` the next one [`Self::read_frame`]
+    /// returns, through the same decode path as a job. A Y4M file of plain
+    /// frame records is reopened at the frame; any other Y4M file is read
+    /// from its first frame. The media route reads ahead through a running
+    /// decode when `index` is at most `read_ahead` frames on, and otherwise
+    /// restarts `ffmpeg` at the frame, without the scan (so frame counts
+    /// are not checked).
+    ///
+    /// # Errors
+    /// As [`Self::read_frame`], or when the decode cannot start.
+    pub fn position_at(&mut self, index: u64, read_ahead: u64) -> Result<(), Stop> {
+        if let Some(seek) = &self.seek {
+            let (offset, at) = match seek.record {
+                Some(record) => (record.saturating_mul(index), index),
+                None if index >= self.position => return self.skip_to(index),
+                None => (0, 0),
+            };
+            let mut file = seek
+                .file
+                .try_clone()
+                .map_err(|e| invalid(format!("cannot read the source: {e}")))?;
+            file.seek(SeekFrom::Start(seek.line.len() as u64 + offset))
+                .map_err(|e| invalid(format!("cannot read the source: {e}")))?;
+            let input = Cursor::new(seek.line.clone()).chain(BufReader::new(Input::File(file)));
+            self.frames = Frames::Y4m(Y4mReader::new(input).map_err(header_error)?);
+            self.position = at;
+            return self.skip_to(index);
+        }
+        let Frames::Media {
+            probed,
+            decoding,
+            times,
+        } = &mut self.frames
+        else {
+            return Ok(());
+        };
+        let running = decoding.as_ref().is_some_and(|d| d.decoder.is_some());
+        if running && index >= self.position && index - self.position <= read_ahead {
+            return self.skip_to(index);
+        }
+        // The old decode is killed and reaped before the new one starts.
+        *decoding = None;
+        let tool = media::tool()?;
+        // Near the start, counting costs no more than a seek would.
+        let start = if index > read_ahead {
+            times
+                .get_or_insert_with(|| Finder::of(tool, &self.path, probed))
+                .start(tool, &self.path, probed, index)
+        } else {
+            Start::Count(index)
+        };
+        *decoding = Some(Decoding::start(tool, &self.path, probed, &start, None)?);
+        self.position = index;
+        Ok(())
+    }
+
+    /// Reads and drops frames until `index` is next.
+    fn skip_to(&mut self, index: u64) -> Result<(), Stop> {
+        while self.position < index {
+            if self.read_frame()?.is_none() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// The index of the frame [`Self::read_frame`] returns next.
+    #[must_use]
+    pub const fn position(&self) -> u64 {
+        self.position
+    }
+
+    /// The frame count: the file's for Y4M, the scan's after
+    /// [`Self::start`] for the media route.
+    #[must_use]
+    pub fn frame_count(&self) -> Option<u64> {
+        self.facts.frame_count.or(match &self.frames {
+            Frames::Media {
+                decoding: Some(decoding),
+                ..
+            } => decoding.expected,
+            _ => None,
+        })
+    }
+
+    /// Kills a running media decode from another thread; a read blocked on
+    /// it then fails.
+    #[must_use]
+    pub fn killer(&self) -> Option<media::process::Killer> {
+        match &self.frames {
+            Frames::Media {
+                decoding:
+                    Some(Decoding {
+                        decoder: Some(decoder),
+                        ..
+                    }),
+                ..
+            } => Some(decoder.killer()),
+            _ => None,
+        }
+    }
+
+    /// Stops a running media decode, releasing its process; positioning
+    /// starts a new one.
+    pub fn rest(&mut self) {
+        if let Frames::Media { decoding, .. } = &mut self.frames {
+            *decoding = None;
+        }
+    }
+
+    /// For the media route: whether pictures find far frames by time
+    /// (`Some(true)`) or by counting (`Some(false)`); `None` before the
+    /// first far frame was asked for, or for Y4M.
+    #[must_use]
+    pub fn reads_by_time(&self) -> Option<bool> {
+        match &self.frames {
+            Frames::Media {
+                times: Some(times), ..
+            } => Some(matches!(times, Finder::Time(_))),
+            _ => None,
+        }
+    }
+
+    /// Whether the file is still the one opened.
+    ///
+    /// # Errors
+    /// [`FailureCode::SourceChanged`].
+    pub fn unchanged(&self) -> Result<(), Stop> {
+        still_the_same(&self.path, &self.id, self.facts.fingerprint)
     }
 
     /// The next frame's planes, or `None` after the last one. For the media
@@ -272,6 +435,14 @@ impl Source {
     /// miscounted stream, [`FailureCode::SourceChanged`], or
     /// [`FailureCode::Encoder`] when called before [`Self::start`].
     pub fn read_frame(&mut self) -> Result<Option<[Vec<u16>; 3]>, Stop> {
+        let frame = self.next_frame()?;
+        if frame.is_some() {
+            self.position += 1;
+        }
+        Ok(frame)
+    }
+
+    fn next_frame(&mut self) -> Result<Option<[Vec<u16>; 3]>, Stop> {
         let decoding = match &mut self.frames {
             Frames::Y4m(reader) => return reader.read_frame().map_err(read_error),
             Frames::Media {
@@ -297,10 +468,9 @@ impl Source {
         };
         if frame.is_some() {
             decoding.read += 1;
-            if decoding.read > decoding.expected {
+            if let Some(expected) = decoding.expected.filter(|&e| decoding.read > e) {
                 let problem = invalid(format!(
-                    "ffmpeg produced more frames than the {} the scan found",
-                    decoding.expected
+                    "ffmpeg produced more frames than the {expected} the scan found"
                 ));
                 return Err(match decoding.decoder.take() {
                     Some(decoder) => decoder.fail(problem),
@@ -312,13 +482,45 @@ impl Source {
         if let Some(decoder) = decoding.decoder.take() {
             decoder.finish()?;
         }
-        if decoding.read != decoding.expected {
+        if let Some(expected) = decoding.expected.filter(|&e| e != decoding.read) {
             return Err(invalid(format!(
-                "ffmpeg produced {} frames, but the scan found {}",
-                decoding.read, decoding.expected
+                "ffmpeg produced {} frames, but the scan found {expected}",
+                decoding.read
             )));
         }
         still_the_same(&self.path, &self.id, self.facts.fingerprint).map(|()| None)
+    }
+}
+
+impl Decoding {
+    /// Starts `ffmpeg` at frame `first` and checks the header it produces.
+    fn start(
+        tool: &media::Tool,
+        path: &Path,
+        probed: &Probed,
+        start: &Start,
+        expected: Option<u64>,
+    ) -> Result<Self, Stop> {
+        let (decoder, stdout) = media::decode::start(tool, path, probed, start)?;
+        let mut buffered = BufReader::new(Input::Pipe(stdout));
+        let checked = read_header(&mut buffered).and_then(|(line, header, tags)| {
+            check_header(&header, &tags)?;
+            // A decode that starts later (by count or with `-copyts` by
+            // time) can make the muxer guess another rate from the frames
+            // it passes, or none; it is checked for everything else.
+            let rate = *start == Start::Count(0);
+            matches(&header, &probed.header, rate)?;
+            Y4mReader::new(Cursor::new(line).chain(buffered)).map_err(header_error)
+        });
+        match checked {
+            Ok(reader) => Ok(Self {
+                reader,
+                decoder: Some(decoder),
+                expected,
+                read: 0,
+            }),
+            Err(problem) => Err(decoder.fail(problem)),
+        }
     }
 }
 
@@ -374,7 +576,7 @@ fn read_header(reader: &mut BufReader<Input>) -> Result<(Vec<u8>, Y4mHeader, Tag
 }
 
 /// The decoder's header must say what the probe said.
-fn matches(found: &Y4mHeader, want: &Y4mHeader) -> Result<(), Stop> {
+fn matches(found: &Y4mHeader, want: &Y4mHeader, with_rate: bool) -> Result<(), Stop> {
     let rate = |(num, den): (u32, u32)| {
         let (mut a, mut b) = (num, den);
         while b != 0 {
@@ -382,7 +584,14 @@ fn matches(found: &Y4mHeader, want: &Y4mHeader) -> Result<(), Stop> {
         }
         (num / a.max(1), den / a.max(1))
     };
-    let key = |h: &Y4mHeader| (h.width, h.height, h.bit_depth, h.format, rate(h.frame_rate));
+    let key = |h: &Y4mHeader| {
+        let rate = if with_rate {
+            rate(h.frame_rate)
+        } else {
+            (0, 0)
+        };
+        (h.width, h.height, h.bit_depth, h.format, rate)
+    };
     if key(found) == key(want) {
         Ok(())
     } else {

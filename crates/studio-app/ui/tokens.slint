@@ -51,6 +51,15 @@ export global Tokens {
     out property <color> error: dark ? #ff7ab6 : #c0245f;
     out property <color> success: dark ? #5fd68a : #1d7a3c;
 
+    // The picture area. Video sits on near-black in both appearances, as in
+    // any player, so letterbox bars never tint the judgement of the picture;
+    // `on-stage` texts are measured on `stage` (17.6:1 and 7.4:1), and the
+    // `badge` scrim keeps a label legible over any picture.
+    out property <color> stage: #0b0b0f;
+    out property <color> on-stage: #f5f5f7;
+    out property <color> on-stage-secondary: #a1a1aa;
+    out property <color> badge: #000000b3;
+
     // The wordmark gradient, for branding only. The original stops are tuned
     // for a dark ground; light mode uses deeper stops of the same hues so the
     // mark stays legible (about 4:1 or better against `surface`).

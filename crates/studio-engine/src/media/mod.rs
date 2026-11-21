@@ -13,7 +13,8 @@
 //! - [`scan`] decodes the selected stream once without its pixels and proves
 //!   constant frame rate, constant geometry, format and colour, before any
 //!   output exists.
-//! - [`decode`] pipes the frames.
+//! - [`decode`] pipes the frames, from the first one or, for pictures,
+//!   from any frame found by counting or by time ([`seek`]).
 //!
 //! Every invocation reads one local file (`file:` protocol only) through
 //! one of [`FORMAT_WHITELIST`]'s demuxers, so playlists, concatenation
@@ -25,6 +26,7 @@ pub mod decode;
 pub mod probe;
 pub mod process;
 pub mod scan;
+pub mod seek;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

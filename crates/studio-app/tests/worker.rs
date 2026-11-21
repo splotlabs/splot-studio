@@ -20,7 +20,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use studio_app::activity::{Activity, Input, Phase};
-use studio_app::engine::{Delivery, ENGINE_NAME, Ending, EngineStatus, Worker};
+use studio_app::engine::{Delivery, ENGINE_NAME, Ending, EngineStatus, Role, Worker};
 use studio_domain::job::{
     ChromaLayout, FailureCode, JobSpec, Rational, SourceFacts, SourceReader, Stage, WirePath,
 };
@@ -116,7 +116,7 @@ fn write_y4m(path: &Path, width: usize, height: usize, frames: usize, ten_bit: b
 
 fn spawn() -> (Worker, Receiver<Delivery>) {
     let (tx, rx) = mpsc::channel();
-    let worker = Worker::spawn(&engine(), move |d| {
+    let worker = Worker::spawn(&engine(), Role::Worker, move |d| {
         let _ = tx.send(d);
     })
     .unwrap_or_else(|e| unreachable!("{e}"));
@@ -139,6 +139,7 @@ fn event(rx: &Receiver<Delivery>, id: u64, timeout: Duration) -> Event {
             e.body
         }
         Delivery::Ended(ending) => unreachable!("worker ended early: {ending:?}"),
+        Delivery::Pictures(_) => unreachable!("no live pictures were asked for"),
     }
 }
 
@@ -149,6 +150,7 @@ fn expect_clean_end(rx: &Receiver<Delivery>) -> Ending {
             ending
         }
         Delivery::Event(e) => unreachable!("expected the end, got {e:?}"),
+        Delivery::Pictures(_) => unreachable!("no live pictures were asked for"),
     }
 }
 
@@ -259,7 +261,7 @@ fn start_with(
         destination: WirePath::from_path(destination),
         settings,
     };
-    let sent = worker.send(1, Command::Start { job });
+    let sent = worker.send(1, Command::Start { job, live: None });
     assert!(sent.is_ok(), "{sent:?}");
     (worker, rx)
 }
@@ -523,7 +525,7 @@ fn shutdown_mid_job_stops_and_reaps_the_worker() {
     let deadline = Instant::now() + ANSWER_TIMEOUT;
     loop {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(Delivery::Event(_)) => {}
+            Ok(Delivery::Event(_) | Delivery::Pictures(_)) => {}
             Ok(Delivery::Ended(_)) => break,
             Err(e) => unreachable!("worker not reaped: {e}"),
         }
@@ -542,6 +544,7 @@ fn a_killed_worker_ends_without_a_terminal_event() {
     let deadline = Instant::now() + ANSWER_TIMEOUT;
     loop {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Delivery::Pictures(_)) => {}
             Ok(Delivery::Event(e)) => {
                 assert!(!is_terminal(&e.body), "a killed worker sent {e:?}");
                 activity.apply(Input::Event(e.body), Instant::now());

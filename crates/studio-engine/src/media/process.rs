@@ -194,8 +194,9 @@ impl Running {
     }
 
     /// A handle that can kill the child from another thread.
-    fn killer(&self) -> Arc<Mutex<Child>> {
-        Arc::clone(&self.child)
+    #[must_use]
+    pub fn killer(&self) -> Killer {
+        Killer(Arc::clone(&self.child))
     }
 
     /// Waits for the child to exit, after its output was read to the end.
@@ -222,6 +223,18 @@ impl Running {
     pub fn abort(self) -> String {
         self.kill();
         self.finish().map_or_default(|ended| ended.stderr)
+    }
+}
+
+/// Kills one child from any thread; the child is still reaped by its
+/// [`Running`].
+#[derive(Debug, Clone)]
+pub struct Killer(Arc<Mutex<Child>>);
+
+impl Killer {
+    /// Kills the child; its pipes close, so a blocked read returns.
+    pub fn kill(&self) {
+        let _ = lock(&self.0).kill();
     }
 }
 
@@ -283,7 +296,7 @@ pub fn run_bounded(
 ) -> Result<Output, BoundedError> {
     let (running, stdout) = spawn(command).map_err(BoundedError::Io)?;
     let (done, expired) = mpsc::channel::<()>();
-    let killer = running.killer();
+    let killer = running.killer().0;
     let watchdog = thread::Builder::new()
         .name("studio-tool-watchdog".to_owned())
         .spawn(move || {

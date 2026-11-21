@@ -319,6 +319,7 @@ mod tests {
             pix_fmt: "yuv420p".into(),
             repack: None,
             time_base,
+            matrix: None,
         }
     }
 

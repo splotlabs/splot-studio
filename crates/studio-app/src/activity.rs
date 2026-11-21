@@ -255,9 +255,15 @@ impl Activity {
                 ));
                 Step::phase(Effect::Kill)
             }
-            // Answers to commands this job never sends, and the temporary
-            // file's name, which the queue records.
-            Event::Hello { .. } | Event::Probed { .. } | Event::Working { .. } => Step::IGNORED,
+            // Answers to commands this job never sends, the temporary file's
+            // name, which the queue records, and live pictures, which the
+            // preview shows.
+            Event::Hello { .. }
+            | Event::Probed { .. }
+            | Event::Working { .. }
+            | Event::Picture { .. }
+            | Event::PictureUnavailable { .. }
+            | Event::PlaybackEnded { .. } => Step::IGNORED,
         }
     }
 
