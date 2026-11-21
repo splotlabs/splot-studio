@@ -407,6 +407,7 @@ pub fn settings_note(item: &Item) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::abs;
 
     #[test]
     fn the_primary_button_names_what_it_does() {
@@ -459,7 +460,7 @@ mod tests {
                 omissions: Omissions::default(),
                 settings: crate::state::INITIAL_SETTINGS,
             },
-            source: format!("/m/{name}").into(),
+            source: abs(&format!("/m/{name}")),
             omissions: Omissions {
                 audio: 2,
                 ..Omissions::default()
@@ -483,21 +484,25 @@ mod tests {
             destination_present: true,
             partial: PartialFate::Gone,
         };
-        let text = interrupted(&i, Path::new("/out/clip.ivf"), "Retry");
+        let destination = abs("/out/clip.ivf");
+        let text = interrupted(&i, &destination, "Retry");
         assert_eq!(
             text,
-            "Splot Studio stopped while the file was being published; a file exists at \
-             /out/clip.ivf — check it. Press Retry to convert it again to a new name."
+            format!(
+                "Splot Studio stopped while the file was being published; a file exists at {} \
+                 — check it. Press Retry to convert it again to a new name.",
+                destination.display()
+            )
         );
         assert!(!text.contains("Completed"));
         let plain = Interruption {
             publishing: true,
             destination_present: false,
             cause: Cause::AppClosed,
-            partial: PartialFate::Removed("/out/.clip.ivf.a.partial".into()),
+            partial: PartialFate::Removed(abs("/out/.clip.ivf.a.partial")),
         };
         assert_eq!(
-            interrupted(&plain, Path::new("/out/clip.ivf"), "Retry"),
+            interrupted(&plain, &destination, "Retry"),
             "Splot Studio was closed while this file was converting. Nothing was published. \
              Its unfinished temporary file was removed. Press Retry to convert it again from \
              the start."
@@ -506,13 +511,17 @@ mod tests {
 
     #[test]
     fn a_kept_temporary_file_is_named_with_why() {
+        let path = abs("/out/.clip.ivf.a.partial");
         let kept = PartialFate::Kept {
-            path: "/out/.clip.ivf.a.partial".into(),
+            path: path.clone(),
             reason: "it is a symbolic link".into(),
         };
         assert_eq!(
             partial_note(&kept, "clip.ivf"),
-            "/out/.clip.ivf.a.partial was left alone because it is a symbolic link."
+            format!(
+                "{} was left alone because it is a symbolic link.",
+                path.display()
+            )
         );
         assert_eq!(partial_note(&PartialFate::Gone, "clip.ivf"), "");
     }

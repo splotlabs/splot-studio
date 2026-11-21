@@ -21,6 +21,7 @@ use crate::queue::{Cause, Ending, Interruption, PartialFate};
 use crate::recovery::{self, Kind};
 use crate::simple::{Priority, Quality};
 use crate::source::ProbeFailure;
+use crate::testing::abs;
 
 const PRINT: SourceFingerprint = SourceFingerprint {
     len: 1000,
@@ -132,9 +133,7 @@ impl App {
         paths: &[&str],
         answer: impl Fn(&Path) -> Result<SourceFacts, ProbeFailure>,
     ) -> Vec<Effect> {
-        let update = self.apply(Intent::FilesOpened(
-            paths.iter().map(PathBuf::from).collect(),
-        ));
+        let update = self.apply(Intent::FilesOpened(paths.iter().map(|p| abs(p)).collect()));
         self.answer(update, answer)
     }
 
@@ -280,15 +279,15 @@ fn open_is_not_reentrant_while_a_dialog_shows() {
 fn picking_probes_and_sets_a_default_destination() {
     let mut app = App::new();
     app.apply(Intent::AddRequested);
-    let update = app.apply(Intent::PickFinished(vec!["/media/clip one.mkv".into()]));
+    let update = app.apply(Intent::PickFinished(vec![abs("/media/clip one.mkv")]));
     assert!(matches!(
         update.effects.as_slice(),
-        [Effect::Probe { request, .. }] if request.path == Path::new("/media/clip one.mkv")
+        [Effect::Probe { request, .. }] if request.path == abs("/media/clip one.mkv")
             && request.video_stream.is_none()
     ));
     assert_eq!(app.state.mode(), Mode::Single);
     let item = &app.state.items()[0];
-    assert_eq!(item.destination().path, Path::new("/media/clip one.ivf"));
+    assert_eq!(item.destination().path, abs("/media/clip one.ivf"));
     assert!(!item.destination().chosen);
     assert_eq!(
         app.state.blocker().map(|b| b.text).as_deref(),
@@ -308,7 +307,7 @@ fn change_replaces_the_one_file_and_add_adds() {
         app.apply(Intent::ReplaceRequested).effects,
         [Effect::ShowOpenDialog]
     );
-    let update = app.apply(Intent::PickFinished(vec!["/m/b.y4m".into()]));
+    let update = app.apply(Intent::PickFinished(vec![abs("/m/b.y4m")]));
     app.answer(update, ready);
     let sources: Vec<_> = app
         .state
@@ -316,12 +315,9 @@ fn change_replaces_the_one_file_and_add_adds() {
         .iter()
         .map(|i| i.source().to_path_buf())
         .collect();
-    assert_eq!(sources, [PathBuf::from("/m/b.y4m")]);
+    assert_eq!(sources, [abs("/m/b.y4m")]);
     app.apply(Intent::AddRequested);
-    let update = app.apply(Intent::PickFinished(vec![
-        "/m/c.y4m".into(),
-        "/m/d.y4m".into(),
-    ]));
+    let update = app.apply(Intent::PickFinished(vec![abs("/m/c.y4m"), abs("/m/d.y4m")]));
     app.answer(update, ready);
     assert_eq!(app.state.mode(), Mode::List);
     assert_eq!(app.state.items().len(), 3);
@@ -330,12 +326,12 @@ fn change_replaces_the_one_file_and_add_adds() {
 #[test]
 fn a_stale_probe_answer_is_ignored() {
     let mut app = App::new();
-    let first = app.apply(Intent::FilesOpened(vec!["/a.y4m".into()]));
+    let first = app.apply(Intent::FilesOpened(vec![abs("/a.y4m")]));
     let Some(Effect::Probe { request, .. }) = first.effects.first().cloned() else {
         unreachable!("{first:?}")
     };
     app.apply(Intent::RemoveRequested(0));
-    app.apply(Intent::FilesOpened(vec!["/b.y4m".into()]));
+    app.apply(Intent::FilesOpened(vec![abs("/b.y4m")]));
     app.apply(Intent::ProbeAnswered {
         id: request.id,
         result: Ok(facts(None)),
@@ -365,21 +361,21 @@ fn the_default_destination_follows_the_output_kind_but_a_chosen_one_stays() {
     app.add(&["/media/clip.y4m"], ready);
     app.apply(Intent::OutputSelected(1));
     let dest = |app: &App| app.state.items()[0].destination().clone();
-    assert_eq!(dest(&app).path, Path::new("/media/clip.obu"));
+    assert_eq!(dest(&app).path, abs("/media/clip.obu"));
     let effect = app.apply(Intent::ChooseDestinationRequested).effects;
     assert_eq!(
         effect,
         [Effect::ShowSaveDialog {
-            directory: Some("/media".into()),
+            directory: Some(abs("/media")),
             file_name: "clip.obu".into(),
             output: OutputKind::Av2AnnexB
         }]
     );
-    app.apply(Intent::DestinationPicked(Some("/out/mine.obu".into())));
+    app.apply(Intent::DestinationPicked(Some(abs("/out/mine.obu"))));
     app.apply(Intent::OutputSelected(0));
     assert_eq!(
         (dest(&app).path, dest(&app).chosen),
-        ("/out/mine.obu".into(), true)
+        (abs("/out/mine.obu"), true)
     );
 }
 
@@ -396,8 +392,8 @@ fn encode_needs_a_probe_a_free_destination_and_engine_support() {
     assert_eq!(app.state.blocker(), None);
     // A file that appears at a chosen destination blocks it.
     app.apply(Intent::ChooseDestinationRequested);
-    app.apply(Intent::DestinationPicked(Some("/out/x.ivf".into())));
-    app.disk.0.push("/out/x.ivf".into());
+    app.apply(Intent::DestinationPicked(Some(abs("/out/x.ivf"))));
+    app.disk.0.push(abs("/out/x.ivf"));
     app.apply(Intent::RowSelected(0));
     assert_eq!(
         app.state.blocker().map(|b| b.text).as_deref(),
@@ -462,8 +458,11 @@ fn convert_builds_the_job_from_the_probe_and_the_current_settings() {
     app.apply(Intent::PresetEdited(9));
     app.apply(Intent::CrfEdited(33));
     let (id, job) = convert(&mut app);
-    assert_eq!(job.source, WirePath::Utf8("/media/clip.y4m".into()));
-    assert_eq!(job.destination, WirePath::Utf8("/media/clip.ivf".into()));
+    assert_eq!(job.source, WirePath::from_path(&abs("/media/clip.y4m")));
+    assert_eq!(
+        job.destination,
+        WirePath::from_path(&abs("/media/clip.ivf"))
+    );
     assert_eq!(job.fingerprint, PRINT);
     assert_eq!(job.video_stream, 0);
     // Nothing to leave out: one click, nothing acknowledged.
@@ -745,12 +744,9 @@ fn one_question_lists_every_file_that_leaves_something_out() {
         .state
         .confirmation()
         .map_or_default(|c| c.asked.iter().map(|a| a.source.clone()).collect());
-    assert_eq!(
-        asked,
-        [PathBuf::from("/m/a.mp4"), PathBuf::from("/m/c.mp4")]
-    );
+    assert_eq!(asked, [abs("/m/a.mp4"), abs("/m/c.mp4")]);
     let (_, job) = only_start(&app.apply(Intent::OmissionsConfirmed).effects);
-    assert_eq!(source_of(&job), Path::new("/m/a.mp4"));
+    assert_eq!(source_of(&job), abs("/m/a.mp4"));
     assert!(job.omissions_acknowledged);
     for item in app.state.items() {
         assert_eq!(
@@ -770,17 +766,17 @@ fn a_run_converts_every_waiting_file_in_order_and_one_at_a_time() {
     app.add(&["/m/a.y4m", "/m/b.y4m", "/m/c.y4m"], ready);
     assert_eq!(app.state.startable_count(), 3);
     let (a, job) = convert(&mut app);
-    assert_eq!(source_of(&job), Path::new("/m/a.y4m"));
+    assert_eq!(source_of(&job), abs("/m/a.y4m"));
     assert_eq!(app.state.run_position(), Some((1, 3)));
     // While one runs, nothing else starts, whatever arrives.
     for intent in [Intent::ConvertRequested, Intent::RowSelected(2)] {
         assert_eq!(starts(&app.apply(intent).effects), []);
     }
     let (b, job) = only_start(&app.complete(a).effects);
-    assert_eq!(source_of(&job), Path::new("/m/b.y4m"));
+    assert_eq!(source_of(&job), abs("/m/b.y4m"));
     assert_eq!(app.state.run_position(), Some((2, 3)));
     let (c, job) = only_start(&app.fail(b, FailureCode::Encoder).effects);
-    assert_eq!(source_of(&job), Path::new("/m/c.y4m"), "a failure moves on");
+    assert_eq!(source_of(&job), abs("/m/c.y4m"), "a failure moves on");
     let update = app.apply(Intent::Job {
         id: c,
         input: Input::WorkerEnded {
@@ -825,7 +821,7 @@ fn cancel_pauses_the_run_and_continue_resumes_it() {
         [ItemState::Cancelled, ItemState::Waiting, ItemState::Waiting]
     );
     let (_, job) = convert(&mut app);
-    assert_eq!(source_of(&job), Path::new("/m/b.y4m"));
+    assert_eq!(source_of(&job), abs("/m/b.y4m"));
     assert!(!app.state.paused());
 }
 
@@ -851,7 +847,7 @@ fn files_added_during_a_run_join_it() {
     let (b, _) = only_start(&app.complete(a).effects);
     assert_eq!(app.state.run_position(), Some((2, 3)));
     let (_, job) = only_start(&app.complete(b).effects);
-    assert_eq!(source_of(&job), Path::new("/m/c.y4m"));
+    assert_eq!(source_of(&job), abs("/m/c.y4m"));
 }
 
 #[test]
@@ -890,7 +886,7 @@ fn settings_apply_to_waiting_files_never_to_the_running_one() {
     let (_, second) = only_start(&app.complete(a).effects);
     assert_eq!(second.settings.crf, Quality::Compact.crf());
     assert_eq!(second.settings.output, OutputKind::Av2AnnexB);
-    assert_eq!(dest_of(&second), Path::new("/m/b.obu"));
+    assert_eq!(dest_of(&second), abs("/m/b.obu"));
     // The converted row remembers what it ran with.
     app.apply(Intent::RowSelected(0));
     let view = app.state.settings_view();
@@ -1003,20 +999,20 @@ fn a_dead_workers_temporary_file_is_cleaned_up_once_it_is_gone() {
     app.event(
         id,
         Event::Working {
-            partial: WirePath::Utf8("/m/.a.ivf.Xy12Z9.partial".into()),
+            partial: WirePath::from_path(&abs("/m/.a.ivf.Xy12Z9.partial")),
         },
     );
     // Recorded once; a second announcement changes nothing.
     app.event(
         id,
         Event::Working {
-            partial: WirePath::Utf8("/elsewhere/x".into()),
+            partial: WirePath::from_path(&abs("/elsewhere/x")),
         },
     );
     let partial = app.state.items()[0]
         .attempt()
         .and_then(|a| a.partial.clone());
-    assert_eq!(partial, Some(PathBuf::from("/m/.a.ivf.Xy12Z9.partial")));
+    assert_eq!(partial, Some(abs("/m/.a.ivf.Xy12Z9.partial")));
     let update = app.apply(Intent::Job {
         id,
         input: Input::WorkerEnded {
@@ -1025,8 +1021,8 @@ fn a_dead_workers_temporary_file_is_cleaned_up_once_it_is_gone() {
     });
     assert!(update.effects.contains(&Effect::CleanPartial {
         item: app.state.items()[0].id(),
-        partial: "/m/.a.ivf.Xy12Z9.partial".into(),
-        destination: "/m/a.ivf".into(),
+        partial: abs("/m/.a.ivf.Xy12Z9.partial"),
+        destination: abs("/m/a.ivf"),
     }));
     assert_eq!(
         starts(&update.effects).len(),
@@ -1036,7 +1032,7 @@ fn a_dead_workers_temporary_file_is_cleaned_up_once_it_is_gone() {
     let item = app.state.items()[0].id();
     app.apply(Intent::PartialCleaned {
         item,
-        fate: PartialFate::Removed("/m/.a.ivf.Xy12Z9.partial".into()),
+        fate: PartialFate::Removed(abs("/m/.a.ivf.Xy12Z9.partial")),
     });
     assert!(matches!(
         app.state.items()[0].ending(),
@@ -1055,7 +1051,7 @@ fn shutdown_records_the_converting_file_as_interrupted_with_its_partial() {
     app.event(
         id,
         Event::Working {
-            partial: WirePath::Utf8("/m/.a.ivf.Q1.partial".into()),
+            partial: WirePath::from_path(&abs("/m/.a.ivf.Q1.partial")),
         },
     );
     app.state.interrupt_for_shutdown();
@@ -1067,7 +1063,7 @@ fn shutdown_records_the_converting_file_as_interrupted_with_its_partial() {
             publishing: false,
             cause: Cause::AppClosed,
             destination_present: false,
-            partial: PartialFate::Pending("/m/.a.ivf.Q1.partial".into()),
+            partial: PartialFate::Pending(abs("/m/.a.ivf.Q1.partial")),
         }))
     );
 }
@@ -1077,10 +1073,7 @@ fn shutdown_records_the_converting_file_as_interrupted_with_its_partial() {
 #[test]
 fn files_are_read_one_at_a_time_in_order() {
     let mut app = App::new();
-    let update = app.apply(Intent::FilesOpened(vec![
-        "/m/a.y4m".into(),
-        "/m/b.y4m".into(),
-    ]));
+    let update = app.apply(Intent::FilesOpened(vec![abs("/m/a.y4m"), abs("/m/b.y4m")]));
     let probes = |u: &Update| {
         u.effects
             .iter()
@@ -1092,13 +1085,13 @@ fn files_are_read_one_at_a_time_in_order() {
     };
     let first = probes(&update);
     assert_eq!(first.len(), 1);
-    assert_eq!(first[0].path, Path::new("/m/a.y4m"));
+    assert_eq!(first[0].path, abs("/m/a.y4m"));
     assert_eq!(probes(&app.apply(Intent::RowSelected(1))), []);
     let next = app.apply(Intent::ProbeAnswered {
         id: first[0].id,
         result: Ok(facts(None)),
     });
-    assert_eq!(probes(&next)[0].path, Path::new("/m/b.y4m"));
+    assert_eq!(probes(&next)[0].path, abs("/m/b.y4m"));
 }
 
 #[test]
@@ -1113,7 +1106,7 @@ fn a_file_already_waiting_is_not_added_twice() {
 #[test]
 fn destinations_are_unique_in_the_queue_and_on_disk() {
     let mut app = App::new();
-    app.disk.0.push("/m/c.ivf".into());
+    app.disk.0.push(abs("/m/c.ivf"));
     app.add(&["/m/a.mp4", "/m/a.mkv", "/m/a.mov", "/m/c.y4m"], ready);
     let dests: Vec<PathBuf> = app
         .state
@@ -1124,20 +1117,17 @@ fn destinations_are_unique_in_the_queue_and_on_disk() {
     assert_eq!(
         dests,
         [
-            PathBuf::from("/m/a.ivf"),
-            "/m/a (2).ivf".into(),
-            "/m/a (3).ivf".into(),
-            "/m/c (2).ivf".into(),
+            abs("/m/a.ivf"),
+            abs("/m/a (2).ivf"),
+            abs("/m/a (3).ivf"),
+            abs("/m/c (2).ivf"),
         ]
     );
     // A chosen destination never collides with another file's either.
     app.apply(Intent::RowSelected(3));
     app.apply(Intent::ChooseDestinationRequested);
-    app.apply(Intent::DestinationPicked(Some("/m/a.ivf".into())));
-    assert_eq!(
-        app.state.items()[3].destination().path,
-        Path::new("/m/a (4).ivf")
-    );
+    app.apply(Intent::DestinationPicked(Some(abs("/m/a.ivf"))));
+    assert_eq!(app.state.items()[3].destination().path, abs("/m/a (4).ivf"));
     // Switching the kind keeps them unique.
     app.apply(Intent::RowSelected(0));
     app.apply(Intent::OutputSelected(1));
@@ -1150,10 +1140,10 @@ fn destinations_are_unique_in_the_queue_and_on_disk() {
     assert_eq!(
         dests,
         [
-            PathBuf::from("/m/a.obu"),
-            "/m/a (2).obu".into(),
-            "/m/a (3).obu".into(),
-            "/m/a (4).ivf".into(),
+            abs("/m/a.obu"),
+            abs("/m/a (2).obu"),
+            abs("/m/a (3).obu"),
+            abs("/m/a (4).ivf"),
         ]
     );
 }
@@ -1164,11 +1154,11 @@ fn retry_picks_a_new_name_when_the_destination_now_exists() {
     app.add(&["/m/a.y4m"], ready);
     let (id, _) = convert(&mut app);
     app.fail(id, FailureCode::DestinationExists);
-    app.disk.0.push("/m/a.ivf".into());
+    app.disk.0.push(abs("/m/a.ivf"));
     let update = app.apply(Intent::ConvertRequested);
     let effects = app.answer(update, ready);
     let (_, job) = only_start(&effects);
-    assert_eq!(dest_of(&job), Path::new("/m/a (2).ivf"));
+    assert_eq!(dest_of(&job), abs("/m/a (2).ivf"));
 }
 
 #[test]
@@ -1195,13 +1185,13 @@ fn a_restored_queue_waits_for_continue() {
     app.event(
         a,
         Event::Working {
-            partial: WirePath::Utf8("/m/.a.ivf.R4nd0m.partial".into()),
+            partial: WirePath::from_path(&abs("/m/.a.ivf.R4nd0m.partial")),
         },
     );
     let saved = journal::snapshot(app.state.next_id(), app.state.settings(), app.state.items());
     // The app stops; at the next start, the temporary file is still there.
     let mut disk = Files::default();
-    disk.0.push("/m/.a.ivf.R4nd0m.partial".into());
+    disk.0.push(abs("/m/.a.ivf.R4nd0m.partial"));
     let recovered = recovery::recover(saved, &disk);
     assert_eq!(recovered.cleanups.len(), 1);
     let mut state = AppState::new(Startup {
@@ -1233,13 +1223,13 @@ fn a_restored_queue_waits_for_continue() {
     assert_eq!(starts(&update.effects), []);
     assert_eq!(update.effects, []);
     // Ids continue after the old ones.
-    let added = state.apply(Intent::FilesOpened(vec!["/m/d.y4m".into()]), now, &none);
+    let added = state.apply(Intent::FilesOpened(vec![abs("/m/d.y4m")]), now, &none);
     assert!(matches!(added.effects.as_slice(), [Effect::Probe { .. }]));
     assert_eq!(state.items()[3].id(), 4);
     state.apply(Intent::RemoveRequested(3), now, &none);
     let update = state.apply(Intent::ConvertRequested, now, &none);
     let (_, job) = only_start(&update.effects);
-    assert_eq!(source_of(&job), Path::new("/m/b.y4m"));
+    assert_eq!(source_of(&job), abs("/m/b.y4m"));
     assert_eq!(state.restored(), None);
     assert_eq!(state.items()[0].state(), ItemState::Interrupted);
 }
@@ -1327,7 +1317,7 @@ fn choosing_a_track_re_probes_that_stream_and_keeps_the_destination() {
     let mut app = App::new();
     app.add(&["/m/trip.mp4"], with_audio);
     app.apply(Intent::ChooseDestinationRequested);
-    app.apply(Intent::DestinationPicked(Some("/out/t.ivf".into())));
+    app.apply(Intent::DestinationPicked(Some(abs("/out/t.ivf"))));
     for same in [0, 2, -1] {
         assert_eq!(app.apply(Intent::VideoTrackSelected(same)).effects, []);
     }
@@ -1344,10 +1334,7 @@ fn choosing_a_track_re_probes_that_stream_and_keeps_the_destination() {
         Some("Reading the source…")
     );
     app.answer(update, |_| Ok(rich(1)));
-    assert_eq!(
-        app.state.items()[0].destination().path,
-        Path::new("/out/t.ivf")
-    );
+    assert_eq!(app.state.items()[0].destination().path, abs("/out/t.ivf"));
     app.apply(Intent::ConvertRequested);
     let (_, job) = only_start(&app.apply(Intent::OmissionsConfirmed).effects);
     assert_eq!(job.video_stream, 1);

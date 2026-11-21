@@ -24,9 +24,7 @@ use std::time::{Duration, Instant};
 use studio_app::engine::{Delivery, ENGINE_NAME};
 use studio_app::instance::{self, Acquired, DATA_DIR_VAR};
 use studio_app::journal::{self, Loaded};
-#[cfg(unix)]
-use studio_app::queue::{Cause, PartialFate};
-use studio_app::queue::{Ending, Interruption, ItemState};
+use studio_app::queue::{Cause, Ending, Interruption, ItemState, PartialFate};
 use studio_app::session::{Route, Session};
 use studio_app::state::{AppState, Intent, Startup};
 use studio_app::{Opening, Prepared};
@@ -388,6 +386,7 @@ fn a_run_of_three_files_with_one_unreadable_publishes_two() {
     assert_eq!(saved.settings.preset.get(), 10);
 }
 
+// Linux only: the worker is found (and killed) through `/proc`.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_killed_worker_is_lost_and_its_temporary_file_removed() {
@@ -420,6 +419,7 @@ fn a_killed_worker_is_lost_and_its_temporary_file_removed() {
     assert!(h.state().items()[0].state().can_retry());
 }
 
+// Linux only: the worker is found (and killed) through `/proc`.
 #[cfg(target_os = "linux")]
 #[test]
 fn after_a_crash_with_a_killed_worker_the_reload_cleans_up_and_retry_converts() {
@@ -517,7 +517,6 @@ fn crash_helper() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn app_crash_leaves_an_interrupted_item_and_no_partial() {
     let scratch = Scratch::new("crash");
@@ -566,7 +565,18 @@ fn app_crash_leaves_an_interrupted_item_and_no_partial() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    let startup = startup(&scratch);
+    // Windows releases a dead process's file lock "depending on available
+    // system resources"; give it a moment rather than fail on timing.
+    let deadline = Instant::now() + ANSWER_TIMEOUT;
+    let startup = loop {
+        match studio_app::prepare(Ok(scratch.data())) {
+            Opening::Owner(prepared) => break prepared.startup,
+            Opening::AlreadyOpen(_) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Opening::AlreadyOpen(dir) => unreachable!("{} is still locked", dir.display()),
+        }
+    };
     let item = startup
         .recovered
         .as_ref()

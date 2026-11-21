@@ -374,11 +374,15 @@ mod tests {
     use crate::journal::{JournalCause, JournalPartial, VERSION};
     use crate::queue::Interruption;
     use crate::state::INITIAL_SETTINGS;
-    #[cfg(unix)]
-    use crate::testing::Scratch;
+    use crate::testing::{Scratch, abs};
 
-    const DESTINATION: &str = "/out/clip.ivf";
-    const PARTIAL: &str = "/out/.clip.ivf.x7Qp2a.partial";
+    fn destination_path() -> PathBuf {
+        abs("/out/clip.ivf")
+    }
+
+    fn partial_path() -> PathBuf {
+        abs("/out/.clip.ivf.x7Qp2a.partial")
+    }
 
     /// A disk that holds exactly the listed paths.
     #[derive(Default)]
@@ -392,14 +396,14 @@ mod tests {
 
     fn job() -> JobSpec {
         JobSpec {
-            source: WirePath::Utf8("/in/clip.y4m".into()),
+            source: WirePath::from_path(&abs("/in/clip.y4m")),
             fingerprint: SourceFingerprint {
                 len: 1,
                 modified: None,
             },
             video_stream: 0,
             omissions_acknowledged: false,
-            destination: WirePath::Utf8(DESTINATION.into()),
+            destination: WirePath::from_path(&destination_path()),
             settings: INITIAL_SETTINGS,
         }
     }
@@ -432,11 +436,11 @@ mod tests {
             settings: INITIAL_SETTINGS,
             items: vec![JournalItem {
                 id: 1,
-                source: WirePath::Utf8("/in/clip.y4m".into()),
+                source: WirePath::from_path(&abs("/in/clip.y4m")),
                 size: Some(10),
                 video_stream: None,
                 facts: Some(facts()),
-                destination: WirePath::Utf8(DESTINATION.into()),
+                destination: WirePath::from_path(&destination_path()),
                 destination_chosen: false,
                 acknowledgement: None,
                 state,
@@ -471,9 +475,9 @@ mod tests {
         fn path(self) -> Option<PathBuf> {
             match self {
                 Self::NotAnnounced => None,
-                Self::OutsideFolder => Some("/elsewhere/.clip.ivf.x7Qp2a.partial".into()),
-                Self::WrongName => Some("/out/clip.ivf.partial".into()),
-                _ => Some(PARTIAL.into()),
+                Self::OutsideFolder => Some(abs("/elsewhere/.clip.ivf.x7Qp2a.partial")),
+                Self::WrongName => Some(abs("/out/clip.ivf.partial")),
+                _ => Some(partial_path()),
             }
         }
 
@@ -494,7 +498,7 @@ mod tests {
             };
             match self {
                 Self::NotAnnounced => PartialFate::None,
-                Self::Present => PartialFate::Pending(PARTIAL.into()),
+                Self::Present => PartialFate::Pending(partial_path()),
                 Self::Absent => PartialFate::Gone,
                 Self::Symlink => kept("it is a symbolic link"),
                 Self::Directory => kept("it is a folder"),
@@ -531,7 +535,7 @@ mod tests {
             JournalState::Completed {
                 job: job(),
                 report: JobReport {
-                    destination: WirePath::Utf8(DESTINATION.into()),
+                    destination: WirePath::from_path(&destination_path()),
                     frames: 3,
                     bytes: 99,
                     checks: Vec::new(),
@@ -569,7 +573,7 @@ mod tests {
                 for dto in states(partial.path().as_deref()) {
                     let mut disk = FakeDisk::default();
                     if destination_present {
-                        disk.0.insert(DESTINATION.into(), Kind::File);
+                        disk.0.insert(destination_path(), Kind::File);
                     }
                     if let (Some(path), Some(kind)) = (partial.path(), partial.on_disk()) {
                         disk.0.insert(path, kind);
@@ -605,8 +609,8 @@ mod tests {
                     assert_eq!(fate, expected_fate, "{case}");
                     let cleanups: Vec<_> = recovered.cleanups.iter().map(|c| &c.partial).collect();
                     if judged && partial == Partial::Present {
-                        assert_eq!(cleanups, [Path::new(PARTIAL)], "{case}");
-                        assert_eq!(recovered.cleanups[0].destination, Path::new(DESTINATION));
+                        assert_eq!(cleanups, [&partial_path()], "{case}");
+                        assert_eq!(recovered.cleanups[0].destination, destination_path());
                     } else {
                         assert_eq!(cleanups.len(), 0, "{case}");
                     }
@@ -649,18 +653,18 @@ mod tests {
             cause: JournalCause::AppStopped,
             destination_present: false,
             partial: JournalPartial::Removed {
-                path: WirePath::Utf8(PARTIAL.into()),
+                path: WirePath::from_path(&partial_path()),
             },
         };
         let mut disk = FakeDisk::default();
-        disk.0.insert(DESTINATION.into(), Kind::File);
+        disk.0.insert(destination_path(), Kind::File);
         let recovered = recover(journal(dto), &disk);
         assert_eq!(recovered.cleanups, []);
         let fate = recovered.items[0]
             .ending()
             .and_then(Ending::partial)
             .cloned();
-        assert_eq!(fate, Some(PartialFate::Removed(PARTIAL.into())));
+        assert_eq!(fate, Some(PartialFate::Removed(partial_path())));
         // Whether the destination is there is looked at again.
         assert!(matches!(
             recovered.items[0].ending(),
@@ -676,18 +680,22 @@ mod tests {
     fn duplicate_ids_and_foreign_paths_are_dropped_and_ids_stay_unique() {
         let mut j = journal(JournalState::Waiting);
         let mut twin = j.items[0].clone();
-        twin.source = WirePath::Utf8("/in/twin.y4m".into());
+        twin.source = WirePath::from_path(&abs("/in/twin.y4m"));
         let mut foreign = j.items[0].clone();
         foreign.id = 5;
-        foreign.source = WirePath::Windows(vec![0xD800]);
+        // A non-Unicode path from the other platform family.
+        #[cfg(not(windows))]
+        let other = WirePath::Windows(vec![0xD800]);
+        #[cfg(windows)]
+        let other = WirePath::Unix(vec![0xff]);
+        foreign.source = other;
         let mut late = j.items[0].clone();
         late.id = 40;
         j.items.extend([twin, foreign, late]);
         j.next_id = 3;
         let recovered = recover(j, &FakeDisk::default());
-        #[cfg(unix)]
         assert_eq!(recovered.dropped, 2);
-        assert_eq!(recovered.items[0].source(), Path::new("/in/clip.y4m"));
+        assert_eq!(recovered.items[0].source(), abs("/in/clip.y4m"));
         // Never below an id already used.
         assert_eq!(recovered.next_id, 41);
     }
@@ -702,9 +710,9 @@ mod tests {
 
     #[test]
     fn partial_names_must_be_the_engines() {
-        let ok = |p: &str| check_partial_path(Path::new(p), Path::new(DESTINATION)).is_ok();
-        assert!(ok(PARTIAL));
-        assert!(ok("/out/.clip.ivf.A.partial"));
+        let ok = |p: &Path| check_partial_path(p, &destination_path()).is_ok();
+        assert!(ok(&partial_path()));
+        assert!(ok(&abs("/out/.clip.ivf.A.partial")));
         for bad in [
             "/out/.clip.ivf..partial",
             "/out/.clip.ivf.x7-Qp.partial",
@@ -714,14 +722,16 @@ mod tests {
             "/out/.other.ivf.x7Qp2a.partial",
             "/out/sub/.clip.ivf.x7Qp2a.partial",
             "/out/../out/.clip.ivf.x7Qp2a.partial",
-            "out/.clip.ivf.x7Qp2a.partial",
             "/",
         ] {
-            assert!(!ok(bad), "{bad}");
+            assert!(!ok(&abs(bad)), "{bad}");
         }
+        // Relative, and on Windows also rooted without a drive: never absolute.
+        assert!(!ok(Path::new("out/.clip.ivf.x7Qp2a.partial")));
+        #[cfg(windows)]
+        assert!(!ok(Path::new("/out/.clip.ivf.x7Qp2a.partial")));
     }
 
-    #[cfg(unix)]
     #[test]
     fn only_a_regular_file_with_the_right_name_is_removed() {
         let dir = Scratch::new("partials");
@@ -729,16 +739,6 @@ mod tests {
         let partial = dir.path(".clip.ivf.x7Qp2a.partial");
         let precious = dir.path("precious.mov");
         assert!(fs::write(&precious, b"keep").is_ok());
-
-        // A symlink with the right name: left alone, its target untouched.
-        assert!(std::os::unix::fs::symlink(&precious, &partial).is_ok());
-        let kept = remove_partial(&partial, &destination);
-        assert!(
-            matches!(kept, PartialFate::Kept { ref reason, .. } if reason.contains("symbolic"))
-        );
-        assert!(fs::symlink_metadata(&partial).is_ok());
-        assert_eq!(fs::read(&precious).ok().as_deref(), Some(&b"keep"[..]));
-        assert!(fs::remove_file(&partial).is_ok());
 
         // A folder with the right name: left alone, with what is inside.
         assert!(fs::create_dir(&partial).is_ok());
@@ -766,5 +766,26 @@ mod tests {
         assert_eq!(dir.entries(), ["precious.mov"]);
         // Already gone.
         assert_eq!(remove_partial(&partial, &destination), PartialFate::Gone);
+    }
+
+    // Unix only: creating a symlink on Windows needs a privilege CI
+    // runners do not grant.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_named_like_a_temporary_file_is_left_alone() {
+        let dir = Scratch::new("partials");
+        let destination = dir.path("clip.ivf");
+        let partial = dir.path(".clip.ivf.x7Qp2a.partial");
+        let precious = dir.path("precious.mov");
+        assert!(fs::write(&precious, b"keep").is_ok());
+
+        // A symlink with the right name: left alone, its target untouched.
+        assert!(std::os::unix::fs::symlink(&precious, &partial).is_ok());
+        let kept = remove_partial(&partial, &destination);
+        assert!(
+            matches!(kept, PartialFate::Kept { ref reason, .. } if reason.contains("symbolic"))
+        );
+        assert!(fs::symlink_metadata(&partial).is_ok());
+        assert_eq!(fs::read(&precious).ok().as_deref(), Some(&b"keep"[..]));
     }
 }

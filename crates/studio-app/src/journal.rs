@@ -631,18 +631,18 @@ mod tests {
     use studio_domain::settings::{Crf, OutputKind, SpeedPreset};
 
     use crate::state::INITIAL_SETTINGS;
-    use crate::testing::Scratch;
+    use crate::testing::{Scratch, abs};
 
     fn job() -> JobSpec {
         JobSpec {
-            source: WirePath::Utf8("/m/a.mp4".into()),
+            source: WirePath::from_path(&abs("/m/a.mp4")),
             fingerprint: SourceFingerprint {
                 len: 10,
                 modified: Some((1, 2)),
             },
             video_stream: 0,
             omissions_acknowledged: true,
-            destination: WirePath::Utf8("/m/a.ivf".into()),
+            destination: WirePath::from_path(&abs("/m/a.ivf")),
             settings: EncoderSettings {
                 output: OutputKind::Av2AnnexB,
                 preset: SpeedPreset::new(9).unwrap_or_else(|e| unreachable!("{e}")),
@@ -654,11 +654,11 @@ mod tests {
     fn journal() -> Journal {
         let item = |id, state| JournalItem {
             id,
-            source: WirePath::Utf8(format!("/m/{id}.mp4")),
+            source: WirePath::from_path(&abs(&format!("/m/{id}.mp4"))),
             size: Some(1234),
             video_stream: None,
             facts: None,
-            destination: WirePath::Utf8(format!("/m/{id}.ivf")),
+            destination: WirePath::from_path(&abs(&format!("/m/{id}.ivf"))),
             destination_chosen: false,
             acknowledgement: None,
             state,
@@ -673,7 +673,7 @@ mod tests {
                     2,
                     JournalState::Running {
                         job: job(),
-                        partial: Some(WirePath::Utf8("/m/.2.ivf.Ab12Cd.partial".into())),
+                        partial: Some(WirePath::from_path(&abs("/m/.2.ivf.Ab12Cd.partial"))),
                     },
                 ),
                 item(

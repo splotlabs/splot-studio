@@ -111,10 +111,10 @@ pub fn default_destination(source: &Path, output: OutputKind) -> PathBuf {
     if path != source {
         return path;
     }
-    let stem = source
-        .file_stem()
-        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-    source.with_file_name(format!("{stem}-av2.{}", output.extension()))
+    // The name stays exact where it is not Unicode; only the suffix is added.
+    let mut name = source.file_stem().map_or_default(ToOwned::to_owned);
+    name.push(format!("-av2.{}", output.extension()));
+    source.with_file_name(name)
 }
 
 /// The `n`th alternative to `path`: `clip (2).ivf`, `clip (3).ivf`, …
@@ -133,31 +133,30 @@ pub fn numbered(path: &Path, n: u32) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::abs;
 
     #[test]
     fn the_default_destination_is_never_the_source() {
         assert_eq!(
-            default_destination(Path::new("/m/clip.ivf"), OutputKind::Ivf),
-            PathBuf::from("/m/clip-av2.ivf")
+            default_destination(&abs("/m/clip.ivf"), OutputKind::Ivf),
+            abs("/m/clip-av2.ivf")
         );
         assert_eq!(
-            default_destination(Path::new("/m/clip"), OutputKind::Av2AnnexB),
-            PathBuf::from("/m/clip.obu")
+            default_destination(&abs("/m/clip"), OutputKind::Av2AnnexB),
+            abs("/m/clip.obu")
         );
     }
 
     #[test]
     fn numbered_names_keep_the_folder_and_extension() {
         assert_eq!(
-            numbered(Path::new("/m/clip one.ivf"), 2),
-            PathBuf::from("/m/clip one (2).ivf")
+            numbered(&abs("/m/clip one.ivf"), 2),
+            abs("/m/clip one (2).ivf")
         );
-        assert_eq!(
-            numbered(Path::new("/m/clip"), 3),
-            PathBuf::from("/m/clip (3)")
-        );
+        assert_eq!(numbered(&abs("/m/clip"), 3), abs("/m/clip (3)"));
     }
 
+    // Unix only: these are raw Unix bytes; Windows has its own test below.
     #[cfg(unix)]
     #[test]
     fn numbered_names_keep_non_unicode_bytes() {
@@ -165,5 +164,20 @@ mod tests {
         let raw = std::ffi::OsStr::from_bytes(b"/m/clip-\xff.ivf");
         let got = numbered(Path::new(raw), 2);
         assert_eq!(got.as_os_str().as_bytes(), b"/m/clip-\xff (2).ivf");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn numbered_names_keep_unpaired_surrogates() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let mut wide: Vec<u16> = "C:\\m\\clip-".encode_utf16().collect();
+        wide.push(0xD800);
+        wide.extend(".ivf".encode_utf16());
+        let raw = std::ffi::OsString::from_wide(&wide);
+        let got = numbered(Path::new(&raw), 2);
+        let mut expected: Vec<u16> = "C:\\m\\clip-".encode_utf16().collect();
+        expected.push(0xD800);
+        expected.extend(" (2).ivf".encode_utf16());
+        assert_eq!(got.as_os_str().encode_wide().collect::<Vec<_>>(), expected);
     }
 }

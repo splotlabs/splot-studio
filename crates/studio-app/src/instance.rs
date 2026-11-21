@@ -19,7 +19,9 @@ use std::fs::{self, File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 
 /// Replaces the data folder when set (tests and development only). Read
-/// once, at startup.
+/// once, at startup. A relative value (on Windows also one without a
+/// drive) is made absolute against the current folder, once, so the app
+/// keeps using the same folder whatever it does later.
 pub const DATA_DIR_VAR: &str = "SPLOT_STUDIO_DATA_DIR";
 
 /// The lock file's name in the data folder.
@@ -102,12 +104,18 @@ pub fn acquire(dir: &Path) -> Acquired {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::Scratch;
+    use crate::testing::{Scratch, abs};
 
     #[test]
     fn the_override_wins_and_the_default_is_per_user() {
-        let dir = data_dir(Some("/tmp/studio-data".into()));
-        assert_eq!(dir.as_deref(), Ok(Path::new("/tmp/studio-data")));
+        let absolute = abs("/tmp/studio-data");
+        let dir = data_dir(Some(absolute.clone().into_os_string()));
+        assert_eq!(dir, Ok(absolute));
+        // A relative override (or, on Windows, one without a drive) is made
+        // absolute against the current folder, as the OS would resolve it.
+        let relative = data_dir(Some("studio-data/dev".into()));
+        let expected = std::env::current_dir().map(|d| d.join("studio-data").join("dev"));
+        assert_eq!(relative.ok(), expected.ok());
         let default = data_dir(Some(OsString::new()));
         assert!(
             default

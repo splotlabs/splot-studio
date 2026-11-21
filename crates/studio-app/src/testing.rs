@@ -1,11 +1,28 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
-//! Helpers for unit tests that touch real files.
+//! Helpers for unit tests: platform-absolute fixture paths and scratch
+//! directories for tests that touch real files.
 
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+/// A platform-absolute path from a Unix-looking one: `/out/clip.ivf`
+/// stays as it is on Unix and becomes `C:\out\clip.ivf` on Windows, where
+/// a path without a drive is not absolute. Fixtures that reach code which
+/// requires absolute paths (recovery's temporary-file check) use this.
+pub fn abs(unix: &str) -> PathBuf {
+    debug_assert!(
+        unix.starts_with('/'),
+        "{unix} is not a Unix-looking absolute path"
+    );
+    if cfg!(windows) {
+        PathBuf::from(format!("C:{}", unix.replace('/', "\\")))
+    } else {
+        PathBuf::from(unix)
+    }
+}
 
 /// A fresh, empty directory for one test, removed afterwards.
 pub struct Scratch(pub PathBuf);
@@ -44,5 +61,22 @@ impl Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixture_paths_are_absolute_with_the_same_components() {
+        let path = abs("/out/clip one.ivf");
+        assert!(path.is_absolute(), "{}", path.display());
+        let names: Vec<_> = path.iter().filter_map(|c| c.to_str()).collect();
+        assert!(names.ends_with(&["out", "clip one.ivf"]), "{names:?}");
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("clip one.ivf")
+        );
     }
 }
