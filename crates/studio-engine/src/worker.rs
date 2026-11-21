@@ -10,13 +10,17 @@
 //! only ever replaces a progress slot or appends one of its few stage and
 //! terminal events, and neither of those is dropped.
 //!
-//! A cancel (the `Cancel` command or the end of input) is cooperative first:
-//! the job stops at its next frame or packet boundary. One codec call can
-//! take far longer than that (the pinned encoder codes a whole mini-GOP per
-//! `receive_packet`), so after [`CANCEL_GRACE`] the reader finishes the
-//! cancellation itself: it removes the job's temporary file, emits
+//! A cancel (the `Cancel` command, the end of input or a failed output) is
+//! cooperative: it sets the job's flag, which the job polls between frames
+//! and packets, and cancels the encoder's token, which stops a codec call in
+//! progress (one `receive_packet` codes a whole mini-GOP) at its next
+//! internal check. The job then cleans up and ends as `Cancelled`, and the
+//! worker keeps serving until the end of its input.
+//!
+//! As a last resort, a job that has not stopped [`CANCEL_GRACE`] after a
+//! cancel is abandoned: the reader removes its temporary file, emits
 //! `Cancelled`, waits for the writer and exits the process while the job
-//! thread is still inside the codec, after killing every `FFmpeg` child
+//! thread is still running, after killing every `FFmpeg` child
 //! ([`crate::media::kill_all`]). Both happen under the lock that orders
 //! the terminal event and the publication claim, so a forced cancel never
 //! follows a claimed publication and nothing is published after it.
@@ -31,6 +35,7 @@ use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, Scope, ScopedJoinHandle};
 use std::time::{Duration, Instant};
 
+use splot_encode::CancelToken;
 use studio_domain::job::{Failure, FailureCode, JobSpec};
 use studio_domain::protocol::{
     Command, Envelope, ErrorCode, Event, ProtocolError, decode, read_frame, write_message,
@@ -44,8 +49,11 @@ use crate::{build_identity, capabilities, source};
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How long a cancelled job may take to stop by itself before the worker
-/// abandons it and exits.
-pub const CANCEL_GRACE: Duration = Duration::from_millis(500);
+/// abandons it and exits. A backstop only: the encoder's token stops a
+/// codec call in milliseconds (release, 720p and 1080p, presets 6 and 10:
+/// at most 14 ms; upstream bounds it at about 160 ms), so this is reached
+/// only if something ignores the cancel.
+pub const CANCEL_GRACE: Duration = Duration::from_secs(3);
 
 /// Command replies queued for a peer that does not read before the reader
 /// stops taking commands. Job events do not count against it.
@@ -75,7 +83,8 @@ pub enum SessionError {
 /// a `Cancel` without a running job are refused with
 /// [`ErrorCode::WrongState`].
 ///
-/// A cancelled job that does not stop within [`CANCEL_GRACE`] is abandoned:
+/// A cancelled job that does not stop within [`CANCEL_GRACE`] (normally it
+/// stops well before) is abandoned:
 /// once its `Cancelled` event is written, this exits the process with the
 /// status the session would have returned (0 unless a stream failed),
 /// without waiting for the end of input.
@@ -194,7 +203,7 @@ fn serve<'scope>(
         }
     };
     // The end of input, or an unreadable one, means nobody can cancel later.
-    outbox.cancel.store(true, Ordering::Relaxed);
+    outbox.stop(&outbox.lock());
     if outbox.settle(CANCEL_GRACE) {
         return (result, true);
     }
@@ -279,6 +288,8 @@ struct State {
     job_id: u64,
     /// The job's temporary file, while it exists.
     temp: Option<PathBuf>,
+    /// Stops the job's encoder, once it exists.
+    encoder: Option<CancelToken>,
     /// The job has claimed publication; it can no longer be cancelled.
     publishing: bool,
     /// No more events will be added.
@@ -389,6 +400,15 @@ impl Outbox {
         true
     }
 
+    /// Sets the cancel flag and stops a codec call in progress. Called under
+    /// the lock (`state`), so [`Control::hold_encoder`] cannot miss it.
+    fn stop(&self, state: &State) {
+        self.cancel.store(true, Ordering::Relaxed);
+        if let Some(token) = &state.encoder {
+            token.cancel();
+        }
+    }
+
     /// Requests cancellation and acknowledges it, unless no job is running.
     /// Decided under the lock that orders the terminal event, so an
     /// acknowledgement never follows it.
@@ -397,7 +417,7 @@ impl Outbox {
         if state.job != JobState::Running {
             return false;
         }
-        self.cancel.store(true, Ordering::Relaxed);
+        self.stop(&state);
         state.flush_progress();
         state.push(Envelope::new(request_id, Event::CancelRequested));
         drop(state);
@@ -447,9 +467,9 @@ impl Outbox {
                 state.broken = true;
                 state.queue.clear();
                 state.progress = None;
-                drop(state);
                 // Nobody can hear the job any more.
-                self.cancel.store(true, Ordering::Relaxed);
+                self.stop(&state);
+                drop(state);
                 self.changed.notify_all();
                 return Err(error);
             }
@@ -474,6 +494,14 @@ impl Control for Outbox {
 
     fn release_temp(&self) {
         self.lock().temp = None;
+    }
+
+    fn hold_encoder(&self, token: CancelToken) {
+        let mut state = self.lock();
+        if self.cancel.load(Ordering::Relaxed) {
+            token.cancel();
+        }
+        state.encoder = Some(token);
     }
 
     fn claim_publish(&self) -> bool {
@@ -652,6 +680,59 @@ mod tests {
             matches!(bodies.as_slice(), [_, Event::Progress { progress }, _] if progress.frames_read == 9_999),
             "{bodies:?}"
         );
+    }
+
+    /// The encoder's token is cancelled with the flag, also when it is
+    /// handed over after the cancel. A job that still does not end is
+    /// abandoned after the grace (the backstop): its temporary file is
+    /// removed, `Cancelled` is its terminal event, and its own late end adds
+    /// nothing. A job that ends in time is not abandoned.
+    #[test]
+    fn cancel_reaches_the_encoder_and_the_backstop_abandons_a_stuck_job() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let temp = dir.path().join("out.ivf.partial");
+        let outbox = Outbox::default();
+        outbox.begin_job(1);
+        outbox.hold_temp(&mut || {
+            fs::write(&temp, b"x").ok()?;
+            Some(temp.clone())
+        });
+        let early = CancelToken::default();
+        outbox.hold_encoder(early.clone());
+        assert!(!early.is_cancelled());
+        assert!(outbox.cancel(2));
+        assert!(early.is_cancelled());
+        let late = CancelToken::default();
+        outbox.hold_encoder(late.clone());
+        assert!(late.is_cancelled());
+        let grace = Duration::from_millis(50);
+        let asked = Instant::now();
+        assert!(outbox.settle(grace));
+        assert!(asked.elapsed() >= grace);
+        assert!(!temp.exists());
+        outbox.job_end(
+            1,
+            Event::Failed {
+                failure: Failure {
+                    code: FailureCode::Encoder,
+                    message: "late".into(),
+                },
+            },
+        );
+        let bodies: Vec<Event> = outbox.lock().queue.drain(..).map(|e| e.body).collect();
+        assert_eq!(bodies, [Event::CancelRequested, Event::Cancelled]);
+
+        let outbox = Outbox::default();
+        outbox.begin_job(1);
+        assert!(outbox.cancel(2));
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                thread::sleep(Duration::from_millis(20));
+                outbox.job_end(1, Event::Cancelled);
+            });
+            assert!(!outbox.settle(Duration::from_secs(10)));
+        });
+        Ok(())
     }
 
     /// Output failure cancels the job and the session reports it.

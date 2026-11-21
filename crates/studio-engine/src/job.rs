@@ -5,7 +5,9 @@
 //!
 //! [`run`] is synchronous and owns the encoder for its whole life. It reports
 //! through a callback and checks its [`Control`]'s cancel flag before every
-//! frame read, between packets, and inside verification. Publication must be
+//! frame read, between packets, and inside the scan and verification; it
+//! hands the encoder's [`CancelToken`] to the [`Control`], which stops a
+//! codec call already running. Publication must be
 //! claimed from the [`Control`]; once claimed, a cancel is too late and the
 //! job completes, and once a cancel is accepted, the claim is refused.
 
@@ -15,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
-use splot_encode::{BitDepth, Config, Encoder, Preset, RateControlMode, SourceFrame};
+use splot_encode::{BitDepth, CancelToken, Config, Encoder, Preset, RateControlMode, SourceFrame};
 use studio_domain::job::{
     CheckOutcome, Failure, FailureCode, JobReport, JobSpec, Progress, SourceReader, Stage,
 };
@@ -57,10 +59,18 @@ impl Stop {
 /// How a job is stopped, and what someone stopping it from outside must know.
 ///
 /// A plain [`AtomicBool`] is a `Control` that nobody can force: the job
-/// stops only by itself.
+/// stops only by itself, and a flag set during a codec call is seen when
+/// that call returns.
 pub trait Control: Sync {
     /// Set once the job should stop.
     fn cancel_flag(&self) -> &AtomicBool;
+
+    /// The encoder exists, before its first call; `token` stops a call in
+    /// progress. A `Control` that sets its flag from another thread cancels
+    /// the token with it, and at once if the flag is already set.
+    fn hold_encoder(&self, token: CancelToken) {
+        drop(token);
+    }
 
     /// Runs `create`, which makes the job's temporary file and returns its
     /// path, so the file can be removed if the job is abandoned.
@@ -176,7 +186,7 @@ fn execute(
         &config,
         job.settings.output,
         temp.as_file(),
-        cancel,
+        control,
         report,
     )?;
     report(Event::Stage {
@@ -257,11 +267,13 @@ fn encode(
     config: &Config,
     kind: OutputKind,
     file: &File,
-    cancel: &AtomicBool,
+    control: &dyn Control,
     report: &mut dyn FnMut(Event),
 ) -> Result<u64, Stop> {
+    let cancel = control.cancel_flag();
     let output_error = |e: io::Error| output::output(format!("cannot write the output: {e}"));
     let mut encoder = Encoder::new(config.clone()).map_err(encoder_error)?;
+    control.hold_encoder(encoder.cancel_token());
     let mut sink = PacketSink::new(kind, BufWriter::new(file), config).map_err(output_error)?;
     let mut progress = Progress::default();
     loop {
@@ -338,5 +350,9 @@ fn stop_if(cancel: &AtomicBool) -> Result<(), Stop> {
 
 #[allow(clippy::needless_pass_by_value)]
 fn encoder_error(error: splot_encode::Error) -> Stop {
-    Stop::failed(FailureCode::Encoder, error.to_string())
+    match error {
+        // Only the job's `Control` cancels the token, after setting its flag.
+        splot_encode::Error::Cancelled => Stop::Cancelled,
+        error => Stop::failed(FailureCode::Encoder, error.to_string()),
+    }
 }
