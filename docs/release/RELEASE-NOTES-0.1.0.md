@@ -2,8 +2,7 @@
 
 **Status: draft for a test build, not a release.** Nothing has been published.
 The packages are not code-signed or notarized and have not been installed on a
-clean machine. What has and has not been run is in `STATUS.md` and
-`docs/evidence/studio-06/package.md`; what remains before a real release is in
+clean machine. What remains before a real release is in
 [`CHECKLIST.md`](CHECKLIST.md).
 
 ## What it does
@@ -87,7 +86,7 @@ Check the download first: each archive has a `.sha256` file
 
 There is no installer, no updater and no background service.
 
-## Known limitations (from `STATUS.md`)
+## Known limitations
 
 - Encoding is slow: about 0.8 frames per second at 720p on the fastest priority, on a
   20-thread laptop processor, using under two cores. Quality and Priority mappings are

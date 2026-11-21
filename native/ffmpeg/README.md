@@ -6,8 +6,7 @@ processes (owner decision, 2026-11-20: no FFmpeg libraries are linked, no FFI,
 no `studio-media` crate). Decoded frames reach the engine as a Y4M stream on a
 pipe. See `crates/studio-engine/src/media/`.
 
-The release ships a pair built here from source by `build.sh`. Evidence of the
-first build and of the engine running on it: `docs/evidence/studio-06/ffmpeg.md`.
+The release ships a pair built here from source by `build.sh`.
 
 ## Building
 
@@ -86,8 +85,8 @@ build is distinguishable from a system FFmpeg of the same release.
 
 The engine starts the tools directly, so they must not need libraries that
 are not part of the OS. FFmpeg's libraries and dav1d are linked statically into
-each executable (owner decision for STUDIO-06; it replaces the shared-library
-variant described in `docs/planning/studio-v1/08-DEPENDENCIES-AND-RELEASE.md`).
+each executable (owner decision, 2026-11-21) rather than shipped as shared
+libraries.
 A user replaces the LGPL components by replacing the executables, which are
 separate programs; `licenses/SOURCE.md` says how. The script fails if an
 executable needs anything outside:
@@ -119,7 +118,7 @@ is refused.
 
 ## What this build does not read
 
-Measured differences from a full development FFmpeg (details in the evidence):
+Measured differences from a full development FFmpeg:
 
 - Files of any other kind (playlists, concat lists, images, raw `.h264`, `.mpg`,
   …) are not recognised at all, because their demuxers are not built. `ffprobe`
@@ -152,7 +151,7 @@ their fixtures with that FFmpeg's encoders, which this build does not have.
 Change `versions.env` (version, URL and SHA-256 together) after checking the
 upstream signature: FFmpeg's `.asc` with the FFmpeg release signing key, dav1d's
 `.asc` with the VideoLAN release signing key. Then rebuild every target and
-rerun the evidence checks.
+run `cargo xtask package --smoke` on each.
 
 Decoder patent licensing is a separate review and is not settled by the LGPL
 configuration.

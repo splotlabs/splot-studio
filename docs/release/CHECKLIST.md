@@ -9,7 +9,7 @@ is not executed, cross-built is not tested. Status as of 2026-11-21.
 - [x] `cargo xtask package` builds the host package: portable app, x86-64-v3 engine
   (x86-64 targets), static C runtime on Windows, FFmpeg pair, generated Rust crate
   notices with licence texts, `BUILD.json`, `.sha256`. Run on Linux x86_64 only, with
-  a placeholder FFmpeg (see `docs/evidence/studio-06/package.md`).
+  a placeholder FFmpeg.
 - [x] `cargo xtask smoke` on Linux: unpacked, emptied environment, both executables
   report their identity, Y4M 8/10-bit and MP4 encoded to IVF and OBU and verified,
   start-up libraries checked.
@@ -95,7 +95,7 @@ newest macOS, on a machine that never had Rust, FFmpeg or the source checkout:
   decide on `SetDefaultDllDirectories` (needs reviewed unsafe) or the linker's
   `/DEPENDENTLOADFLAG`, and test against a planted DLL.
 - [ ] Release notes: fill in checksums from the CI artifacts; re-read the known
-  limitations against `STATUS.md` at the release commit.
+  limitations against the open issues at the release commit.
 - [ ] A clean tree: `BUILD.json` must say `"dirty": false`.
 - [ ] Human approval of the exact artifacts, then a manual upload. No tag, release or
   upload is made by any workflow in this repository.
