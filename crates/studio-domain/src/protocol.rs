@@ -133,6 +133,8 @@ pub enum Command {
         /// Ask for [`Event::Picture`]s of the output so far, no larger than
         /// this box. They never delay the job: the engine sends the newest
         /// picture it has when the app can take one and skips the rest.
+        /// An invalid box does not refuse the job: it runs without pictures
+        /// after one [`Event::PictureUnavailable`] with generation `0`.
         live: Option<PictureBox>,
     },
     /// Asks the running job to stop. [`Event::CancelRequested`] acknowledges
@@ -159,7 +161,8 @@ pub enum Command {
     /// timing: a run of [`Event::Picture`]s with this generation, each sent
     /// when its frame is due, late frames skipped, ended by
     /// [`Event::PlaybackEnded`] or [`Event::PictureUnavailable`]. Video only.
-    /// Any newer `Picture`, `Play` or `StopPlayback` ends it.
+    /// Any newer `Picture`, `Play` or `StopPlayback` ends it, and that end is
+    /// still reported by [`Event::PlaybackEnded`] with this generation.
     Play {
         /// Chosen by the app and increasing; echoed on every answer.
         generation: u64,
