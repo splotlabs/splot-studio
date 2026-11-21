@@ -569,9 +569,22 @@ mod tests {
         });
         assert!(written.is_ok(), "{written:?}");
         let (tx, rx) = mpsc::channel();
-        let worker = Worker::spawn(&script, Role::Worker, move |d| {
-            let _ = tx.send(d);
-        });
+        // Another test forking at this moment can still hold the script open
+        // for writing, and running it then fails as "text file busy".
+        let mut tries = 0;
+        let worker = loop {
+            let tx = tx.clone();
+            let worker = Worker::spawn(&script, Role::Worker, move |d| {
+                let _ = tx.send(d);
+            });
+            match &worker {
+                Err(e) if e.to_string().contains("busy") && tries < 50 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                _ => break worker,
+            }
+        };
         let started = Instant::now();
         match worker {
             Ok(worker) => worker.shutdown(Duration::from_millis(200)),

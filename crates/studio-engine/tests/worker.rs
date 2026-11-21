@@ -949,10 +949,22 @@ fn tools_beside_the_engine_are_bundled() -> TestResult {
             std::fs::copy(&found, &link)?;
         }
     }
-    let output = Process::new(&engine)
-        .arg("--version")
-        .env_remove(studio_engine::media::SYSTEM_OPT_IN)
-        .output()?;
+    // Another test forking at this moment can still hold the copy open for
+    // writing, and running it then fails as "text file busy": try again.
+    let mut tries = 0;
+    let output = loop {
+        let run = Process::new(&engine)
+            .arg("--version")
+            .env_remove(studio_engine::media::SYSTEM_OPT_IN)
+            .output();
+        match run {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            other => break other?,
+        }
+    };
     let text = String::from_utf8(output.stdout)?;
     assert!(text.contains("(Bundled,"), "{text}");
     Ok(())
