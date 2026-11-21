@@ -31,6 +31,13 @@ use crate::{picture, stream};
 /// The shortest gap between two live pictures: about four a second.
 pub const INTERVAL: Duration = Duration::from_millis(250);
 
+/// The longest the live thread waits for the picture of the unit it just
+/// sent before going back to its queue.
+const UNIT_WAIT: Duration = Duration::from_secs(2);
+
+/// How often it looks for that picture while waiting.
+const UNIT_POLL: Duration = Duration::from_millis(5);
+
 /// Temporal units waiting for the live decoder before units are dropped.
 pub const QUEUE_UNITS: usize = 32;
 
@@ -197,10 +204,25 @@ impl Live {
                 self.held = Some(picture);
             }
         }
-        while let Some(picture) = decoder.get_picture()? {
-            self.held = Some(picture);
+        // The decoder works on its own thread and `get_picture` does not wait
+        // for it, so the unit just sent is usually not out yet. Without this
+        // wait its picture would only be collected when the next packet
+        // arrives, which at encoder speed can be a whole group of frames
+        // later. Bounded, and only this thread waits: the job never does.
+        let deadline = Instant::now() + UNIT_WAIT;
+        loop {
+            match decoder.get_picture()? {
+                Some(picture) => {
+                    let done = picture.props().user_data >= index;
+                    self.held = Some(picture);
+                    if done {
+                        return Ok(());
+                    }
+                }
+                None if Instant::now() >= deadline => return Ok(()),
+                None => std::thread::sleep(UNIT_POLL),
+            }
         }
-        Ok(())
     }
 
     fn offer(&mut self, offer: &dyn Fn(PictureHeader, Vec<u8>)) {
