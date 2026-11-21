@@ -28,9 +28,11 @@ use studio_domain::job::{
     SourceReader, VideoTrack,
 };
 
+use studio_domain::preview::ColorMatrix;
+
 use super::{Program, Tool, command, process};
 use crate::job::Stop;
-use crate::source;
+use crate::{picture, source};
 
 /// The longest JSON report read; anything longer is refused.
 const MAX_REPORT_BYTES: usize = 8 << 20;
@@ -61,6 +63,8 @@ pub struct Probed {
     pub repack: Option<&'static str>,
     /// The selected stream's time base, seconds per tick, as `(num, den)`.
     pub time_base: (i64, i64),
+    /// The YCbCr matrix the stream states, when pictures can use it.
+    pub matrix: Option<ColorMatrix>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,6 +259,7 @@ fn accept(
         pix_fmt: accepted.pix_fmt,
         repack: accepted.repack,
         time_base: accepted.time_base,
+        matrix: stated(selected.color_space.as_deref()).and_then(picture::ffmpeg_matrix),
     })
 }
 

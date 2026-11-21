@@ -4,6 +4,7 @@
 //! Display text for domain values. Exact values first; any rounded figure is
 //! a secondary hint next to the exact one, never a replacement.
 
+pub mod preview;
 pub mod queue;
 
 use std::path::Path;

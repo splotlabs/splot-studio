@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
-//! The engine worker client: one short-lived `splot-studio-engine worker`
-//! process per request (the startup `Hello`, each probe, each job).
+//! The engine process client: one short-lived `splot-studio-engine worker`
+//! process per request (the startup `Hello`, each probe, each job), and one
+//! long-lived `splot-studio-engine preview` process for pictures.
 //!
 //! Commands are written from the caller's thread; events are read on a
 //! dedicated thread and handed to a callback, so nothing here blocks the Slint
@@ -10,6 +11,10 @@
 //! child is always reaped: by the reader thread once the event stream ends,
 //! and, if the process keeps its output open, by killing it after a grace
 //! period when the [`Worker`] is dropped or shut down.
+//!
+//! Pictures are converted into the window's pixel format on the reader
+//! thread, never on the Slint thread, and are not queued: each process keeps
+//! only its newest unclaimed picture in a [`PictureSlot`].
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,9 +24,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use slint::{Rgb8Pixel, SharedPixelBuffer};
+use studio_domain::preview::PictureHeader;
 use studio_domain::protocol::{
     BuildIdentity, Capabilities, Command, Envelope, Event, PROTOCOL_VERSION, ProtocolError,
-    read_message, write_message,
+    read_event, write_message,
 };
 use studio_domain::settings::OutputKind;
 
@@ -40,11 +47,104 @@ const STREAM_END_GRACE: Duration = Duration::from_secs(2);
 /// How often an exiting process is checked while waiting for it.
 const EXIT_POLL: Duration = Duration::from_millis(10);
 
+/// Which kind of engine process to start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// `worker`: one handshake, probe or job, then it exits.
+    Worker,
+    /// `preview`: serves picture requests until its input closes.
+    Preview,
+}
+
+impl Role {
+    const fn arg(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Preview => "preview",
+        }
+    }
+}
+
+/// One picture from the engine, its pixels already in the window's format.
+#[derive(Clone)]
+pub struct Picture {
+    /// The request it was sent under.
+    pub request_id: u64,
+    /// What the pixels are.
+    pub header: PictureHeader,
+    /// `header.width` x `header.height` RGB pixels.
+    pub pixels: SharedPixelBuffer<Rgb8Pixel>,
+}
+
+impl Picture {
+    /// Wraps `bytes` (rows of R, G, B, no padding); `None` unless they are
+    /// exactly what `header` promises.
+    #[must_use]
+    pub fn new(request_id: u64, header: PictureHeader, bytes: &[u8]) -> Option<Self> {
+        let len = header.payload_len()? as usize;
+        if bytes.len() != len {
+            return None;
+        }
+        let pixels = SharedPixelBuffer::<Rgb8Pixel>::clone_from_slice(
+            bytes,
+            u32::from(header.width),
+            u32::from(header.height),
+        );
+        Some(Self {
+            request_id,
+            header,
+            pixels,
+        })
+    }
+
+    /// The memory its pixels take.
+    #[must_use]
+    pub fn bytes(&self) -> usize {
+        self.pixels.as_bytes().len()
+    }
+}
+
+impl std::fmt::Debug for Picture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Picture")
+            .field("request_id", &self.request_id)
+            .field("header", &self.header)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The newest picture a process sent that nobody has taken yet. A newer
+/// picture replaces an untaken one: pictures are never queued.
+#[derive(Debug, Clone, Default)]
+pub struct PictureSlot(Arc<Mutex<Option<Picture>>>);
+
+impl PictureSlot {
+    /// Takes the newest picture, if one is waiting.
+    #[must_use]
+    pub fn take(&self) -> Option<Picture> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
+    }
+
+    /// Stores `picture`; `true` when the slot was empty, so the consumer
+    /// needs telling.
+    fn put(&self, picture: Picture) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .replace(picture)
+            .is_none()
+    }
+}
+
 /// What a worker's reader thread hands to the callback, in order.
 #[derive(Debug)]
 pub enum Delivery {
-    /// One event from the engine.
+    /// One event from the engine, other than a picture.
     Event(Envelope<Event>),
+    /// A picture arrived: take the newest from this slot. Sent once for
+    /// each run of pictures nobody took, so the consumer must always take
+    /// it, or no further `Pictures` is delivered.
+    Pictures(PictureSlot),
     /// The event stream is over and the process has been reaped. Always the
     /// last delivery.
     Ended(Ending),
@@ -86,7 +186,7 @@ impl From<io::Error> for SpawnError {
     }
 }
 
-/// A running engine worker process.
+/// A running engine process.
 #[derive(Debug)]
 pub struct Worker {
     stdin: Option<ChildStdin>,
@@ -96,18 +196,20 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// Starts `engine worker` and its reader thread. `deliver` receives every
-    /// event and finally [`Delivery::Ended`], on the reader thread.
+    /// Starts `engine worker` (or `engine preview`) and its reader thread.
+    /// `deliver` receives every event and finally [`Delivery::Ended`], on the
+    /// reader thread.
     ///
     /// # Errors
     /// Returns [`SpawnError`] when the process or its reader thread cannot be
     /// started; nothing is left running in that case.
     pub fn spawn(
         engine: &Path,
+        role: Role,
         mut deliver: impl FnMut(Delivery) + Send + 'static,
     ) -> Result<Self, SpawnError> {
         let child = Process::new(engine)
-            .arg("worker")
+            .arg(role.arg())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Engine diagnostics stay visible to whoever launched the app.
@@ -131,9 +233,29 @@ impl Worker {
         let reader = thread::Builder::new()
             .name("engine-events".to_owned())
             .spawn(move || {
+                let slot = PictureSlot::default();
                 let error = loop {
-                    match read_message::<Event>(&mut stdout) {
-                        Ok(Some(envelope)) => deliver(Delivery::Event(envelope)),
+                    match read_event(&mut stdout) {
+                        Ok(Some((envelope, None))) => deliver(Delivery::Event(envelope)),
+                        Ok(Some((envelope, Some(bytes)))) => {
+                            let Event::Picture { picture: header } = envelope.body else {
+                                continue;
+                            };
+                            let (width, height) = (header.width, header.height);
+                            // `read_event` checked the length; this cannot fail.
+                            let Some(picture) = Picture::new(envelope.request_id, header, &bytes)
+                            else {
+                                break Some(ProtocolError::InvalidPicture {
+                                    width,
+                                    height,
+                                    bytes: bytes.len(),
+                                });
+                            };
+                            drop(bytes);
+                            if slot.put(picture) {
+                                deliver(Delivery::Pictures(slot.clone()));
+                            }
+                        }
                         Ok(None) => break None,
                         Err(e) => break Some(e),
                     }
@@ -298,6 +420,7 @@ impl EngineStatus {
                 Event::Error { message, .. } => Self::Failed(message),
                 other => Self::Failed(format!("answered Hello with {other:?}")),
             },
+            Delivery::Pictures(_) => Self::Failed("answered Hello with a picture".to_owned()),
             Delivery::Ended(Ending {
                 error: Some(ProtocolError::IncompatibleVersion { theirs }),
                 ..
@@ -356,7 +479,7 @@ mod tests {
     #[test]
     fn a_missing_engine_is_reported_as_not_found() {
         let path = Path::new("/nonexistent/splot-studio-engine");
-        let got = Worker::spawn(path, |_| {});
+        let got = Worker::spawn(path, Role::Worker, |_| {});
         assert!(
             matches!(got, Err(SpawnError::NotFound(ref p)) if p == path),
             "{got:?}"
@@ -421,7 +544,7 @@ mod tests {
     #[test]
     fn a_silent_exit_ends_the_stream() {
         let (tx, rx) = mpsc::channel();
-        let worker = Worker::spawn(Path::new("/bin/sh"), move |d| {
+        let worker = Worker::spawn(Path::new("/bin/sh"), Role::Worker, move |d| {
             let _ = tx.send(d);
         });
         assert!(worker.is_ok(), "{worker:?}");
@@ -446,9 +569,22 @@ mod tests {
         });
         assert!(written.is_ok(), "{written:?}");
         let (tx, rx) = mpsc::channel();
-        let worker = Worker::spawn(&script, move |d| {
-            let _ = tx.send(d);
-        });
+        // Another test forking at this moment can still hold the script open
+        // for writing, and running it then fails as "text file busy".
+        let mut tries = 0;
+        let worker = loop {
+            let tx = tx.clone();
+            let worker = Worker::spawn(&script, Role::Worker, move |d| {
+                let _ = tx.send(d);
+            });
+            match &worker {
+                Err(e) if e.to_string().contains("busy") && tries < 50 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                _ => break worker,
+            }
+        };
         let started = Instant::now();
         match worker {
             Ok(worker) => worker.shutdown(Duration::from_millis(200)),

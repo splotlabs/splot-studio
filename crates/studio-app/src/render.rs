@@ -7,18 +7,21 @@
 
 use std::time::Instant;
 
-use slint::{Model, ModelRc, SharedString, VecModel};
+use slint::{Image, Model, ModelRc, SharedString, VecModel};
 use studio_domain::job::FailureCode;
 use studio_domain::settings::OutputKind;
 
 use crate::activity::{self, Phase};
+use crate::engine::Picture;
 use crate::present::queue::{self as text, RowKind};
 use crate::present::{self, Tone as ToneText};
+use crate::preview::{Dirty, Preview, StageState as Stage};
 use crate::queue::{Ending, Item, ItemState};
 use crate::simple::{self, Priority, Quality};
 use crate::state::{AppState, Mode, Severity};
 use crate::ui::{
-    AppWindow, CheckRow, Fact, JobView, Notice, QueueRow, RowState, SourceView, Tone, ViewMode,
+    AppWindow, CheckRow, Fact, JobView, Notice, QueueRow, RowState, SourceView, StageState, Tone,
+    ViewMode,
 };
 
 /// How many files the confirmation names before "and N more files".
@@ -433,6 +436,58 @@ pub fn render_counters(window: &AppWindow, state: &AppState, now: Instant) {
     );
     window.set_progress_line(present::counters(activity).into());
     window.set_elapsed_text(present::elapsed(activity.elapsed(now)).into());
+}
+
+/// Pushes what `dirty` names of the picture area and the row thumbnails.
+/// The pixels are not copied: the image shares the picture's buffer.
+///
+/// Public so renderer snapshots can show pictures without an engine.
+pub fn render_preview(window: &AppWindow, state: &AppState, preview: &Preview, dirty: Dirty) {
+    if dirty.picture || dirty.view {
+        let view = preview.view();
+        if dirty.picture {
+            window.set_stage_image(image(view.picture.as_ref()));
+        }
+        window.set_stage_state(match view.state {
+            Stage::None => StageState::None,
+            Stage::Loading => StageState::Loading,
+            Stage::Picture => StageState::Picture,
+            Stage::Unavailable => StageState::Unavailable,
+        });
+        window.set_stage_native(view.native);
+        window.set_stage_badge(view.badge.into());
+        window.set_stage_hint(view.hint.into());
+        window.set_stage_message(view.message.into());
+        window.set_stage_accessible(view.accessible.into());
+        window.set_stage_transport(view.transport);
+        window.set_stage_navigable(view.navigable);
+        window.set_stage_frames(i32::try_from(view.frames).unwrap_or(i32::MAX));
+        // Exact below 2^24 frames, which is over six days at 30 fps.
+        #[allow(clippy::cast_precision_loss)]
+        window.set_stage_position(view.position as f32);
+        window.set_stage_frame_text(view.frame_text.into());
+        window.set_stage_time_text(view.time_text.into());
+        window.set_stage_can_play(view.can_play);
+        window.set_stage_playing(view.playing);
+        window.set_stage_play_note(view.play_note.into());
+        window.set_stage_can_compare(view.can_compare);
+        window.set_stage_comparing(view.comparing);
+        window.set_stage_can_native(view.can_native);
+        window.set_stage_native_on(view.native_on);
+    }
+    if dirty.thumbs {
+        window.set_row_thumbs(model(
+            state
+                .items()
+                .iter()
+                .map(|i| image(preview.thumbnail(i.id())))
+                .collect(),
+        ));
+    }
+}
+
+fn image(picture: Option<&Picture>) -> Image {
+    picture.map_or_else(Image::default, |p| Image::from_rgb8(p.pixels.clone()))
 }
 
 /// The labels of the output kinds, in [`OutputKind::ALL`] order.

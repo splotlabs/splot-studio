@@ -6,19 +6,21 @@
 //! Worker events and journal results reach this thread through
 //! [`slint::invoke_from_event_loop`].
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, SharedString, Timer, TimerMode};
+use studio_domain::preview::PictureBox;
 use studio_domain::protocol::BuildIdentity;
 use studio_domain::settings::OutputKind;
 
 use crate::activity::{self, Changed};
 use crate::engine::{Delivery, EngineStatus};
-use crate::render::{render, render_counters};
+use crate::preview::{Dirty, Input};
+use crate::render::{render, render_counters, render_preview};
 use crate::session::{Outcome, Post, Route, Session, UiEffect};
 use crate::state::Intent;
 use crate::ui::AppWindow;
@@ -32,6 +34,10 @@ pub struct Controller {
     clock: Timer,
     /// Fires once [`activity::CANCEL_TIMEOUT`] after Cancel.
     cancel_deadline: Timer,
+    /// Fires [`RESIZE_SETTLE`] after the picture area's size last changed.
+    resize_settle: Timer,
+    /// The window was not minimized when last looked at.
+    visible: Cell<bool>,
 }
 
 thread_local! {
@@ -65,6 +71,7 @@ fn current() -> Option<Rc<Controller>> {
 
 fn deliver(route: Route, delivery: Delivery) {
     if let Some(ctl) = current() {
+        ctl.check_visible();
         let outcome = ctl
             .session
             .borrow_mut()
@@ -81,6 +88,33 @@ fn with(ctl: &Weak<Controller>, f: impl FnOnce(&Rc<Controller>)) {
 
 /// How long after a size change the fitted size is asserted once more.
 const FIT_SETTLE: Duration = Duration::from_millis(300);
+
+/// How long the picture area's size must hold before pictures are asked
+/// for at the new size (moving between screens can change it repeatedly).
+const RESIZE_SETTLE: Duration = Duration::from_millis(150);
+
+/// The picture area and a row thumbnail, in physical pixels.
+fn geometry(window: &AppWindow) -> Input {
+    let size = |w: i32, h: i32| {
+        PictureBox::clamped(u32::try_from(w).unwrap_or(1), u32::try_from(h).unwrap_or(1))
+    };
+    Input::Resized {
+        stage: size(window.get_stage_px_width(), window.get_stage_px_height()),
+        thumb: size(window.get_thumb_px_width(), window.get_thumb_px_height()),
+    }
+}
+
+/// A logical length in whole physical pixels.
+// Clamped to a range `i64` holds exactly, so the cast cannot truncate.
+#[allow(clippy::cast_possible_truncation)]
+fn physical(logical: f32, scale: f32) -> i64 {
+    let value = (f64::from(logical) * f64::from(scale)).round();
+    if value.is_finite() {
+        value.clamp(-1e9, 1e9) as i64
+    } else {
+        0
+    }
+}
 
 /// Sizes the window to its content (the window is the card).
 fn fit(window: &slint::Weak<AppWindow>) {
@@ -101,9 +135,22 @@ impl Controller {
             session: RefCell::new(session),
             clock: Timer::default(),
             cancel_deadline: Timer::default(),
+            resize_settle: Timer::default(),
+            visible: Cell::new(true),
         });
         CONTROLLER.with(|c| *c.borrow_mut() = Rc::downgrade(&ctl));
         render(window, ctl.session.borrow().state(), Instant::now());
+        let all = Dirty {
+            picture: true,
+            view: true,
+            thumbs: true,
+        };
+        render_preview(
+            window,
+            ctl.session.borrow().state(),
+            ctl.session.borrow().preview(),
+            all,
+        );
 
         let on = |intent: fn(i32) -> Intent| {
             let ctl = Rc::downgrade(&ctl);
@@ -162,6 +209,7 @@ impl Controller {
             // Only fails when no event loop is running, so there is nothing to quit.
             let _ = slint::quit_event_loop();
         });
+        ctl.wire_preview(window);
 
         let client = BuildIdentity {
             name: APP_NAME.to_owned(),
@@ -177,8 +225,81 @@ impl Controller {
 
     /// Applies an intent and handles what it leads to.
     pub fn dispatch(self: &Rc<Self>, intent: Intent) {
+        self.check_visible();
         let outcome = self.session.borrow_mut().dispatch(intent, Instant::now());
         self.handle(outcome);
+    }
+
+    /// Hands the picture area's input to the session.
+    fn preview_input(self: &Rc<Self>, input: Input) {
+        self.check_visible();
+        let outcome = self.session.borrow_mut().preview_input(input);
+        self.handle(outcome);
+    }
+
+    /// Tells the preview when the window was minimized or restored. Slint
+    /// reports no event for it, so this is looked at whenever anything
+    /// happens; Wayland does not tell at all, and there the window always
+    /// counts as visible.
+    fn check_visible(self: &Rc<Self>) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let visible = !window.window().is_minimized();
+        if visible != self.visible.replace(visible) {
+            let outcome = self
+                .session
+                .borrow_mut()
+                .preview_input(Input::Visible(visible));
+            self.handle(outcome);
+        }
+    }
+
+    fn wire_preview(self: &Rc<Self>, window: &AppWindow) {
+        let on = |input: fn(i32) -> Input| {
+            let ctl = Rc::downgrade(self);
+            move |value| with(&ctl, |ctl| ctl.preview_input(input(value)))
+        };
+        window.on_stage_step(on(|delta| Input::Step(i64::from(delta))));
+        window.on_stage_seek(on(|frame| Input::Seek(u64::try_from(frame).unwrap_or(0))));
+        let on = |input: Input| {
+            let ctl = Rc::downgrade(self);
+            move || with(&ctl, |ctl| ctl.preview_input(input))
+        };
+        window.on_stage_end(on(Input::End));
+        window.on_stage_play_pause(on(Input::PlayPause));
+        window.on_stage_toggle_native(on(Input::ToggleNative));
+        window.on_stage_compare({
+            let ctl = Rc::downgrade(self);
+            move |held| with(&ctl, |ctl| ctl.preview_input(Input::Compare(held)))
+        });
+        window.on_stage_pan({
+            let ctl = Rc::downgrade(self);
+            let weak = window.as_weak();
+            move |dx, dy| {
+                let scale = weak.upgrade().map_or(1.0, |w| w.window().scale_factor());
+                let (dx, dy) = (physical(dx, scale), physical(dy, scale));
+                with(&ctl, |ctl| ctl.preview_input(Input::Pan { dx, dy }));
+            }
+        });
+        window.on_stage_geometry_changed({
+            let ctl = Rc::downgrade(self);
+            move || {
+                with(&ctl, |ctl| {
+                    let weak = Rc::downgrade(ctl);
+                    ctl.resize_settle
+                        .start(TimerMode::SingleShot, RESIZE_SETTLE, move || {
+                            with(&weak, |ctl| {
+                                if let Some(window) = ctl.window.upgrade() {
+                                    ctl.preview_input(geometry(&window));
+                                }
+                            });
+                        });
+                });
+            }
+        });
+        // The first size needs no settling.
+        self.preview_input(geometry(window));
     }
 
     fn handle(self: &Rc<Self>, outcome: Outcome) {
@@ -231,6 +352,9 @@ impl Controller {
             Changed::Nothing => {}
             Changed::Counters => render_counters(&window, state, now),
             Changed::Phase => render(&window, state, now),
+        }
+        if outcome.preview.any() {
+            render_preview(&window, state, session.preview(), outcome.preview);
         }
     }
 
@@ -328,6 +452,7 @@ impl Controller {
     pub fn shutdown(&self) {
         self.clock.stop();
         self.cancel_deadline.stop();
+        self.resize_settle.stop();
         self.session.borrow_mut().shutdown();
     }
 }

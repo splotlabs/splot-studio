@@ -1,0 +1,470 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+// The picture area and its transport controls. Values come from Rust; every
+// callback is an intent. Nothing here decodes or asks for pictures.
+
+import { Tokens } from "tokens.slint";
+import { FocusRing, KeyboardFocus } from "focus.slint";
+
+// What the picture area shows: nothing (no file), a quiet placeholder, a
+// picture, or why there is none.
+export enum StageState { none, loading, picture, unavailable }
+
+// A small drawn icon button of the transport row. Enter or Space activates
+// it; `tab-stop` false leaves it to the picture's own keys.
+export component IconButton inherits KeyboardFocus {
+    in property <string> label;
+    in property <string> description;
+    // Path commands in a 16x16 box, filled.
+    in property <string> icon;
+    in property <bool> tab-stop: true;
+    callback clicked();
+
+    width: 30px;
+    height: 30px;
+    focus-on-tab-navigation: root.tab-stop;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-description: root.description;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if root.enabled {
+            root.clicked();
+        }
+    }
+    key-pressed(event) => {
+        if root.enabled && (event.text == Key.Return || event.text == " ") {
+            root.clicked();
+            return accept;
+        }
+        reject
+    }
+
+    FocusRing {
+        shown: root.ring;
+        x: -3px;
+        y: -3px;
+        width: root.width + 6px;
+        height: root.height + 6px;
+        radius: Tokens.radius-medium;
+    }
+
+    Rectangle {
+        border-radius: Tokens.radius-medium;
+        background: touch.pressed && root.enabled ? Tokens.border : touch.has-hover && root.enabled ? Tokens.row-hover : transparent;
+        animate background { duration: Tokens.motion-short; }
+
+        Path {
+            width: 16px;
+            height: 16px;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            commands: root.icon;
+            fill: root.enabled ? Tokens.text : Tokens.text-disabled;
+            accessible-role: none;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// A short text toggle ("1:1"), drawn pressed in while on.
+export component ToggleChip inherits KeyboardFocus {
+    in property <string> text;
+    in property <string> label;
+    in property <string> description;
+    in property <bool> checked;
+    callback toggled();
+
+    height: 30px;
+    min-width: max(36px, chip-text.preferred-width + 2 * Tokens.space-2);
+    horizontal-stretch: 0;
+    accessible-role: checkbox;
+    accessible-label: root.label;
+    accessible-description: root.description;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if root.enabled {
+            root.toggled();
+        }
+    }
+    key-pressed(event) => {
+        if root.enabled && (event.text == Key.Return || event.text == " ") {
+            root.toggled();
+            return accept;
+        }
+        reject
+    }
+
+    FocusRing {
+        shown: root.ring;
+        x: -3px;
+        y: -3px;
+        width: root.width + 6px;
+        height: root.height + 6px;
+        radius: Tokens.radius-medium;
+    }
+
+    Rectangle {
+        border-radius: Tokens.radius-medium;
+        background: root.checked ? Tokens.row-selected : touch.has-hover && root.enabled ? Tokens.row-hover : transparent;
+        border-width: 1px;
+        border-color: root.checked && root.enabled ? Tokens.accent : Tokens.border;
+        animate background { duration: Tokens.motion-short; }
+
+        chip-text := Text {
+            text: root.text;
+            color: !root.enabled ? Tokens.text-disabled : root.checked ? Tokens.accent : Tokens.text-secondary;
+            font-size: Tokens.type-caption * 1rem;
+            font-weight: root.checked ? Tokens.weight-bold : Tokens.weight-semibold;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.toggled();
+        }
+    }
+}
+
+// The frame scrubber: a track, the part played in the accent colour, and a
+// knob. Left and Right step one frame, Page Up and Page Down a tenth, Home
+// and End go to the ends; dragging asks for frames as it goes (Rust keeps
+// one request in flight and asks for the latest position next).
+export component Scrubber inherits KeyboardFocus {
+    // The frame count, at least 2.
+    in property <int> count;
+    // The frame asked for, zero-based.
+    in property <float> value;
+    // "43 / 300", for screen readers.
+    in property <string> value-text;
+    callback seek(int);
+
+    property <float> last: max(1, root.count - 1);
+    property <float> drag;
+    property <float> shown: touch.pressed ? root.drag : root.value;
+    property <length> knob: 14px;
+    property <length> track-width: root.width - root.knob;
+
+    min-width: 48px;
+    height: 30px;
+    horizontal-stretch: 1;
+    accessible-role: slider;
+    accessible-label: "Frame";
+    accessible-value: root.value-text;
+    accessible-value-minimum: 0;
+    accessible-value-maximum: root.last;
+    accessible-value-step: 1;
+    accessible-enabled: root.enabled;
+    accessible-action-increment => {
+        root.go(root.value + 1);
+    }
+    accessible-action-decrement => {
+        root.go(root.value - 1);
+    }
+    accessible-action-set-value(text) => {
+        if text.is-float() {
+            root.go(text.to-float());
+        }
+    }
+
+    function go(frame: float) {
+        root.seek(round(max(0, min(root.last, frame))));
+    }
+
+    function at(x: length) -> float {
+        return max(0, min(1, (x - root.knob / 2) / max(1px, root.track-width))) * root.last;
+    }
+
+    key-pressed(event) => {
+        if !root.enabled {
+            return reject;
+        }
+        if event.text == Key.LeftArrow || event.text == Key.RightArrow {
+            root.keyboard-used();
+            root.go(root.value + (event.text == Key.LeftArrow ? -1 : 1));
+            return accept;
+        }
+        if event.text == Key.PageUp || event.text == Key.PageDown {
+            root.keyboard-used();
+            root.go(root.value + (event.text == Key.PageUp ? -1 : 1) * max(1, round(root.count / 10)));
+            return accept;
+        }
+        if event.text == Key.Home || event.text == Key.End {
+            root.keyboard-used();
+            root.go(event.text == Key.Home ? 0 : root.last);
+            return accept;
+        }
+        reject
+    }
+
+    FocusRing {
+        shown: root.ring;
+        x: -3px;
+        y: (root.height - self.height) / 2;
+        width: root.width + 6px;
+        height: root.knob + 10px;
+        radius: (root.knob + 4px) / 2;
+    }
+
+    track := Rectangle {
+        x: root.knob / 2;
+        y: (root.height - self.height) / 2;
+        width: root.track-width;
+        height: 4px;
+        border-radius: 2px;
+        background: Tokens.track;
+        border-width: 1px;
+        border-color: Tokens.border;
+
+        Rectangle {
+            x: 0;
+            width: parent.width * root.shown / root.last;
+            height: parent.height;
+            border-radius: 2px;
+            background: root.enabled ? Tokens.accent : Tokens.text-disabled;
+        }
+    }
+
+    Rectangle {
+        x: track.x + track.width * root.shown / root.last - root.knob / 2;
+        y: (root.height - self.height) / 2;
+        width: root.knob;
+        height: root.knob;
+        border-radius: root.knob / 2;
+        background: Tokens.selected;
+        border-width: 1px;
+        border-color: root.enabled ? Tokens.border-strong : Tokens.border;
+        drop-shadow-blur: 2px;
+        drop-shadow-offset-y: 1px;
+        drop-shadow-color: #00000033;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        changed pressed => {
+            if self.pressed {
+                root.focus();
+                root.drag = root.at(self.mouse-x);
+                root.go(root.drag);
+            }
+        }
+        moved => {
+            root.drag = root.at(self.mouse-x);
+            root.go(root.drag);
+        }
+    }
+}
+
+// A label pill over the picture.
+component Badge inherits Rectangle {
+    in property <string> text;
+    // The widest it may grow; the text elides beyond.
+    in property <length> limit: 400px;
+    height: badge-text.preferred-height + 6px;
+    width: min(badge-text.preferred-width + 2 * Tokens.space-2, root.limit);
+    border-radius: self.height / 2;
+    background: Tokens.badge;
+    accessible-role: none;
+
+    badge-text := Text {
+        x: Tokens.space-2;
+        width: parent.width - 2 * Tokens.space-2;
+        text: root.text;
+        color: Tokens.on-stage;
+        font-size: Tokens.type-caption * 1rem;
+        font-weight: Tokens.weight-semibold;
+        vertical-alignment: center;
+        overflow: elide;
+        accessible-role: none;
+    }
+}
+
+// The picture area: 16:9, the picture letterboxed (never stretched) or at
+// actual pixels, a label that says which side is visible, and the keys that
+// drive it. Press and hold (or hold O) shows the original; Space plays or
+// pauses, Left and Right step, Home and End jump. Nothing here animates
+// forever: the placeholder is still text.
+export component Stage inherits KeyboardFocus {
+    in property <StageState> state;
+    in property <image> picture;
+    in property <bool> native;
+    in property <string> badge;
+    in property <string> hint;
+    in property <string> message;
+    in property <bool> can-compare;
+    in property <bool> comparing;
+    in property <bool> navigable;
+    in property <string> accessible-text;
+    callback compare(bool);
+    callback step(int);
+    callback seek-start();
+    // O is down: its release lets go, whatever Rust says meanwhile.
+    property <bool> key-held;
+    callback seek-end();
+    callback play-pause();
+    callback pan(length, length);
+
+    accessible-role: image;
+    accessible-label: root.accessible-text;
+    accessible-description: (root.can-compare ? "Press and hold, or hold O, to see the original. " : "")
+        + (root.navigable ? "Space plays or pauses. Left and Right step one frame; Home and End go to the first and last." : "");
+    // Screen readers cannot hold: activating switches sides until activated again.
+    accessible-action-default => {
+        if root.can-compare || root.comparing {
+            root.compare(!root.comparing);
+        }
+    }
+    key-pressed(event) => {
+        if (event.text == "o" || event.text == "O") && (root.can-compare || root.key-held) {
+            root.keyboard-used();
+            if !root.key-held {
+                root.key-held = true;
+                root.compare(true);
+            }
+            return accept;
+        }
+        if !root.navigable {
+            return reject;
+        }
+        if event.text == " " {
+            root.keyboard-used();
+            root.play-pause();
+            return accept;
+        }
+        if event.text == Key.LeftArrow {
+            root.keyboard-used();
+            root.step(-1);
+            return accept;
+        }
+        if event.text == Key.RightArrow {
+            root.keyboard-used();
+            root.step(1);
+            return accept;
+        }
+        if event.text == Key.Home {
+            root.keyboard-used();
+            root.seek-start();
+            return accept;
+        }
+        if event.text == Key.End {
+            root.keyboard-used();
+            root.seek-end();
+            return accept;
+        }
+        reject
+    }
+    key-released(event) => {
+        if (event.text == "o" || event.text == "O") && root.key-held {
+            root.key-held = false;
+            root.compare(false);
+            return accept;
+        }
+        reject
+    }
+    focus-lost => {
+        if root.comparing || root.key-held {
+            root.key-held = false;
+            root.compare(false);
+        }
+    }
+
+    FocusRing {
+        shown: root.ring;
+        x: -3px;
+        y: -3px;
+        width: root.width + 6px;
+        height: root.height + 6px;
+        radius: Tokens.radius-medium + 2px;
+    }
+
+    // Without a picture to show, the area is a quiet, short panel of the
+    // card's own colours instead of a large black frame.
+    property <bool> quiet: root.state == StageState.unavailable;
+
+    Rectangle {
+        border-radius: Tokens.radius-medium + 2px;
+        background: root.quiet ? Tokens.track : Tokens.stage;
+        border-width: root.quiet ? 1px : 0px;
+        border-color: Tokens.border;
+        clip: true;
+
+        if root.state == StageState.picture && !root.native: Image {
+            width: parent.width;
+            height: parent.height;
+            source: root.picture;
+            image-fit: contain;
+            accessible-role: none;
+        }
+
+        // Actual pixels: one picture pixel per physical pixel, centred.
+        if root.state == StageState.picture && root.native: Image {
+            width: root.picture.width * 1phx;
+            height: root.picture.height * 1phx;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            source: root.picture;
+            accessible-role: none;
+        }
+
+        if root.state == StageState.loading || root.state == StageState.unavailable: Text {
+            x: Tokens.space-6;
+            width: parent.width - 2 * Tokens.space-6;
+            height: parent.height;
+            text: root.message;
+            color: root.quiet ? Tokens.text : Tokens.on-stage-secondary;
+            font-size: Tokens.type-caption * 1rem;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            accessible-role: none;
+        }
+
+        if root.badge != "": Badge {
+            x: Tokens.space-2;
+            y: Tokens.space-2;
+            limit: parent.width - 2 * Tokens.space-2;
+            text: root.badge;
+        }
+
+        if root.hint != "": Badge {
+            limit: parent.width - 2 * Tokens.space-2;
+            x: parent.width - self.width - Tokens.space-2;
+            y: parent.height - self.height - Tokens.space-2;
+            text: root.hint;
+        }
+    }
+
+    touch := TouchArea {
+        changed pressed => {
+            if self.pressed {
+                root.focus();
+            }
+            if root.can-compare || root.comparing {
+                root.compare(self.pressed);
+            }
+        }
+        scroll-event(event) => {
+            if root.native {
+                root.pan(-event.delta-x, -event.delta-y);
+                return accept;
+            }
+            reject
+        }
+    }
+}

@@ -331,8 +331,14 @@ fn a_job_runs_once_with_ordered_events() -> TestResult {
     let dst = dir.path().join("out.obu");
     let job = spec(&src, &dst, OutputKind::Av2AnnexB);
     let mut live = Live::spawn()?;
-    live.send(7, Command::Start { job: job.clone() })?;
-    live.send(8, Command::Start { job })?;
+    live.send(
+        7,
+        Command::Start {
+            job: job.clone(),
+            live: None,
+        },
+    )?;
+    live.send(8, Command::Start { job, live: None })?;
     let got = live.read_until(terminal)?;
     drop(live.stdin.take());
     assert!(read_message::<Event>(&mut live.stdout)?.is_none());
@@ -403,6 +409,7 @@ fn cancel_is_acknowledged_then_the_job_stops_clean() -> TestResult {
         1,
         Command::Start {
             job: spec(&src, &dst, OutputKind::Ivf),
+            live: None,
         },
     )?;
     live.read_until(|e| matches!(e, Event::Progress { .. }))?;
@@ -448,6 +455,7 @@ fn stdin_eof_mid_job_cancels() -> TestResult {
         1,
         Command::Start {
             job: spec(&src, &dst, OutputKind::Ivf),
+            live: None,
         },
     )?;
     live.read_until(|e| matches!(e, Event::Progress { .. }))?;
@@ -478,6 +486,7 @@ fn a_killed_worker_publishes_nothing_and_leaves_its_temporary_file() -> TestResu
         1,
         Command::Start {
             job: spec(&src, &dst, OutputKind::Ivf),
+            live: None,
         },
     )?;
     let seen = live.read_until(|e| matches!(e, Event::Progress { .. }))?;
@@ -522,6 +531,7 @@ fn a_non_reading_peer_neither_deadlocks_nor_loses_the_terminal() -> TestResult {
         1,
         Command::Start {
             job: spec(&src, &dst, OutputKind::Ivf),
+            live: None,
         },
     )?;
     let mut stdin = live.stdin.take().ok_or("no stdin")?;
@@ -586,7 +596,10 @@ fn help_is_truthful() -> TestResult {
     let output = run(&["--help"], &[])?;
     assert_eq!(output.status.code(), Some(0));
     let text = String::from_utf8(output.stdout)?;
-    assert!(text.contains("worker") && text.contains("encode"), "{text}");
+    assert!(
+        text.contains("worker") && text.contains("encode") && text.contains("preview"),
+        "{text}"
+    );
     Ok(())
 }
 
@@ -693,6 +706,7 @@ fn a_cancel_inside_a_long_codec_call_is_bounded() -> TestResult {
             1,
             Command::Start {
                 job: spec(&src, &dst, OutputKind::Ivf),
+                live: None,
             },
         )?;
         // The first unit is out; the next call codes the whole mini-GOP.
@@ -756,6 +770,7 @@ fn a_cancel_racing_completion_has_one_outcome() -> TestResult {
             1,
             Command::Start {
                 job: spec(&src, &dst, OutputKind::Ivf),
+                live: None,
             },
         )?;
         std::thread::sleep(Duration::from_millis(round));
@@ -891,6 +906,7 @@ fn without_a_tool_only_y4m_is_read() -> TestResult {
             4,
             Command::Start {
                 job: spec(&media, &dst, OutputKind::Ivf),
+                live: None,
             },
         )?,
     )?;
@@ -933,10 +949,22 @@ fn tools_beside_the_engine_are_bundled() -> TestResult {
             std::fs::copy(&found, &link)?;
         }
     }
-    let output = Process::new(&engine)
-        .arg("--version")
-        .env_remove(studio_engine::media::SYSTEM_OPT_IN)
-        .output()?;
+    // Another test forking at this moment can still hold the copy open for
+    // writing, and running it then fails as "text file busy": try again.
+    let mut tries = 0;
+    let output = loop {
+        let run = Process::new(&engine)
+            .arg("--version")
+            .env_remove(studio_engine::media::SYSTEM_OPT_IN)
+            .output();
+        match run {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            other => break other?,
+        }
+    };
     let text = String::from_utf8(output.stdout)?;
     assert!(text.contains("(Bundled,"), "{text}");
     Ok(())
@@ -961,6 +989,7 @@ fn a_cancel_leaves_no_ffmpeg_behind() -> TestResult {
         1,
         Command::Start {
             job: spec(&src, &dst, OutputKind::Ivf),
+            live: None,
         },
     )?;
     live.read_until(|e| matches!(e, Event::Progress { progress } if progress.frames_encoded >= 1))?;
@@ -1004,6 +1033,7 @@ fn a_killed_worker_leaves_no_ffmpeg_running() -> TestResult {
         1,
         Command::Start {
             job: spec(&src, &dst, OutputKind::Ivf),
+            live: None,
         },
     )?;
     live.read_until(|e| matches!(e, Event::Progress { .. }))?;

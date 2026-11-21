@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+// Keyboard focus for Splot-drawn controls: the ring, and the scope that
+// shows it only when focus came from the keyboard.
+
+import { Tokens } from "tokens.slint";
+
+// The outline of a Splot-drawn control that has keyboard focus.
+export component FocusRing inherits Rectangle {
+    in property <bool> shown;
+    in property <length> radius;
+    // Placed by the user: 3px outside the control on every side.
+    border-radius: root.radius + 3px;
+    border-width: root.shown ? 2px : 0px;
+    border-color: Tokens.focus-ring;
+}
+
+// Focus from the keyboard shows a ring; focus from a click does not.
+export component KeyboardFocus inherits FocusScope {
+    out property <bool> ring: self.has-focus && self.from-keyboard;
+    property <bool> from-keyboard;
+    focus-gained(reason) => {
+        self.from-keyboard = reason == FocusReason.tab-navigation;
+    }
+    focus-lost => {
+        self.from-keyboard = false;
+    }
+
+    // Lets a subclass mark keyboard use after a click focused it.
+    public function keyboard-used() {
+        self.from-keyboard = true;
+    }
+}

@@ -1,8 +1,8 @@
 # Status
 
-**Phase:** STUDIO-04 complete on Linux x86_64.
+**Phase:** STUDIO-05 complete on Linux x86_64.
 **Updated:** 2026-11-21.
-**Next prompt:** `docs/planning/studio-v1/prompts/05-PREVIEW-AND-POLISH.md`.
+**Next prompt:** `docs/planning/studio-v1/prompts/06-RELEASE-HARDENING.md`.
 
 ## What works
 
@@ -49,6 +49,27 @@
   never overwrites or claims it.
 - **One instance:** a lock file in the data folder; a second instance says the
   app is already open and exits without touching the journal.
+- **Preview (STUDIO-05):** a 16:9 picture at the top of the card. It shows a
+  poster after a file is added, the **real encoded picture** while converting
+  (the worker decodes its own packets with the Splot decoder, at most 4 a
+  second) and the result when done. Press and hold (or hold O) shows the
+  original at the same frame and view. Scrubber, frame stepping, video-only
+  playback at the stream's own timing, Fit / 1:1, thumbnails in the file rows.
+- **How pictures travel:** a long-lived `splot-studio-engine preview` process
+  serves pictures and playback; a picture is a small 8-bit RGB copy (at most
+  1280×720), a JSON header followed by raw bytes on the same pipe. Requests
+  carry generation IDs; stale answers are dropped; latest-picture slots, never
+  queues. One display transform for source, result and live pictures; an
+  unstated matrix is assumed by size and labelled "colours assumed". SDR
+  approximation, not a reference display, and the app says so.
+- **Bounds:** engine picture cache 64 MiB, app cache 32 MiB, preview decoder 2
+  threads, live decoder 1 thread; the encode never waits for a picture and its
+  output is byte-identical with and without live pictures.
+- **Seeking:** Y4M by offset; other files seek to the key frame before the
+  frame (checked per seek, falling back to exact counting; MPEG-TS always
+  counts); results restart at most one key-frame interval (120 frames) back.
+- **Running it:** `cargo xtask run --release` builds the app and its engine
+  together; `cargo run -p studio-app` alone can start a stale engine.
 - Everything from STUDIO-02 (safe publish, verification, bounded cancel) applies
   to both routes. Cancel and a killed worker leave no `ffmpeg`
   child (Linux).
@@ -61,7 +82,7 @@ full range and therefore refused); non-square pixels; rotation, cropping, stereo
 or spherical side data; RGB, alpha, other bit depths; size, format or colour
 changing mid-stream; encrypted streams; network or playlist inputs; frames over
 the size or 8 GiB memory limits. No audio, subtitles, resize, target size,
-preview, reordering, pause or background continuation: closing the window stops
+reordering, pause or background continuation: closing the window stops
 the current file.
 
 The pinned encoder writes no colour description, so the output never says how to
@@ -86,7 +107,11 @@ interpret its samples (splotlabs/splot#1777); the app discloses this per source.
 - **STUDIO-04:** GUI-owned durable queue in one atomically written JSON file;
   no supervisor process, no socket IPC, no SQLite; nothing resumes by itself
   after a restart; Permute-style file list.
-- **Preview** (thumbnail, live frame) stays in STUDIO-05.
+- **STUDIO-05 (2026-11-21):** stills plus playback; the live frame is the real
+  encoded picture; the preview sits in the card, not in its own window.
+  Pictures share the control pipe (header JSON, raw pixels after it) instead
+  of a physically separate channel: one reader, one ordering, no base64. No
+  GPU path: the software image path met the measured needs.
 - Phase PRs are opened and merged by the agent once CI is green.
 - `splot-*` dependencies track `main` until Splot has releases; codec
   limitations are reported and fixed in the Splot repository.
@@ -118,11 +143,22 @@ Cancel (release, over the worker pipes, sent mid-mini-GOP): `Cancelled` after
 10, 12–14 ms for a 720p H.264 MP4 (`ffmpeg` reaped first); always cooperative,
 the worker kept serving until its input closed.
 
+Preview (release, same host under other load; `docs/evidence/studio-05/`):
+720p playback in real time for Y4M, MP4 and 8-bit results, 26 of 30 frames for
+a 10-bit result. Cold far frame of a 10-minute clip 242 ms (MP4) / 588 ms
+(MKV); next frame 2–5 ms; result backward seek 256 / 420 ms (8 / 10 bit).
+Live pictures: overhead inside run-to-run noise (about 20 % on this loaded
+host), estimated 1–2 % of job CPU, 40–80 MB more peak RSS; the first one
+arrives when the encoder emits its first packet (32–36 s at 720p preset 10).
+Idle with a poster shown: 0 CPU ticks in 20 s. UI thread during an encode:
+posted closure waited p95 under 0.2 ms, max 4.9 ms.
+
 ## Checks run (Linux x86_64, Wayland)
 
 - `cargo xtask ci` — pass: fmt, SPDX headers, dependency direction, clippy
-  `-D warnings`, 224 tests (domain 10, engine 24 + 15 + 15 + 27, app 108 + 8 + 1
-  + 13 against the real engine, xtask 3). Clippy is also clean for
+  `-D warnings`, 295 tests (domain 16, engine 38 + 15 + 6 + 15 + 14 + 1 + 27,
+  app 134 + 3 + 8 + 1 + 1 + 13 against the real engine, xtask 3). Clippy is
+  also clean for
   `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`.
 - Real-process fault tests: worker killed mid-job; app killed mid-job (a real
   second process, SIGKILL); app death during publication; destination taken
@@ -131,10 +167,23 @@ the worker kept serving until its input closed.
 - Real app by hand: two files on the command line → two waiting items in the
   journal; a second instance left the journal byte-identical; relaunch restored
   the list and ran nothing.
-- Evidence: `docs/evidence/studio-04/` (Slint renderer snapshots).
+- Evidence: `docs/evidence/studio-04/` and `docs/evidence/studio-05/` (Slint
+  renderer snapshots, engine and app measurements).
 
 ## Not tested / open
 
+- **Preview:** press-and-hold, scroll-panning in 1:1 and dragging the scrubber
+  are unexercised in the real window (keys and callbacks are tested headless).
+  Minimizing does not stop playback on Wayland (no signal). Live pictures
+  cannot be stopped or resized mid-job, so a minimized window still costs the
+  live decode. About 40 MB of app memory growth on the first passes through a
+  full cache is unexplained (it levels off). 1080p/4K preview speed unmeasured.
+  The preview trusts the frame-period rule without the job's full scan, so a
+  variable-rate file (which a job refuses) shows the nearest frame.
+  `preview.rs` in the app is 1,113 lines.
+- **Splot decoder gaps** behind the seek costs: no decoder reset/seek or
+  cancel, no random-access test or frame type on pictures, Annex B reader
+  yields single OBUs, no file seek index (to be filed upstream).
 - **Clicking through the real window** is still unexercised on this host. The
   confirmation's keyboard behaviour is tested against the real compiled window
   running headless.

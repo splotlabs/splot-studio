@@ -17,7 +17,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
-use splot_encode::{BitDepth, CancelToken, Config, Encoder, Preset, RateControlMode, SourceFrame};
+use splot_encode::{
+    BitDepth, CancelToken, Config, Encoder, PixelFormat, Preset, RateControlMode, SourceFrame,
+};
 use studio_domain::job::{
     Check, CheckOutcome, Failure, FailureCode, JobReport, JobSpec, Progress, SourceReader, Stage,
     WirePath,
@@ -28,7 +30,7 @@ use thiserror::Error;
 
 use crate::output::{self, PacketSink};
 use crate::source::{self, Selection, Source};
-use crate::verify;
+use crate::{live, picture, verify};
 use splot_encode::y4m::Y4mHeader;
 
 /// The stack of a job thread. The decode driver used by verification
@@ -85,6 +87,17 @@ pub trait Control: Sync {
     /// Claims publication. `false` means a cancel was accepted first.
     fn claim_publish(&self) -> bool {
         !self.cancel_flag().load(Ordering::Relaxed)
+    }
+
+    /// Encoding starts: what live pictures need to know of the stream.
+    fn stream_started(&self, stream: live::Stream) {
+        let _ = stream;
+    }
+
+    /// A packet's temporal unit was written to the output. Must return at
+    /// once and only read `unit`.
+    fn packet_written(&self, unit: &[u8]) {
+        let _ = unit;
     }
 }
 
@@ -170,6 +183,16 @@ fn execute(
         });
     }
     source.start(cancel)?;
+    control.stream_started(live::Stream {
+        basis: picture::basis(
+            source.matrix,
+            source.header.format == PixelFormat::Monochrome,
+            source.header.width,
+            source.header.height,
+        ),
+        frame_rate: source.header.frame_rate,
+        frame_count: source.frame_count(),
+    });
     report(Event::Stage {
         stage: Stage::Encoding,
     });
@@ -311,7 +334,7 @@ fn encode(
         encoder.send_frame(frame).map_err(encoder_error)?;
         progress.frames_read += 1;
         report(Event::Progress { progress });
-        drain(&mut encoder, &mut sink, &mut progress, cancel, report)?;
+        drain(&mut encoder, &mut sink, &mut progress, control, report)?;
     }
     if progress.frames_read == 0 {
         return Err(Stop::failed(
@@ -323,7 +346,7 @@ fn encode(
         stage: Stage::Finalizing,
     });
     encoder.flush().map_err(encoder_error)?;
-    drain(&mut encoder, &mut sink, &mut progress, cancel, report)?;
+    drain(&mut encoder, &mut sink, &mut progress, control, report)?;
     if progress.frames_encoded != progress.frames_read {
         return Err(Stop::failed(
             FailureCode::Encoder,
@@ -345,12 +368,14 @@ fn drain(
     encoder: &mut Encoder,
     sink: &mut PacketSink<BufWriter<&File>>,
     progress: &mut Progress,
-    cancel: &AtomicBool,
+    control: &dyn Control,
     report: &mut dyn FnMut(Event),
 ) -> Result<(), Stop> {
+    let cancel = control.cancel_flag();
     while let Some(packet) = encoder.receive_packet().map_err(encoder_error)? {
         sink.write(&packet)
             .map_err(|e| output::output(format!("cannot write the output: {e}")))?;
+        control.packet_written(&packet.data);
         progress.frames_encoded += 1;
         progress.bytes_written = sink.bytes();
         report(Event::Progress {

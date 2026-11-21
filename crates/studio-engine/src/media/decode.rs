@@ -16,6 +16,7 @@ use studio_domain::job::FailureCode;
 
 use super::probe::Probed;
 use super::process::{self, Running};
+use super::seek::Start;
 use super::{Program, Tool, command};
 use crate::job::Stop;
 
@@ -25,14 +26,38 @@ pub struct Decoder {
     running: Running,
 }
 
-/// Starts `ffmpeg` on the selected stream of `path`.
+/// Starts `ffmpeg` on the selected stream of `path` at `start`: a frame
+/// counted as the encode counts them (every frame the decoder outputs), or
+/// a time ([`Start::Time`]). Frames before it are decoded and dropped by
+/// the `select` filter, which passes the rest unchanged.
 ///
 /// # Errors
 /// [`FailureCode::InvalidSource`] when it cannot start.
-pub fn start(tool: &Tool, path: &Path, probed: &Probed) -> Result<(Decoder, ChildStdout), Stop> {
+pub fn start(
+    tool: &Tool,
+    path: &Path,
+    probed: &Probed,
+    start: &Start,
+) -> Result<(Decoder, ChildStdout), Stop> {
     let map = format!("0:{}", probed.facts.video_stream);
-    let mut ffmpeg = command(tool, Program::Ffmpeg, path, &["-nostdin", "-nostats"])?;
+    let mut input = vec!["-nostdin", "-nostats"];
+    if let Start::Time { seek, .. } = start {
+        input.extend(["-copyts", "-noaccurate_seek"]);
+        if let Some(seek) = seek {
+            input.extend(["-seek_timestamp", "1", "-ss", seek]);
+        }
+    }
+    let mut ffmpeg = command(tool, Program::Ffmpeg, path, &input)?;
     ffmpeg.args(["-map", &map, "-an", "-sn", "-dn"]);
+    match start {
+        Start::Count(0) => {}
+        Start::Count(first) => {
+            ffmpeg.args(["-vf", &format!("select=gte(n\\,{first})")]);
+        }
+        Start::Time { from, .. } => {
+            ffmpeg.args(["-vf", &format!("select=gte(t\\,{from})")]);
+        }
+    }
     ffmpeg.args(["-fps_mode", "passthrough", "-noautoscale"]);
     if let Some(planar) = probed.repack {
         ffmpeg.args(["-pix_fmt", planar]);
@@ -50,6 +75,12 @@ pub fn start(tool: &Tool, path: &Path, probed: &Probed) -> Result<(Decoder, Chil
 }
 
 impl Decoder {
+    /// Kills the decode from another thread.
+    #[must_use]
+    pub fn killer(&self) -> process::Killer {
+        self.running.killer()
+    }
+
     /// After the pipe ended: the decode must have exited cleanly.
     ///
     /// # Errors
