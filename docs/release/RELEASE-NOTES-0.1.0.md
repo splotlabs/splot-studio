@@ -2,8 +2,8 @@
 
 **Status: draft for a test build, not a release.** Nothing has been published.
 The packages are not code-signed or notarized and have not been installed on a
-clean machine. What remains before a real release is in
-[`CHECKLIST.md`](CHECKLIST.md).
+clean machine. What remains before a real release is tracked in
+[#30](https://github.com/splotlabs/splot-studio/issues/30).
 
 ## What it does
 
