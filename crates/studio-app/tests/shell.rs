@@ -17,7 +17,7 @@ use std::time::Instant;
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::platform::{Key, Platform, WindowAdapter, WindowEvent};
 use slint::{
-    ComponentHandle, LogicalPosition, LogicalSize, PlatformError, Rgb8Pixel, SharedString,
+    ComponentHandle, LogicalPosition, PhysicalSize, PlatformError, Rgb8Pixel, SharedString,
 };
 use studio_app::analysis::Analysis;
 use studio_app::recovery::{Disk, Kind};
@@ -128,9 +128,7 @@ fn the_switch_leads_the_keys_and_a_round_trip_keeps_encode() {
     slint::platform::set_platform(Box::new(Headless(platform.clone())))
         .unwrap_or_else(|e| unreachable!("{e}"));
     let window = studio_app::new_window().unwrap_or_else(|e| unreachable!("{e}"));
-    window
-        .window()
-        .set_size(LogicalSize::new(SIZE.0 as f32, SIZE.1 as f32));
+    window.window().set_size(PhysicalSize::new(SIZE.0, SIZE.1));
     window.show().unwrap_or_else(|e| unreachable!("{e}"));
     // Rust owns the title (no default); render sets it.
     assert_eq!(window.get_workspace_title(), "");

@@ -386,6 +386,86 @@ fn a_run_of_three_files_with_one_unreadable_publishes_two() {
     assert_eq!(saved.settings.preset.get(), 10);
 }
 
+/// A converted file opens in Analyze through the real inspect process with
+/// the identity the job verified, while the queue, its journal and the
+/// next conversion carry on untouched.
+#[test]
+fn open_in_analyze_reads_the_result_and_leaves_the_queue_alone() {
+    use studio_app::analysis::{Origin, Phase};
+    use studio_app::workspace::Workspace;
+    let scratch = Scratch::new("analyze");
+    let a = scratch.media("a.y4m");
+    write_y4m(&a, 64, 36, 3);
+    let b = scratch.media("b.y4m");
+    write_y4m(&b, 64, 36, 3);
+    let mut h = Harness::open(&scratch);
+    h.add(std::slice::from_ref(&a));
+    h.dispatch(Intent::ConvertRequested);
+    h.pump_until("a converted", JOB_TIMEOUT, |s| !s.running());
+    assert_eq!(h.states(), [ItemState::Completed]);
+    let report = match h.state().items()[0].ending() {
+        Some(Ending::Completed(report)) => report.clone(),
+        other => unreachable!("{other:?}"),
+    };
+    // b waits; then the result goes to Analyze.
+    h.add(std::slice::from_ref(&b));
+    let journal = Harness::wait_for_journal(&scratch, "b.y4m");
+    let items = h.state().items().to_vec();
+    h.dispatch(Intent::RowSelected(0));
+    h.session.analyze_result(Instant::now());
+    assert_eq!(h.state().workspace(), Workspace::Analyze);
+    let deadline = Instant::now() + ANSWER_TIMEOUT;
+    while h
+        .session
+        .analysis()
+        .shown()
+        .is_some_and(|d| *d.phase() == Phase::Opening)
+    {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let (route, delivery) =
+            h.rx.recv_timeout(left)
+                .unwrap_or_else(|e| unreachable!("waiting for the open: {e}"));
+        h.session.deliver(route, delivery, Instant::now());
+    }
+    let doc = h
+        .session
+        .analysis()
+        .shown()
+        .unwrap_or_else(|| unreachable!());
+    let summary = doc
+        .summary()
+        .unwrap_or_else(|| unreachable!("{:?}", doc.phase()));
+    assert_eq!(summary.fingerprint.len, report.bytes);
+    assert_eq!(summary.packets, 3);
+    assert_eq!(doc.path(), scratch.media("a.ivf"));
+    assert!(
+        matches!(doc.origin(), Origin::Result(r) if r.source == a && r.bytes == report.bytes && r.item == items[0].id()),
+        "{:?}",
+        doc.origin()
+    );
+    assert!(doc.notice().is_none(), "{:?}", doc.notice());
+    // Nothing in the queue moved, and the journal was not rewritten.
+    assert_eq!(h.state().items(), items.as_slice());
+    assert_eq!(
+        fs::read_to_string(scratch.journal()).unwrap_or_default(),
+        journal
+    );
+    // The next conversion runs as before, Analyze still open.
+    h.dispatch(Intent::ConvertRequested);
+    h.pump_until("b converted", JOB_TIMEOUT, |s| !s.running());
+    assert_eq!(h.states(), [ItemState::Completed, ItemState::Completed]);
+    assert!(
+        h.session
+            .analysis()
+            .shown()
+            .is_some_and(|d| d.summary().is_some())
+    );
+    assert_eq!(
+        scratch.media_entries(),
+        ["a.ivf", "a.y4m", "b.ivf", "b.y4m"]
+    );
+}
+
 // Linux only: the worker is found (and killed) through `/proc`.
 #[cfg(target_os = "linux")]
 #[test]

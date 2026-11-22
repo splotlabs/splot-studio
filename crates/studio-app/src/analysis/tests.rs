@@ -238,7 +238,7 @@ fn opening_asks_for_the_first_page_and_byte_window() {
                 Command::AnalysisBytes {
                     document: 1,
                     offset: 0,
-                    len: 192,
+                    len: 128,
                 },
             ]
         ),
@@ -248,7 +248,10 @@ fn opening_asks_for_the_first_page_and_byte_window() {
     let doc = doc(&analysis);
     assert_eq!(doc.total(), Some(40));
     assert_eq!(doc.row(13).map(|r| r.index), Some(13));
-    assert_eq!(doc.bytes().data.as_ref().map(Vec::len), Some(192));
+    assert_eq!(
+        doc.bytes().data.as_ref().map(Vec::len),
+        usize::try_from(WINDOW_BYTES).ok()
+    );
     // Nothing is selected until the user selects.
     assert!(doc.selected().is_none());
 }
@@ -261,7 +264,7 @@ fn a_row_and_a_byte_of_it_resolve_to_one_selection() {
     let effects = analysis.input(Input::RowClicked(3));
     engine.settle(&mut analysis, effects);
     assert_eq!(selected(&analysis), Some((3, Position::Row(3))));
-    // OBU 3 starts at byte 27; the window shows 0..192.
+    // OBU 3 starts at byte 27, inside the first window.
     assert_eq!(doc(&analysis).bytes().cursor, 27);
     assert!(!doc(&analysis).can_go_back());
 
@@ -495,13 +498,14 @@ fn a_move_waits_for_its_row() {
     assert!(selected(&analysis).is_none());
     assert!(matches!(
         commands(&effects)[..],
-        [Command::AnalysisPage { first: 19_986, .. }]
+        [Command::AnalysisPage { first, .. }] if *first == 20_000 - VISIBLE_ROWS
     ));
     engine.settle(&mut analysis, effects);
     assert_eq!(selected(&analysis), Some((19_999, Position::Row(19_999))));
     let effects = analysis.input(Input::Move(Step::PageUp));
     engine.settle(&mut analysis, effects);
-    assert_eq!(selected(&analysis), Some((19_986, Position::Row(19_986))));
+    let up = 19_999 - (VISIBLE_ROWS - 1);
+    assert_eq!(selected(&analysis), Some((up, Position::Row(up))));
 }
 
 #[test]
@@ -535,7 +539,10 @@ fn the_byte_cursor_moves_the_window_by_lines() {
     let bytes = doc(&analysis).bytes();
     assert_eq!(bytes.cursor, 899);
     assert_eq!(bytes.offset, 896 - (WINDOW_LINES - 1) * LINE_BYTES);
-    assert_eq!(bytes.data.as_ref().map(Vec::len), Some(900 - 720));
+    assert_eq!(
+        bytes.data.as_ref().map(Vec::len),
+        usize::try_from(900 - bytes.offset).ok()
+    );
     let effects = analysis.input(Input::Cursor(Step::Home));
     engine.settle(&mut analysis, effects);
     assert_eq!(

@@ -84,6 +84,8 @@ export global Analysis {
     in property <string> hidden-note;
 
     in property <[NavRow]> rows;
+    // How many rows the navigator shows; Rust sends at most this many.
+    in property <int> visible-rows: 16;
     in property <int> total-rows;
     in property <int> top-row;
     in property <bool> can-back;
@@ -138,7 +140,7 @@ export global Analysis {
 // right scroll.
 component Navigator inherits KeyboardFocus {
     in property <length> row-height: 24px;
-    in property <int> visible-rows: 16;
+    property <int> visible-rows: Analysis.visible-rows;
 
     property <int> count: Analysis.rows.length;
     property <length> track: root.visible-rows * root.row-height;

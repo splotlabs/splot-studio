@@ -39,6 +39,7 @@ use studio_domain::analysis::{
 use studio_domain::job::WirePath;
 use studio_domain::protocol::{Command, Event};
 
+mod bytes;
 mod document;
 #[cfg(test)]
 mod tests;
@@ -52,7 +53,7 @@ use document::{Place, in_window, line_of};
 pub const MAX_DOCUMENTS: usize = 4;
 
 /// Rows the navigator shows at once; only these are drawn.
-pub const VISIBLE_ROWS: u64 = 14;
+pub const VISIBLE_ROWS: u64 = 16;
 
 /// Rows asked for in one page request.
 pub const PAGE_ROWS: u32 = 64;
@@ -64,7 +65,7 @@ pub const KEPT_ROWS: u64 = 1024;
 pub const LINE_BYTES: u64 = 16;
 
 /// Lines of the byte view; the byte window is this many lines.
-pub const WINDOW_LINES: u64 = 12;
+pub const WINDOW_LINES: u64 = 8;
 
 /// History entries kept per document.
 pub const HISTORY: usize = 64;
@@ -212,6 +213,12 @@ impl Analysis {
     #[must_use]
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
+    }
+
+    /// Whether a request to the inspect process is not answered yet.
+    #[must_use]
+    pub fn waiting(&self) -> bool {
+        !self.pending.is_empty()
     }
 
     /// Whether anything changed since the last call.
@@ -886,72 +893,6 @@ impl Analysis {
         }
     }
 
-    fn move_cursor(&mut self, at: usize, step: Step, out: &mut Vec<Effect>) {
-        let doc = &mut self.documents[at];
-        let Some(len) = doc.len().filter(|l| *l > 0) else {
-            return;
-        };
-        let cursor = doc.bytes.cursor;
-        let back = |n: u64| cursor.saturating_sub(n);
-        let on = |n: u64| cursor.saturating_add(n).min(len - 1);
-        doc.bytes.cursor = match step {
-            Step::Left => back(1),
-            Step::Right => on(1),
-            Step::Up => back(LINE_BYTES),
-            Step::Down => on(LINE_BYTES),
-            Step::PageUp => back(WINDOW_BYTES),
-            Step::PageDown => on(WINDOW_BYTES),
-            Step::Home => 0,
-            Step::End => len - 1,
-        };
-        let cursor = doc.bytes.cursor;
-        let offset = doc.bytes.offset;
-        let shown = if cursor < offset {
-            line_of(cursor)
-        } else if cursor >= offset.saturating_add(WINDOW_BYTES) {
-            line_of(cursor).saturating_sub(WINDOW_BYTES - LINE_BYTES)
-        } else {
-            offset
-        };
-        if shown != offset {
-            doc.bytes.offset = shown;
-            doc.bytes.data = None;
-        }
-        self.fetch_bytes(at, out);
-    }
-
-    fn go_to(&mut self, at: usize, text: &str, out: &mut Vec<Effect>) {
-        let doc = &mut self.documents[at];
-        let Some(len) = doc.len() else {
-            return;
-        };
-        match parse_offset(text).filter(|o| *o < len) {
-            Some(offset) => {
-                doc.notice = None;
-                doc.bytes.cursor = offset;
-                if !in_window(doc.bytes.offset, offset) {
-                    doc.bytes.offset = line_of(offset);
-                    doc.bytes.data = None;
-                }
-                self.locate(
-                    at,
-                    LocateTarget::Offset { offset },
-                    Purpose::Select { from_list: false },
-                    out,
-                );
-                self.fetch_bytes(at, out);
-            }
-            None => {
-                doc.notice = Some(format!(
-                    "\u{201c}{}\u{201d} is not a byte of this file. Type 0 to {} or 0x0 to 0x{:X}.",
-                    text.trim(),
-                    len.saturating_sub(1),
-                    len.saturating_sub(1)
-                ));
-            }
-        }
-    }
-
     /// Keeps `position` among the visible rows.
     fn reveal(&mut self, at: usize, position: u64) {
         let doc = &mut self.documents[at];
@@ -1003,33 +944,6 @@ impl Analysis {
                 },
             );
         }
-    }
-
-    /// Asks for the byte window if it is shown and not read or asked for.
-    fn fetch_bytes(&mut self, at: usize, out: &mut Vec<Effect>) {
-        let doc = &mut self.documents[at];
-        let Some(len) = doc.len() else {
-            return;
-        };
-        let offset = doc.bytes.offset;
-        if !doc.bytes.shown
-            || doc.bytes.data.is_some()
-            || doc.bytes.asked.is_some_and(|(_, o)| o == offset)
-            || offset >= len
-        {
-            return;
-        }
-        // At most WINDOW_BYTES, which MAX_BYTE_RANGE covers.
-        let count = u32::try_from((len - offset).min(WINDOW_BYTES)).unwrap_or(1);
-        let document = doc.id;
-        let id = self.send(document, Asked::Bytes { offset }, out, move |document| {
-            Command::AnalysisBytes {
-                document,
-                offset,
-                len: count,
-            }
-        });
-        self.documents[at].bytes.asked = Some((id, offset));
     }
 }
 
