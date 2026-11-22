@@ -861,6 +861,7 @@ mod tests {
         let with = |media_tool| Capabilities {
             encode_outputs: Vec::new(),
             media_tool,
+            analysis_framings: Vec::new(),
         };
         assert_eq!(media_tool(None), "FFmpeg: not known yet.");
         assert_eq!(

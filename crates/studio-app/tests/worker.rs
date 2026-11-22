@@ -672,3 +672,60 @@ fn a_source_that_changed_since_its_probe_is_refused() {
     expect_clean_end(&rx);
     assert_eq!(dir.entries(), ["clip.y4m"]);
 }
+
+/// The app reaches the inspect process through the same client. A killed
+/// inspect process ends its stream, and its documents die with it: a new
+/// process knows none of them, so a stale id cannot answer with facts.
+#[test]
+fn inspect_documents_end_with_their_process() {
+    use studio_domain::analysis::{AnalysisFailure, Framing};
+    let dir = Scratch::new("inspect");
+    let source = dir.path("td.obu");
+    fs::write(&source, [0x01, 0x08]).unwrap_or_else(|e| unreachable!("{e}"));
+    let spawn_inspect = || {
+        let (tx, rx) = mpsc::channel();
+        let worker = Worker::spawn(&engine(), Role::Inspect, move |d| {
+            let _ = tx.send(d);
+        })
+        .unwrap_or_else(|e| unreachable!("{e}"));
+        (worker, rx)
+    };
+    let (mut first, rx) = spawn_inspect();
+    let open = Command::AnalysisOpen {
+        document: 1,
+        source: WirePath::from_path(&source),
+    };
+    assert!(first.send(1, open).is_ok());
+    let opened = event(&rx, 1, ANSWER_TIMEOUT);
+    assert!(
+        matches!(opened, Event::AnalysisOpened { document: 1, ref summary } if summary.framing == Framing::AnnexB && summary.obus == 1),
+        "{opened:?}"
+    );
+    first.kill();
+    assert!(
+        matches!(next(&rx, ANSWER_TIMEOUT), Delivery::Ended(_)),
+        "a killed process ends its stream"
+    );
+
+    let (mut second, rx) = spawn_inspect();
+    let page = Command::AnalysisPage {
+        document: 1,
+        first: 0,
+        count: 1,
+    };
+    assert!(second.send(2, page).is_ok());
+    let stale = event(&rx, 2, ANSWER_TIMEOUT);
+    assert!(
+        matches!(
+            stale,
+            Event::AnalysisFailed {
+                document: 1,
+                code: AnalysisFailure::UnknownDocument,
+                ..
+            }
+        ),
+        "{stale:?}"
+    );
+    second.close_input();
+    expect_clean_end(&rx);
+}

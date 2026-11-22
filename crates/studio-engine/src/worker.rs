@@ -215,6 +215,16 @@ fn serve<'scope>(
                     "a job worker does not serve pictures; the preview process does",
                 ),
             ),
+            Command::AnalysisOpen { .. }
+            | Command::AnalysisPage { .. }
+            | Command::AnalysisBytes { .. }
+            | Command::AnalysisClose { .. } => outbox.reply(
+                id,
+                refusal(
+                    ErrorCode::WrongState,
+                    "a job worker does not serve analysis; the inspect process does",
+                ),
+            ),
         }
     };
     // The end of input, or an unreadable one, means nobody can cancel later.

@@ -134,6 +134,7 @@ fn capabilities(tool: bool) -> Capabilities {
             version: "8.0.1-3ubuntu2".into(),
             origin: MediaToolOrigin::System,
         }),
+        analysis_framings: Vec::new(),
     }
 }
 

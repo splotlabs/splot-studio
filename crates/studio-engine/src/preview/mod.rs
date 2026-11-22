@@ -134,12 +134,18 @@ fn serve(input: &mut impl Read, shared: &Shared) -> Result<(), ProtocolError> {
                 );
                 continue;
             }
-            Command::Probe { .. } | Command::Start { .. } | Command::Cancel => {
+            Command::Probe { .. }
+            | Command::Start { .. }
+            | Command::Cancel
+            | Command::AnalysisOpen { .. }
+            | Command::AnalysisPage { .. }
+            | Command::AnalysisBytes { .. }
+            | Command::AnalysisClose { .. } => {
                 shared.reply(
                     id,
                     refusal(
                         ErrorCode::WrongState,
-                        "the preview process runs no jobs; a worker does",
+                        "the preview process runs no jobs or analysis",
                     ),
                 );
                 continue;

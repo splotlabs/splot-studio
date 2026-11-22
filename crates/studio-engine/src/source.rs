@@ -535,7 +535,11 @@ impl Decoding {
 }
 
 /// The tools open the file by name; it must still be the one probed.
-fn still_the_same(path: &Path, id: &FileId, seen: SourceFingerprint) -> Result<(), Stop> {
+pub(crate) fn still_the_same(
+    path: &Path,
+    id: &FileId,
+    seen: SourceFingerprint,
+) -> Result<(), Stop> {
     let now = std::fs::metadata(path).map_err(|_| changed())?;
     let same_file = FileId::of_path(path).is_ok_and(|now| now == *id);
     if same_file && fingerprint(&now) == seen {

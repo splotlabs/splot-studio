@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
 //! The engine process client: one short-lived `splot-studio-engine worker`
-//! process per request (the startup `Hello`, each probe, each job), and one
-//! long-lived `splot-studio-engine preview` process for pictures.
+//! process per request (the startup `Hello`, each probe, each job), one
+//! long-lived `splot-studio-engine preview` process for pictures, and
+//! `splot-studio-engine inspect` processes for read-only analysis documents.
 //!
 //! Commands are written from the caller's thread; events are read on a
 //! dedicated thread and handed to a callback, so nothing here blocks the Slint
@@ -54,6 +55,8 @@ pub enum Role {
     Worker,
     /// `preview`: serves picture requests until its input closes.
     Preview,
+    /// `inspect`: serves analysis documents until its input closes.
+    Inspect,
 }
 
 impl Role {
@@ -61,6 +64,7 @@ impl Role {
         match self {
             Self::Worker => "worker",
             Self::Preview => "preview",
+            Self::Inspect => "inspect",
         }
     }
 }
@@ -529,6 +533,7 @@ mod tests {
             capabilities: Capabilities {
                 encode_outputs: vec![OutputKind::Ivf],
                 media_tool: None,
+                analysis_framings: Vec::new(),
             },
         };
         assert!(capable.summary().ends_with("encodes AV2 IVF"));

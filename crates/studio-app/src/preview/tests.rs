@@ -703,6 +703,7 @@ fn the_scene_follows_the_file_from_source_to_live_to_result() {
         Intent::EngineAnswered(Ok(studio_domain::protocol::Capabilities {
             encode_outputs: studio_domain::settings::OutputKind::ALL.to_vec(),
             media_tool: None,
+            analysis_framings: Vec::new(),
         })),
     );
     let effects = apply(&mut state, Intent::FilesOpened(vec![abs("/videos/a.y4m")]));
