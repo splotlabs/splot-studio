@@ -127,6 +127,14 @@ fn a_changed_file_waits_until_it_is_read_as_new() {
     // The engine holds the read; the journal keeps the old view.
     assert!(analysis.needs_engine());
     assert_eq!(analysis.saved().0, [saved(Some(old))]);
+    // Jobs says nothing about the new facts either.
+    let state = crate::state::AppState::default();
+    let jobs = crate::jobs::list(&state, &analysis);
+    let detail = crate::present::jobs::line(&jobs[0]).detail;
+    assert!(
+        detail.contains("changed") && !detail.contains("elements"),
+        "{detail}"
+    );
 
     let effects = analysis.input(Input::Resolve);
     engine.settle(&mut analysis, effects);
@@ -197,6 +205,25 @@ fn only_the_shown_document_is_read() {
     let effects = analysis.read_shown(&Everything(Kind::File));
     assert_eq!(opens(&effects), [2]);
     assert_eq!(*analysis.documents()[0].phase(), Phase::Unread);
+}
+
+/// Closing the shown document shows the next one; when it is not read yet,
+/// it is read.
+#[test]
+fn closing_the_shown_document_reads_the_next_one() {
+    let engine = Engine { rows: stream(20) };
+    let at = |name: &str| Saved {
+        path: PathBuf::from(name),
+        ..saved(None)
+    };
+    let mut analysis = restored(vec![at("/a"), at("/b"), at("/c")], 0, 0);
+    let effects = analysis.read_shown(&Everything(Kind::File));
+    engine.settle(&mut analysis, effects);
+    analysis.input(Input::Close);
+    assert_eq!(doc(&analysis).path(), std::path::Path::new("/b"));
+    let effects = analysis.read_shown(&Everything(Kind::File));
+    assert_eq!(opens(&effects), [2]);
+    assert_eq!(*analysis.documents()[1].phase(), Phase::Unread);
 }
 
 #[test]

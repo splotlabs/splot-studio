@@ -884,6 +884,27 @@ mod tests {
     // runners do not grant.
     #[cfg(unix)]
     #[test]
+    fn a_fingerprint_follows_a_symlink_to_a_file_only() {
+        let dir = Scratch::new("fingerprint");
+        let file = dir.path("clip.obu");
+        assert!(fs::write(&file, b"twelve bytes").is_ok());
+        let link = dir.path("link.obu");
+        assert!(std::os::unix::fs::symlink(&file, &link).is_ok());
+        let of_file = fs::metadata(&file).ok().map(|m| SourceFingerprint::of(&m));
+        assert_eq!(of_file.map(|f| f.len), Some(12));
+        assert_eq!(RealDisk.fingerprint(&link), of_file);
+        assert_eq!(RealDisk.fingerprint(&file), of_file);
+        // A folder, and a link to nothing: no fingerprint.
+        assert_eq!(RealDisk.fingerprint(&dir.path("")), None);
+        let dangling = dir.path("dangling.obu");
+        assert!(std::os::unix::fs::symlink(dir.path("gone.obu"), &dangling).is_ok());
+        assert_eq!(RealDisk.fingerprint(&dangling), None);
+    }
+
+    // Unix only: creating a symlink on Windows needs a privilege CI
+    // runners do not grant.
+    #[cfg(unix)]
+    #[test]
     fn a_symlink_named_like_a_temporary_file_is_left_alone() {
         let dir = Scratch::new("partials");
         let destination = dir.path("clip.ivf");

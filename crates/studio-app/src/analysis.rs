@@ -314,7 +314,9 @@ impl Analysis {
         self.dirty = true;
         if disk.kind(&doc.path) == Kind::Missing {
             doc.phase = Phase::Missing;
-        } else if let Some((restore, now)) = doc.restore.zip(disk.fingerprint(&doc.path))
+        } else if let Some((restore, now)) = doc
+            .restore
+            .and_then(|r| disk.fingerprint(&doc.path).map(|now| (r, now)))
             && !same_file(restore.fingerprint, now)
         {
             doc.phase = Phase::Changed { now, read: None };
