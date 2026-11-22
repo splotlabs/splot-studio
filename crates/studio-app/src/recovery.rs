@@ -183,6 +183,9 @@ pub struct RestoredView {
     pub shown: usize,
     /// Documents whose path was written on another kind of system.
     pub dropped: usize,
+    /// The view did not parse and nothing of it was restored; a copy of
+    /// the journal as it was is here.
+    pub unreadable: Option<PathBuf>,
 }
 
 /// The model's values of a journalled view.
@@ -204,6 +207,7 @@ pub fn view(dto: &JournalView) -> RestoredView {
         dropped: dto.documents.len() - kept.len(),
         documents: kept.into_iter().map(|(_, saved)| saved).collect(),
         shown,
+        unreadable: None,
     }
 }
 

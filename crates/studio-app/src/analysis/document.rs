@@ -202,7 +202,8 @@ pub struct Document {
     /// What stays true of the file for as long as it is open, such as a
     /// converted file whose size changed since it was verified.
     pub(super) caution: Option<String>,
-    /// The view to restore when the file is read again.
+    /// The view to restore when the file is read again; while open, a
+    /// restored view the read could not apply.
     pub(super) restore: Option<Restore>,
 }
 
@@ -242,6 +243,11 @@ impl Document {
     #[must_use]
     pub fn restore(&self) -> Option<Restore> {
         match &self.phase {
+            // A restored view this read could not apply, until replaced.
+            Phase::Open(_) if self.restore.is_some() => self.restore.map(|r| Restore {
+                bytes_shown: self.bytes.shown,
+                ..r
+            }),
             Phase::Open(summary) => Some(Restore {
                 fingerprint: summary.fingerprint,
                 selected: self.selected.as_ref().map(|s| s.row.index),

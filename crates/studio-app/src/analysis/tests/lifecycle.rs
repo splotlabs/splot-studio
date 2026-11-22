@@ -7,6 +7,8 @@
 
 use studio_domain::analysis::Problem;
 
+use crate::recovery::RestoredView;
+
 use super::*;
 
 /// A disk where every path is `kind`.
@@ -19,6 +21,16 @@ impl Disk for Everything {
 }
 
 const PATH: &str = "/media/clip.obu";
+
+/// The Analyze documents a journal restored.
+fn restored(documents: Vec<Saved>, shown: usize, dropped: usize) -> Analysis {
+    Analysis::restored(RestoredView {
+        documents,
+        shown,
+        dropped,
+        ..RestoredView::default()
+    })
+}
 
 /// The fingerprint the scripted engine reports for `n` OBUs.
 fn fingerprint(n: u64) -> SourceFingerprint {
@@ -62,8 +74,7 @@ fn opens(effects: &[Effect]) -> Vec<u64> {
 #[test]
 fn a_restored_document_shows_nothing_until_it_is_read_again_from_the_same_file() {
     let engine = Engine { rows: stream(200) };
-    let mut analysis =
-        Analysis::restored(vec![saved(Some(restore(200, Some(151), type_7())))], 0, 0);
+    let mut analysis = restored(vec![saved(Some(restore(200, Some(151), type_7())))], 0, 0);
     assert_eq!(*doc(&analysis).phase(), Phase::Unread);
     assert!(doc(&analysis).summary().is_none());
     assert!(!analysis.needs_engine());
@@ -92,7 +103,7 @@ fn a_changed_file_waits_until_it_is_read_as_new() {
     let engine = Engine { rows: stream(200) };
     // Recorded at another length: not the same file.
     let old = restore(120, Some(3), type_7());
-    let mut analysis = Analysis::restored(vec![saved(Some(old))], 0, 0);
+    let mut analysis = restored(vec![saved(Some(old))], 0, 0);
     let effects = analysis.read_unread(&Everything(Kind::File));
     let after_open = engine.answer(&mut analysis, effects);
     // Nothing of the new read is asked for or shown.
@@ -118,7 +129,7 @@ fn a_changed_file_waits_until_it_is_read_as_new() {
 #[test]
 fn closing_a_changed_document_closes_its_read() {
     let engine = Engine { rows: stream(10) };
-    let mut analysis = Analysis::restored(vec![saved(Some(restore(99, None, type_7())))], 0, 0);
+    let mut analysis = restored(vec![saved(Some(restore(99, None, type_7())))], 0, 0);
     let effects = analysis.read_unread(&Everything(Kind::File));
     engine.settle(&mut analysis, effects);
     let effects = analysis.input(Input::Close);
@@ -147,7 +158,7 @@ fn no_modification_time_is_never_the_same_file() {
 #[test]
 fn a_missing_file_waits_for_its_new_place_and_is_checked_there() {
     let engine = Engine { rows: stream(200) };
-    let mut analysis = Analysis::restored(vec![saved(Some(restore(200, Some(8), type_7())))], 0, 0);
+    let mut analysis = restored(vec![saved(Some(restore(200, Some(8), type_7())))], 0, 0);
     // Nothing at the path: no process is needed and nothing is read.
     let effects = analysis.read_unread(&Everything(Kind::Missing));
     assert_eq!(effects.len(), 0);
@@ -291,7 +302,7 @@ fn a_restored_view_the_file_does_not_offer_is_not_applied() {
         kind: KindFilter::Obu { obu_type: 30 },
         layer: None,
     };
-    let mut analysis = Analysis::restored(vec![saved(Some(restore(20, Some(20), odd)))], 0, 0);
+    let mut analysis = restored(vec![saved(Some(restore(20, Some(20), odd)))], 0, 0);
     let effects = analysis.read_unread(&Everything(Kind::File));
     let next = engine.answer(&mut analysis, effects);
     // No locate for an element past the end.
@@ -313,7 +324,7 @@ fn at_most_four_documents_are_restored_each_once() {
         origin: Origin::File,
         restore: None,
     };
-    let analysis = Analysis::restored(
+    let analysis = restored(
         vec![at("/a"), at("/a"), at("/b"), at("/c"), at("/d"), at("/e")],
         9,
         2,
@@ -323,14 +334,23 @@ fn at_most_four_documents_are_restored_each_once() {
     // Past the end: the first.
     assert_eq!(analysis.shown_index(), 0);
     // The shown one stays shown when a twin before it is dropped.
-    let twins = Analysis::restored(vec![at("/a"), at("/a"), at("/b")], 2, 0);
+    let twins = restored(vec![at("/a"), at("/a"), at("/b")], 2, 0);
     assert_eq!(doc(&twins).path(), std::path::Path::new("/b"));
+    // Every document not restored is counted: the 2 foreign paths of the
+    // journal, the twin and the fifth.
     assert!(
         analysis
             .notice_line()
-            .is_some_and(|n| n.starts_with("2 documents")),
+            .is_some_and(|n| n.starts_with("4 documents")),
         "{:?}",
         analysis.notice_line()
+    );
+    assert!(
+        twins
+            .notice_line()
+            .is_some_and(|n| n.starts_with("1 document of")),
+        "{:?}",
+        twins.notice_line()
     );
 }
 
@@ -370,7 +390,7 @@ fn jobs_list_each_read_with_its_own_state() {
             .map(|j| j.state)
             .collect()
     };
-    let mut analysis = Analysis::restored(
+    let mut analysis = restored(
         vec![
             saved(None),
             Saved {
@@ -435,4 +455,47 @@ fn jobs_list_each_read_with_its_own_state() {
     // A whole read is complete.
     let (analysis, _) = opened(3);
     assert_eq!(states(&analysis), [State::Completed]);
+}
+
+/// A read again that stops before the restored selection keeps the whole
+/// restored view for the journal and the next read, until the user
+/// chooses a selection of their own.
+#[test]
+fn a_read_that_stops_early_keeps_the_restored_view() {
+    let engine = Engine { rows: stream(200) };
+    let old = restore(200, Some(151), type_7());
+    let mut analysis = restored(vec![saved(Some(old))], 0, 0);
+    let open = analysis.read_unread(&Everything(Kind::File));
+    // The read is cancelled after 20 OBUs, long before OBU 151.
+    let next = analysis.event(
+        open[0].request_id,
+        Event::AnalysisOpened {
+            document: 1,
+            summary: cancelled_after(200, 20),
+        },
+    );
+    engine.settle(&mut analysis, next);
+    assert!(doc(&analysis).selected().is_none());
+    assert_eq!(doc(&analysis).filter(), type_7());
+    assert_eq!(analysis.saved().0, [saved(Some(old))]);
+    // Read Again reads the whole file, and the selection comes back.
+    let effects = analysis.input(Input::Reopen);
+    engine.settle(&mut analysis, effects);
+    assert_eq!(selected(&analysis).map(|s| s.0), Some(151));
+    // A choice of the user's own replaces the restored view.
+    let mut analysis = restored(vec![saved(Some(old))], 0, 0);
+    let open = analysis.read_unread(&Everything(Kind::File));
+    let next = analysis.event(
+        open[0].request_id,
+        Event::AnalysisOpened {
+            document: 1,
+            summary: cancelled_after(200, 20),
+        },
+    );
+    engine.settle(&mut analysis, next);
+    let effects = analysis.input(Input::RowClicked(2));
+    engine.settle(&mut analysis, effects);
+    let now = analysis.saved().0[0].restore.and_then(|r| r.selected);
+    assert_eq!(now, selected(&analysis).map(|s| s.0));
+    assert!(now.is_some_and(|i| i < 20), "{now:?}");
 }

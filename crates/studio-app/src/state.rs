@@ -263,6 +263,9 @@ pub struct Confirmation {
 pub enum JournalProblem {
     /// It did not parse and was moved here; the list started empty.
     MovedAside(PathBuf),
+    /// Its Analyze documents did not parse and were not restored; the list
+    /// was. A copy of it as it was is here.
+    ViewUnreadable(PathBuf),
     /// A newer Splot Studio wrote it; it is left untouched and not saved.
     TooNew {
         /// The file.

@@ -127,6 +127,7 @@ fn restored(path: PathBuf) -> AppState {
                 documents: vec![saved],
                 shown: 0,
                 dropped: 0,
+                unreadable: None,
             },
         }),
         problem: None,

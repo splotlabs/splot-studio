@@ -180,7 +180,7 @@ impl Session {
             preview: Preview::new(),
             previewer: None,
             previewers_started: 0,
-            analysis: Analysis::restored(view.documents, view.shown, view.dropped),
+            analysis: Analysis::restored(view),
             inspector: None,
             inspectors_started: 0,
             analyze_dialog: false,
@@ -353,7 +353,7 @@ impl Session {
                 .input(preview::Input::Visible(self.picture_visible()));
             self.send_preview(effects);
             self.read_if_shown();
-            outcome.analysis = self.analysis.take_dirty();
+            outcome.analysis |= self.analysis.take_dirty();
         }
         outcome.preview = self.preview.take_dirty();
         outcome
@@ -487,7 +487,7 @@ impl Session {
                 match self.spawn_as(Role::Inspect, Route::Inspect(spawn)) {
                     Ok(worker) => self.inspector = Some((spawn, worker)),
                     Err(why) => {
-                        self.analysis.process_ended(&why);
+                        self.analysis.engine_failed(&why);
                         return;
                     }
                 }

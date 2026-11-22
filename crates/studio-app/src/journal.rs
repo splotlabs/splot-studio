@@ -6,8 +6,9 @@
 //!
 //! The format is the DTOs below, not the app's types. They embed the
 //! domain's transport values (`WirePath`, `JobSpec`, `SourceFacts`,
-//! `JobReport`, `Failure`, settings) as their serde forms; a change to any of
-//! those forms needs a new [`VERSION`] and a migration.
+//! `JobReport`, `Failure`, settings, `SourceFingerprint`, and `RowFilter`
+//! with its `KindFilter` and `LayerFilter`) as their serde forms; a change
+//! to any of those forms needs a new [`VERSION`] and a migration.
 //!
 //! Version 2 adds the [`JournalView`]: the workspace shown and the Analyze
 //! documents, as where to read them and the view to restore, never their
@@ -17,8 +18,11 @@
 //!
 //! Load rules: a missing file is an empty queue; a newer [`VERSION`] (or a
 //! file that cannot be read at all) is left untouched and this session does
-//! not save; anything else that does not parse is moved aside as
-//! `queue.json.corrupt-<n>` and the queue starts empty.
+//! not save. When only the view does not parse, the file is copied aside as
+//! `queue.json.corrupt-<n>` and the queue and settings are restored with
+//! the default view, so the next save loses nothing that is not in the
+//! copy. Anything else that does not parse is moved aside the same way
+//! and the queue starts empty.
 //!
 //! Writes go through [`Writer`], a thread that writes the latest submitted
 //! journal (older unwritten ones are skipped), so a slow disk never holds up
@@ -558,6 +562,16 @@ pub enum Loaded {
         /// The version it states.
         version: u32,
     },
+    /// The queue and settings parsed and the view did not. The file was
+    /// copied here first; the journal comes with the default view.
+    ViewUnreadable {
+        /// The journal without its view.
+        journal: Journal,
+        /// The copy of the file as it was.
+        copy: PathBuf,
+        /// What was wrong with the view.
+        error: String,
+    },
     /// The journal did not parse and was moved here; the queue starts empty.
     MovedAside {
         /// Where it is now.
@@ -579,7 +593,7 @@ impl Loaded {
     pub const fn may_save(&self) -> bool {
         matches!(
             self,
-            Self::Missing | Self::Found(_) | Self::MovedAside { .. }
+            Self::Missing | Self::Found(_) | Self::ViewUnreadable { .. } | Self::MovedAside { .. }
         )
     }
 }
@@ -615,7 +629,27 @@ pub fn load(path: &Path) -> Loaded {
                     ..journal
                 });
             }
-            Err(e) => e.to_string(),
+            Err(e) => match without_view(&bytes) {
+                Some(journal) => {
+                    return match free_name(path).and_then(|copy| {
+                        fs::copy(path, &copy)?;
+                        Ok(copy)
+                    }) {
+                        Ok(copy) => Loaded::ViewUnreadable {
+                            journal: Journal {
+                                version: VERSION,
+                                ..journal
+                            },
+                            copy,
+                            error: e.to_string(),
+                        },
+                        Err(c) => Loaded::Unreadable {
+                            error: format!("{e}; it could not be copied aside: {c}"),
+                        },
+                    };
+                }
+                None => e.to_string(),
+            },
         },
         Err(e) => e.to_string(),
     };
@@ -627,8 +661,22 @@ pub fn load(path: &Path) -> Loaded {
     }
 }
 
+/// The journal in `bytes` with its view left out, when the rest parses.
+fn without_view(bytes: &[u8]) -> Option<Journal> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value.as_object_mut()?.remove("view")?;
+    serde_json::from_value(value).ok()
+}
+
 /// Renames `path` to the first free `<name>.corrupt-<n>` beside it.
 fn move_aside(path: &Path) -> io::Result<PathBuf> {
+    let to = free_name(path)?;
+    fs::rename(path, &to)?;
+    Ok(to)
+}
+
+/// The first free `<name>.corrupt-<n>` beside `path`.
+fn free_name(path: &Path) -> io::Result<PathBuf> {
     let name = path
         .file_name()
         .ok_or_else(|| io::Error::other("the journal path has no file name"))?
@@ -637,12 +685,9 @@ fn move_aside(path: &Path) -> io::Result<PathBuf> {
     for n in 1..=1000 {
         let to = path.with_file_name(format!("{name}.corrupt-{n}"));
         // Only this instance touches the folder (it holds the lock), so the
-        // name is still free when the rename runs.
+        // name is still free when it is used.
         match fs::symlink_metadata(&to) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                fs::rename(path, &to)?;
-                return Ok(to);
-            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(to),
             Err(e) => return Err(e),
             Ok(_) => {}
         }
@@ -1011,6 +1056,44 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_view_keeps_the_queue_and_a_copy_of_the_file() {
+        let dir = Scratch::new("bad-view");
+        let path = dir.path(FILE_NAME);
+        let mut text: serde_json::Value =
+            serde_json::from_slice(&encode(&journal()).unwrap_or_default()).unwrap_or_default();
+        text["view"]["workspace"] = "compare".into();
+        let bytes = serde_json::to_vec(&text).unwrap_or_default();
+        assert!(fs::write(&path, &bytes).is_ok());
+        let loaded = load(&path);
+        assert!(loaded.may_save());
+        let Loaded::ViewUnreadable {
+            journal: kept,
+            copy,
+            error,
+        } = loaded
+        else {
+            unreachable!("{loaded:?}")
+        };
+        assert!(error.contains("compare"), "{error}");
+        // The queue and settings are all there; the view is the default.
+        assert_eq!(
+            kept,
+            Journal {
+                view: JournalView::default(),
+                ..journal()
+            }
+        );
+        // The file stays, and a copy of it as it was is beside it.
+        assert_eq!(copy, dir.path("queue.json.corrupt-1"));
+        assert_eq!(fs::read(&copy).ok(), Some(bytes.clone()));
+        assert_eq!(fs::read(&path).ok(), Some(bytes));
+        // Items that do not parse still move the whole file aside.
+        text["items"] = "renamed".into();
+        assert!(fs::write(&path, serde_json::to_vec(&text).unwrap_or_default()).is_ok());
+        assert!(matches!(load(&path), Loaded::MovedAside { .. }));
+    }
+
+    #[test]
     fn a_newer_version_is_left_untouched_and_not_saved_over() {
         let dir = Scratch::new("too-new");
         let path = dir.path(FILE_NAME);
@@ -1032,8 +1115,6 @@ mod tests {
             b"not json",
             b"{\"version\": 0}",
             b"{\"version\": 1, \"next_id\": 1, \"settings\": {}, \"items\": []}",
-            // A view this build cannot read is not dropped silently.
-            br#"{"version": 2, "next_id": 1, "settings": {"output": "ivf", "preset": 6, "crf": 20}, "items": [], "view": {"workspace": "compare", "shown_document": 0, "documents": []}}"#,
         ]
         .iter()
         .enumerate()

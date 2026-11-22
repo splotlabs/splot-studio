@@ -2433,8 +2433,11 @@ export component AppWindow inherits Window {
                                 root.job-show(i);
                                 jobs-popup.close();
                             }
+                            // The row's Cancel goes away once the job stops;
+                            // the focus goes to Close, not out of the list.
                             cancel(i) => {
                                 root.job-cancel(i);
+                                jobs-close.focus();
                             }
                         }
                     }
@@ -2442,7 +2445,7 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         alignment: end;
 
-                        Button {
+                        jobs-close := Button {
                             text: "Close";
                             init => {
                                 self.focus();

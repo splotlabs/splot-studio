@@ -61,7 +61,7 @@ pub use document::{
 };
 use document::{Place, in_window, line_of};
 
-use crate::recovery::{Disk, Kind};
+use crate::recovery::{Disk, Kind, RestoredView};
 
 /// Documents open at once: the inspect process keeps at most four.
 pub const MAX_DOCUMENTS: usize = 4;
@@ -222,12 +222,19 @@ impl Analysis {
         Self::default()
     }
 
-    /// The documents of the last session, not read yet, with the one at
-    /// `shown` shown. At most [`MAX_DOCUMENTS`] are kept, each file and
-    /// origin once; `dropped` more could not be restored and the notice
-    /// says so.
+    /// The documents of the last session, not read yet, with the shown
+    /// one shown. At most [`MAX_DOCUMENTS`] are kept, each file and origin
+    /// once; the notice says how many were not, and when the view could
+    /// not be read at all.
     #[must_use]
-    pub fn restored(saved: Vec<Saved>, shown: usize, dropped: usize) -> Self {
+    pub fn restored(view: RestoredView) -> Self {
+        let RestoredView {
+            documents: saved,
+            shown,
+            mut dropped,
+            unreadable,
+            ..
+        } = view;
         let wanted = saved.get(shown).map(|s| (s.path.clone(), s.origin.clone()));
         let mut documents: Vec<Document> = Vec::new();
         for saved in saved {
@@ -236,18 +243,24 @@ impl Analysis {
                 .any(|d| d.path == saved.path && d.origin == saved.origin);
             if !twin && documents.len() < MAX_DOCUMENTS {
                 documents.push(Document::new(saved.path, saved.origin, saved.restore));
+            } else {
+                dropped += 1;
             }
         }
-        let notice = match dropped {
-            0 => None,
-            1 => Some(
-                "1 document of the last session could not be restored: its path was written on \
-                 another kind of system."
-                    .to_owned(),
-            ),
-            n => Some(format!(
-                "{n} documents of the last session could not be restored: their paths were \
-                 written on another kind of system."
+        let why = "a path written on another kind of system, a second copy of a document, or \
+                   more than four";
+        let notice = match (unreadable, dropped) {
+            (Some(copy), _) => Some(format!(
+                "The documents of the last session could not be read, so none was restored. \
+                 The saved list as it was is kept at {}.",
+                copy.display()
+            )),
+            (None, 0) => None,
+            (None, 1) => Some(format!(
+                "1 document of the last session was not restored ({why})."
+            )),
+            (None, n) => Some(format!(
+                "{n} documents of the last session were not restored ({why})."
             )),
         };
         // The shown one, wherever it is in the list kept.
@@ -477,8 +490,17 @@ impl Analysis {
     }
 
     fn document_input(&mut self, at: usize, input: Input, out: &mut Vec<Effect>) {
+        let doc = &mut self.documents[at];
         // A problem stays in view until the user does something else here.
-        self.documents[at].notice = None;
+        doc.notice = None;
+        // A restored view the read could not apply is kept until the user
+        // chooses a selection or filter of their own.
+        if !matches!(
+            input,
+            Input::Scroll(_) | Input::ScrollTo(_) | Input::Cursor(_) | Input::ToggleBytes
+        ) {
+            doc.restore = None;
+        }
         match input {
             Input::RowClicked(slot) => {
                 let Ok(slot) = u64::try_from(slot) else {
@@ -928,16 +950,26 @@ impl Analysis {
 
     /// The inspect process ended: every document it held is gone.
     pub fn process_ended(&mut self, detail: &str) {
+        self.end_reads(
+            &format!("The inspection engine stopped ({detail}). Reopen the file to read it again."),
+            ReadEnd::EngineStopped,
+        );
+    }
+
+    /// The inspect process could not be started: no read began.
+    pub fn engine_failed(&mut self, why: &str) {
+        self.end_reads(
+            &format!("The inspection engine did not start ({why}). Reopen the file to try again."),
+            ReadEnd::Failure,
+        );
+    }
+
+    /// Every document in the engine fails with `message`.
+    fn end_reads(&mut self, message: &str, by: ReadEnd) {
         self.pending.clear();
         for doc in &mut self.documents {
             if doc.in_engine() {
-                doc.fail(
-                    format!(
-                        "The inspection engine stopped ({detail}). Reopen the file to read it \
-                         again."
-                    ),
-                    ReadEnd::EngineStopped,
-                );
+                doc.fail(message.to_owned(), by);
                 self.dirty = true;
             }
         }
@@ -945,7 +977,9 @@ impl Analysis {
 
     /// Puts back the view `restore` on document `at`, just read from the
     /// same file. A filter the document offers no choice for, and an
-    /// element past its end, are not restored.
+    /// element past its end, are not applied; a read that stopped early
+    /// may not have reached them, so then the whole view is kept for the
+    /// journal and the next read.
     fn apply(&mut self, at: usize, restore: Restore, out: &mut Vec<Effect>) {
         let doc = &mut self.documents[at];
         doc.bytes.shown = restore.bytes_shown;
@@ -954,10 +988,14 @@ impl Analysis {
         let offered = kind_choices(summary).contains(&filter.kind)
             && layer_choices(summary).contains(&filter.layer);
         let elements = summary.map_or(0, |s| s.elements);
+        let selected = restore.selected.filter(|i| *i < elements);
         if offered {
             doc.filter = filter;
         }
-        if let Some(index) = restore.selected.filter(|i| *i < elements) {
+        if !offered || selected != restore.selected {
+            doc.restore = Some(restore);
+        }
+        if let Some(index) = selected {
             let purpose = Purpose::Select { from_list: true };
             self.locate(at, LocateTarget::Element { index }, purpose, out);
         }

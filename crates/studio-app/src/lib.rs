@@ -179,6 +179,12 @@ pub fn prepare(dir: Result<PathBuf, String>) -> Opening {
             recovery::clean_up(&mut recovered);
             (Some(recovered), None)
         }
+        Loaded::ViewUnreadable { journal, copy, .. } => {
+            let mut recovered = recovery::recover(journal, &RealDisk);
+            recovery::clean_up(&mut recovered);
+            recovered.view.unreadable = Some(copy.clone());
+            (Some(recovered), Some(JournalProblem::ViewUnreadable(copy)))
+        }
         Loaded::TooNew { version } => (None, Some(JournalProblem::TooNew { path, version })),
         Loaded::MovedAside { to, .. } => (None, Some(JournalProblem::MovedAside(to))),
         Loaded::Unreadable { error } => (None, Some(JournalProblem::Unreadable { path, error })),

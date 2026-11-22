@@ -308,6 +308,16 @@ impl Rig {
         window.dispatch_event(WindowEvent::KeyReleased { text });
     }
 
+    /// Whether the Jobs list is open: its right edge (12 px from the right
+    /// of the 900 px window) is drawn where no workspace reaches.
+    fn jobs_open(&self) -> bool {
+        let pixels = self.pixels();
+        let width = SIZE.0 as usize;
+        let at = |x: usize, y: usize| pixels[y * width + x];
+        let background = at(width - 5, SIZE.1 as usize - 5);
+        (100..300).all(|y| at(887, y) != background)
+    }
+
     fn pixels(&self) -> Vec<Rgb8Pixel> {
         self.window.window().request_redraw();
         let mut buffer = vec![Rgb8Pixel::default(); (SIZE.0 * SIZE.1) as usize];
@@ -354,7 +364,7 @@ fn jobs_and_documents_survive_cancel_close_worker_death_and_restart() {
     #[cfg(unix)]
     worker_death(&mut rig);
     restart(&mut rig, &scratch);
-    corrupt_storage(&mut rig);
+    corrupt_storage(&mut rig, &scratch);
     #[cfg(unix)]
     read_only_storage(&mut rig);
 }
@@ -383,24 +393,29 @@ fn concurrent_encode_and_inspection(rig: &mut Rig, scratch: &Scratch) {
     rig.dispatch(Intent::RowSelected(0));
     let result = rig.session().analyze_result(Instant::now());
     assert!(result.analysis, "Open in Analyze did nothing");
-    rig.settle("the result read", |s| {
-        matches!(phase(s, 0), Some(Phase::Open(_))) && !s.analysis().waiting()
-    });
-    // The encode is still running: three jobs, each with its own state.
+    // No answer is handled between the check above and here, so this does
+    // not depend on which ends first: the read started while the encode
+    // ran, and Jobs lists both as running, each on its own row.
+    rig.render();
     assert_eq!(
         rig.states(),
-        [State::Completed, State::Running, State::Completed],
-        "the encode ended before the inspection; use a longer clip"
+        [State::Completed, State::Running, State::Running]
     );
     assert_eq!(
         rig.rows(),
         [
             ("Convert".into(), "small.y4m".into(), "Completed".into()),
             ("Convert".into(), "large.y4m".into(), "Running".into()),
-            ("Inspect".into(), "small.ivf".into(), "Completed".into()),
+            ("Inspect".into(), "small.ivf".into(), "Running".into()),
         ]
     );
-    assert_eq!(rig.window.get_jobs_label(), "Jobs · 1");
+    assert_eq!(rig.window.get_jobs_label(), "Jobs · 2");
+    rig.settle("the result read", |s| {
+        matches!(phase(s, 0), Some(Phase::Open(_))) && !s.analysis().waiting()
+    });
+    // The read ends on its own row, whatever the encode does meanwhile.
+    assert_eq!(rig.states()[2], State::Completed);
+    assert_eq!(rig.rows()[2].2, "Completed");
 
     // The keyboard: Jobs is the stop after the workspace switch, and Space
     // opens the list over Analyze; Escape closes it.
@@ -449,7 +464,23 @@ fn cancel_and_close(rig: &mut Rig, scratch: &Scratch) {
         rig.session().jobs()[at].state,
         State::Running | State::Queued
     ));
-    rig.window.invoke_job_cancel(i32::try_from(at).unwrap_or(0));
+    // The keyboard: Shift+Tab from Close is the last row's Cancel. Space
+    // cancels, the row loses its Cancel, and the focus goes to Close:
+    // Space closes the list.
+    rig.render();
+    rig.window.invoke_show_jobs();
+    assert!(rig.jobs_open(), "the Jobs list did not open");
+    rig.press(Key::Backtab);
+    rig.press(" ");
+    rig.settle("Cancel handled", |_| true);
+    assert!(!rig.session().jobs()[at].can_cancel());
+    assert!(rig.jobs_open(), "Cancel closed the Jobs list");
+    rig.press(" ");
+    assert!(!rig.jobs_open(), "the focus left the Jobs list");
+    // Escape closes it as well.
+    rig.window.invoke_show_jobs();
+    rig.press(Key::Escape);
+    assert!(!rig.jobs_open(), "Escape did not close the Jobs list");
     rig.settle("the cancelled read answered", |s| !reading(s));
     let session = rig.session();
     assert_eq!(
@@ -627,6 +658,16 @@ fn restart(rig: &mut Rig, scratch: &Scratch) {
     let session = rig.session();
     assert!(matches!(phase(session, 0), Some(Phase::Changed(_))));
     assert_eq!(phase(session, 1), Some(&Phase::Missing));
+    // Jobs says nothing about the changed file's new facts either.
+    let read = session
+        .jobs()
+        .into_iter()
+        .find(|j| matches!(j.work, studio_app::jobs::Work::Inspect(0, _)))
+        .map_or_else(String::new, |j| studio_app::present::jobs::line(&j).detail);
+    assert!(
+        read.contains("changed") && !read.contains("elements"),
+        "{read}"
+    );
     assert!(
         session
             .analysis()
@@ -693,8 +734,9 @@ fn wait_for_journal(scratch: &Scratch, needle: &str) -> String {
 }
 
 /// A journal that does not parse restores nothing and says so; the file
-/// is kept beside it.
-fn corrupt_storage(rig: &mut Rig) {
+/// is kept beside it. One whose view alone does not parse restores the
+/// list of files, and a copy of it as it was is kept beside it.
+fn corrupt_storage(rig: &mut Rig, lifecycle: &Scratch) {
     let scratch = Scratch::new("corrupt");
     fs::write(scratch.journal(), br#"{"version": 2, "items": "#)
         .unwrap_or_else(|e| unreachable!("{e}"));
@@ -709,6 +751,70 @@ fn corrupt_storage(rig: &mut Rig) {
     ));
     assert!(scratch.data().join("queue.json.corrupt-1").is_file());
     rig.stop();
+
+    // The last session's journal, with a view no build of this version
+    // wrote.
+    let scratch = Scratch::new("view-unreadable");
+    let text = fs::read(lifecycle.journal()).unwrap_or_default();
+    let mut journal: serde_json::Value =
+        serde_json::from_slice(&text).unwrap_or_else(|e| unreachable!("{e}"));
+    let files = journal["items"].as_array().map_or(0, Vec::len);
+    assert!(files > 0);
+    journal["view"]["workspace"] = "compare".into();
+    let written = serde_json::to_vec(&journal).unwrap_or_default();
+    fs::write(scratch.journal(), &written).unwrap_or_else(|e| unreachable!("{e}"));
+    rig.start(&scratch);
+    let session = rig.session();
+    assert_eq!(session.state().items().len(), files);
+    assert_eq!(session.state().workspace(), Workspace::Encode);
+    assert_eq!(session.analysis().documents().len(), 0);
+    let copy = scratch.data().join("queue.json.corrupt-1");
+    assert!(matches!(
+        session.state().journal_problem(),
+        Some(JournalProblem::ViewUnreadable(at)) if *at == copy
+    ));
+    assert!(
+        session
+            .analysis()
+            .notice_line()
+            .is_some_and(|n| n.contains("none was restored")),
+        "{:?}",
+        session.analysis().notice_line()
+    );
+    // The copy holds the file as it was; the journal now saves the list.
+    assert_eq!(fs::read(&copy).unwrap_or_default(), written);
+    rig.stop();
+}
+
+/// Without an engine: the first switch to Analyze is drawn, and a read
+/// that cannot start fails as a failure, never as interrupted.
+#[test]
+fn a_read_whose_engine_did_not_start_fails() {
+    let (tx, _rx) = mpsc::channel();
+    let post = Arc::new(move |route, delivery| {
+        let _ = tx.send((route, delivery));
+    });
+    let missing = Err("no engine in this test".to_owned());
+    let mut session = Session::new(AppState::default(), missing, post, None);
+    let outcome = session.dispatch(
+        Intent::WorkspaceRequested(Workspace::Analyze),
+        Instant::now(),
+    );
+    assert!(outcome.analysis, "the first Analyze was not drawn");
+    session.analysis_input(Input::Open(vec![PathBuf::from("stream.obu")]));
+    assert!(
+        matches!(
+            phase(&session, 0),
+            Some(Phase::Failed { message, by: ReadEnd::Failure }) if message.contains("did not start")
+        ),
+        "{:?}",
+        phase(&session, 0)
+    );
+    assert!(!session.inspecting());
+    assert_eq!(
+        session.jobs().iter().map(|j| j.state).collect::<Vec<_>>(),
+        [State::Failed]
+    );
 }
 
 /// A data folder that cannot be written: what was saved is restored and

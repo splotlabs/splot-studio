@@ -191,6 +191,14 @@ pub fn journal_problem(problem: &JournalProblem) -> (String, Tone) {
             ),
             Tone::Warning,
         ),
+        JournalProblem::ViewUnreadable(copy) => (
+            format!(
+                "The saved Analyze documents could not be read and were not restored; the list \
+                 of files was. A copy of the saved list is at {}.",
+                copy.display()
+            ),
+            Tone::Warning,
+        ),
         JournalProblem::TooNew { path, version } => (
             format!(
                 "The saved list at {} is from a newer Splot Studio (format {version}). It was \
