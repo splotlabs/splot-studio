@@ -325,8 +325,8 @@ pub const fn disclosure(disclosure: Disclosure) -> &'static str {
              progressive frames."
         }
         Disclosure::ColorNotCarried => {
-            "The file states its colour, but the encoder cannot write a colour description. \
-             Samples are encoded unchanged and the output does not say how to show them."
+            "The file states a colour value the output has no code for. Samples are encoded \
+             unchanged and the output leaves that value unspecified."
         }
         Disclosure::StartOffsetDropped => {
             "The video starts later than time zero in the file. The output starts at zero."

@@ -206,16 +206,15 @@ pub struct SourceFacts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Disclosure {
-    /// The source states no primaries, transfer, matrix or range. Samples are
-    /// encoded unchanged and the output carries no colour description from
-    /// the source.
+    /// The source states no primaries, transfer or matrix. Samples are
+    /// encoded unchanged and the output carries no colour description.
     ColorUnspecified,
     /// The source does not say whether it is progressive or interlaced. It is
     /// encoded as progressive frames.
     ScanUnspecified,
-    /// The source states its colour (primaries, transfer, matrix or range),
-    /// but the encoder cannot write a colour description. Samples are encoded
-    /// unchanged and the output does not say how to interpret them.
+    /// The source states a primaries, transfer or matrix value the output
+    /// has no code for. Samples are encoded unchanged and the output leaves
+    /// that value unspecified.
     ColorNotCarried,
     /// The video starts at a non-zero time in the source. The output starts
     /// at zero.

@@ -19,7 +19,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::UNIX_EPOCH;
 
 use splot_encode::y4m::{Y4mColorRange, Y4mError, Y4mHeader, Y4mReader};
-use splot_encode::{MAX_FRAME_DIMENSION, PixelFormat};
+use splot_encode::{ContentDescription, MAX_FRAME_DIMENSION, PixelFormat};
 use studio_domain::job::{
     ChromaLayout, Disclosure, FailureCode, Omissions, Rational, SourceFacts, SourceFingerprint,
     SourceReader, VideoTrack,
@@ -97,12 +97,34 @@ pub struct Source {
     pub id: FileId,
     /// The YCbCr matrix the source states; Y4M states none.
     pub matrix: Option<ColorMatrix>,
+    /// The colour, range, chroma siting and pixel shape the source states,
+    /// for the encoder to write.
+    pub content: ContentDescription,
     path: PathBuf,
     frames: Frames,
     /// The index of the frame [`Self::read_frame`] returns next.
     position: u64,
     /// For Y4M: what positioning needs.
     seek: Option<Y4mSeek>,
+}
+
+/// The source of a probed media file, before decoding starts.
+fn media_source(probed: Probed, id: FileId, path: &Path) -> Source {
+    Source {
+        header: probed.header,
+        facts: probed.facts.clone(),
+        id,
+        matrix: probed.matrix,
+        content: probed.content,
+        path: path.to_path_buf(),
+        frames: Frames::Media {
+            probed: Box::new(probed),
+            decoding: None,
+            times: None,
+        },
+        position: 0,
+        seek: None,
+    }
 }
 
 /// A Y4M file reopened at any frame.
@@ -177,20 +199,7 @@ pub fn open(path: &Path, selection: Selection) -> Result<Source, Stop> {
     if !starts_y4m {
         let tool = media::tool()?;
         let probed = media::probe::probe(tool, path, fingerprint, selection.video_stream)?;
-        return Ok(Source {
-            header: probed.header,
-            facts: probed.facts.clone(),
-            id,
-            matrix: probed.matrix,
-            path: path.to_path_buf(),
-            frames: Frames::Media {
-                probed: Box::new(probed),
-                decoding: None,
-                times: None,
-            },
-            position: 0,
-            seek: None,
-        });
+        return Ok(media_source(probed, id, path));
     }
     if selection.video_stream.is_some_and(|stream| stream != 0) {
         return Err(unsupported("a Y4M file has one video stream, stream 0"));
@@ -241,6 +250,7 @@ pub fn open(path: &Path, selection: Selection) -> Result<Source, Stop> {
         facts,
         id,
         matrix: None,
+        content: header.content_description(),
         path: path.to_path_buf(),
         frames: Frames::Y4m(reader),
         position: 0,
@@ -634,15 +644,13 @@ pub fn check_contract(header: &Y4mHeader) -> Result<u64, Stop> {
         }
         (num, den) if num != den => {
             return Err(unsupported(format!(
-                "non-square pixels ({num}:{den}) cannot be signalled by this encoder"
+                "non-square pixels ({num}:{den}) are not supported yet"
             )));
         }
         _ => {}
     }
     if header.color_range == Some(Y4mColorRange::Full) {
-        return Err(unsupported(
-            "full-range samples cannot be signalled by this encoder",
-        ));
+        return Err(unsupported("full-range samples are not supported yet"));
     }
     let bytes_per_sample = if header.bit_depth > 8 { 2 } else { 1 };
     let samples: u64 = header
@@ -718,8 +726,8 @@ fn chroma(format: PixelFormat) -> ChromaLayout {
 }
 
 fn disclosures(header: &Y4mHeader) -> Vec<Disclosure> {
-    // Y4M has no field for primaries, transfer or matrix, and the pinned
-    // encoder writes no colour description, so this always applies.
+    // Y4M has no field for primaries, transfer or matrix, so this always
+    // applies.
     let mut disclosures = vec![Disclosure::ColorUnspecified];
     if header.interlace == '?' {
         disclosures.push(Disclosure::ScanUnspecified);

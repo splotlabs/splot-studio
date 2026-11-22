@@ -82,8 +82,12 @@ fn frames_of(src: &Path, stream: Option<u32>) -> Fallible<Vec<[Vec<u16>; 3]>> {
     source
         .start(&AtomicBool::new(false))
         .map_err(|e| e.to_string())?;
-    let config = studio_engine::job::config(&source.header, common::settings(OutputKind::Ivf))
-        .map_err(|e| e.to_string())?;
+    let config = studio_engine::job::config(
+        &source.header,
+        source.content,
+        common::settings(OutputKind::Ivf),
+    )
+    .map_err(|e| e.to_string())?;
     let mut frames = Vec::new();
     while let Some(planes) = source.read_frame().map_err(|e| e.to_string())? {
         // What the encoder is given, after the codec's own checks.
@@ -177,6 +181,38 @@ fn mp4_h264_8_bit_encodes_to_ivf_and_obu() -> TestResult {
         ]
     );
     encode_ok(&src, 0, OutputKind::Av2AnnexB, 8)?;
+    Ok(())
+}
+
+/// The colour a real file states reaches the encoder as H.273 code points,
+/// through `ffprobe`'s own names, with no colour disclosure.
+#[test]
+fn stated_colour_of_a_file_reaches_the_encoder() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let src = dir.path().join("in.mkv");
+    make(
+        &Clip::new(16, 8, "420", 2),
+        dir.path(),
+        &[
+            "-vf",
+            "setparams=range=tv:color_primaries=smpte432:color_trc=bt470bg:colorspace=smpte170m",
+            "-c:v",
+            "ffv1",
+        ],
+        &src,
+    )?;
+    let source = source::open(&src, Selection::default()).map_err(|e| e.to_string())?;
+    let content = source.content;
+    assert_eq!(
+        (
+            content.color_primaries,
+            content.transfer_characteristics,
+            content.matrix_coefficients,
+            content.full_range
+        ),
+        (12, 5, 6, false)
+    );
+    assert_eq!(source.facts.disclosures, []);
     Ok(())
 }
 

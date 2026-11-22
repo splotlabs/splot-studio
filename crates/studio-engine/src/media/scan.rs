@@ -228,7 +228,7 @@ impl<'a> Grid<'a> {
         }
         if colour.range == "pc" {
             return Err(unsupported(format!(
-                "frame {k} is full range, which cannot be signalled by this encoder"
+                "frame {k} is full range, which is not supported yet"
             )));
         }
         hdr_transfer(&colour.transfer)?;
@@ -322,6 +322,7 @@ mod tests {
             repack: None,
             time_base,
             matrix: None,
+            content: splot_encode::ContentDescription::default(),
         }
     }
 

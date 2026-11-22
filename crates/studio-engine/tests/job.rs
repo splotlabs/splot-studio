@@ -163,8 +163,9 @@ fn import_preserves_8_and_10_bit_samples() -> TestResult {
         clip.write(&src)?;
         let mut source =
             source::open(&src, source::Selection::default()).map_err(|e| e.to_string())?;
-        let config = studio_engine::job::config(&source.header, settings(OutputKind::Ivf))
-            .map_err(|e| e.to_string())?;
+        let config =
+            studio_engine::job::config(&source.header, source.content, settings(OutputKind::Ivf))
+                .map_err(|e| e.to_string())?;
         for frame in 0..clip.frames {
             let planes = source
                 .read_frame()
@@ -183,6 +184,48 @@ fn import_preserves_8_and_10_bit_samples() -> TestResult {
             assert!(clip.samples(0)[0].iter().any(|s| s & 3 != 0));
         }
     }
+    Ok(())
+}
+
+/// What the Y4M header states reaches the output: a clip that states square
+/// pixels and left chroma siting has a content interpretation OBU that says
+/// so; a clip that states neither has none.
+#[test]
+fn stated_content_is_written_to_the_output() -> TestResult {
+    use splot_core::annexb::parse_annex_b_obus_partial;
+    use splot_core::bitio::BitReader;
+    use splot_core::headers::content_interpretation::parse_content_interpretation;
+    use splot_core::span::ByteOffset;
+    use splot_core::types::ObuType;
+
+    let described = |clip: &Clip| -> Result<_, Box<dyn std::error::Error>> {
+        let (dir, _) = encode_ok(clip, OutputKind::Av2AnnexB)?;
+        let bytes = fs::read(dir.path().join("out.obu"))?;
+        let parsed = parse_annex_b_obus_partial(&bytes);
+        assert!(parsed.error.is_none(), "{:?}", parsed.error);
+        let content: Vec<_> = parsed
+            .obus
+            .iter()
+            .filter(|obu| obu.header.obu_type == ObuType::ContentInterpretation)
+            .map(|obu| {
+                parse_content_interpretation(&mut BitReader::new(obu.payload, ByteOffset::new(0)))
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(content)
+    };
+    let content = described(&Clip::new(16, 8, "420mpeg2", 2))?;
+    let [content] = content.as_slice() else {
+        return Err(format!("{} content interpretation OBUs", content.len()).into());
+    };
+    assert_eq!(content.derived_sample_aspect_ratio(), Some((1, 1)));
+    assert_eq!(content.chroma_sample_position.map(|p| p.top), Some(0));
+    assert_eq!(content.color_description, None);
+
+    let silent = Clip {
+        tags: "Ip",
+        ..Clip::new(16, 8, "420", 2)
+    };
+    assert_eq!(described(&silent)?, []);
     Ok(())
 }
 
@@ -552,7 +595,8 @@ fn verification_catches_damaged_output() -> TestResult {
             .map_err(|e| e.to_string())?
             .header;
         let config =
-            studio_engine::job::config(&header, settings(kind)).map_err(|e| e.to_string())?;
+            studio_engine::job::config(&header, header.content_description(), settings(kind))
+                .map_err(|e| e.to_string())?;
         let good = fs::read(dir.path().join(format!("out.{}", kind.extension())))?;
         let damaged = dir.path().join("damaged");
         let outcomes =
