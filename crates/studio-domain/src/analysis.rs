@@ -12,7 +12,9 @@
 //! Outside IVF payloads they cover every byte of the file exactly once. A
 //! packet spans its record header and payload; the OBUs and unparsed
 //! regions after it, up to the next packet, cover its payload exactly once,
-//! nested inside it. A packet is not an OBU and not a frame; an OBU names
+//! nested inside it. The one exception is the region an element limit
+//! leaves: it starts after the last element kept, which can be inside a
+//! payload, and runs to the end of the file, so it is nested in no packet. A packet is not an OBU and not a frame; an OBU names
 //! the record index of the packet that carries it.
 //!
 //! Every [`Span`] says where its numbers came from ([`Provenance`]), and
@@ -252,7 +254,8 @@ pub enum KindFilter {
 }
 
 /// The layer part of a [`RowFilter`]: one `obu_tlayer_id` and
-/// `obu_mlayer_id` pair, signaled or inferred.
+/// `obu_mlayer_id` pair, whether the file signals the mlayer or the
+/// specification infers it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LayerFilter {
     /// `obu_tlayer_id`.
@@ -287,26 +290,6 @@ impl RowFilter {
     #[must_use]
     pub const fn admits_unparsed(&self) -> bool {
         matches!(self.kind, KindFilter::All | KindFilter::Unparsed) && self.layer.is_none()
-    }
-
-    /// Whether it admits the IVF header or a packet.
-    #[must_use]
-    pub const fn admits_wrapper(&self) -> bool {
-        self.is_all()
-    }
-
-    /// Whether it admits `element`.
-    #[must_use]
-    pub const fn admits(&self, element: &Element) -> bool {
-        match element {
-            Element::IvfHeader { .. } | Element::Packet { .. } => self.admits_wrapper(),
-            Element::Obu { obu } => self.admits_obu(
-                obu.obu_type,
-                obu.temporal_layer_id.value,
-                obu.embedded_layer_id.value,
-            ),
-            Element::Unparsed { .. } => self.admits_unparsed(),
-        }
     }
 }
 
@@ -347,6 +330,9 @@ pub struct LayerCount {
     pub embedded: u8,
     /// The number of OBUs.
     pub count: u64,
+    /// How many of them have no header extension, so their `obu_mlayer_id`
+    /// is inferred, not signaled.
+    pub inferred: u64,
 }
 
 /// How far reading the file got.
@@ -457,6 +443,19 @@ mod tests {
         Ok(())
     }
 
+    /// The filter's rule for any element, as the engine applies it.
+    fn admits(filter: RowFilter, element: &Element) -> bool {
+        match element {
+            Element::IvfHeader { .. } | Element::Packet { .. } => filter.is_all(),
+            Element::Obu { obu } => filter.admits_obu(
+                obu.obu_type,
+                obu.temporal_layer_id.value,
+                obu.embedded_layer_id.value,
+            ),
+            Element::Unparsed { .. } => filter.admits_unparsed(),
+        }
+    }
+
     fn obu(obu_type: u8, temporal: u8, embedded: u8) -> Element {
         let span = Span {
             offset: 0,
@@ -510,22 +509,22 @@ mod tests {
         assert!(
             [&header, &unparsed, &obu(7, 1, 2)]
                 .iter()
-                .all(|e| all.admits(e))
+                .all(|e| admits(all, e))
         );
 
         let tiles = RowFilter {
             kind: KindFilter::Obu { obu_type: 7 },
             layer: None,
         };
-        assert!(tiles.admits(&obu(7, 3, 0)) && !tiles.admits(&obu(1, 3, 0)));
-        assert!(!tiles.admits(&header) && !tiles.admits(&unparsed));
+        assert!(admits(tiles, &obu(7, 3, 0)) && !admits(tiles, &obu(1, 3, 0)));
+        assert!(!admits(tiles, &header) && !admits(tiles, &unparsed));
 
         let damage = RowFilter {
             kind: KindFilter::Unparsed,
             layer: None,
         };
-        assert!(damage.admits(&unparsed) && !damage.admits(&obu(7, 0, 0)));
-        assert!(!damage.admits(&header));
+        assert!(admits(damage, &unparsed) && !admits(damage, &obu(7, 0, 0)));
+        assert!(!admits(damage, &header));
 
         // A layer pair admits OBUs of exactly that pair, and nothing else.
         let layer = RowFilter {
@@ -535,14 +534,14 @@ mod tests {
                 embedded: 2,
             }),
         };
-        assert!(layer.admits(&obu(7, 1, 2)) && layer.admits(&obu(1, 1, 2)));
-        assert!(!layer.admits(&obu(7, 2, 1)) && !layer.admits(&obu(7, 1, 0)));
-        assert!(!layer.admits(&unparsed) && !layer.admits(&header));
+        assert!(admits(layer, &obu(7, 1, 2)) && admits(layer, &obu(1, 1, 2)));
+        assert!(!admits(layer, &obu(7, 2, 1)) && !admits(layer, &obu(7, 1, 0)));
+        assert!(!admits(layer, &unparsed) && !admits(layer, &header));
         // Both parts must hold.
         let both = RowFilter {
             kind: KindFilter::Obu { obu_type: 7 },
             layer: layer.layer,
         };
-        assert!(both.admits(&obu(7, 1, 2)) && !both.admits(&obu(1, 1, 2)));
+        assert!(admits(both, &obu(7, 1, 2)) && !admits(both, &obu(1, 1, 2)));
     }
 }

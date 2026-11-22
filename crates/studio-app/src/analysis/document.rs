@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use studio_domain::analysis::{AnalysisFailure, DocumentSummary, Element, Row, RowFilter, Span};
+use studio_domain::analysis::{DocumentSummary, Element, Row, RowFilter, Span};
 
 use super::{LINE_BYTES, WINDOW_BYTES};
 use crate::queue::ItemId;
@@ -46,8 +46,6 @@ pub enum Phase {
     Open(Box<DocumentSummary>),
     /// It has no facts: why, for the user, and the engine's reason if any.
     Failed {
-        /// The engine's reason, if it gave one.
-        code: Option<AnalysisFailure>,
         /// The explanation.
         message: String,
     },
@@ -129,8 +127,9 @@ pub struct Document {
     /// Rows under the filter; `None` until a page says.
     pub(super) total: Option<u64>,
     pub(super) rows: BTreeMap<u64, Row>,
-    /// First rows of the pages asked for and not answered.
-    pub(super) asked: Vec<u64>,
+    /// The pages asked for and not answered: filter generation and first
+    /// row. Pages of an older filter still count against the limit.
+    pub(super) asked: Vec<(u64, u64)>,
     pub(super) top: u64,
     /// A row the keyboard moved to before it arrived.
     pub(super) wanted: Option<u64>,
@@ -142,6 +141,9 @@ pub struct Document {
     pub(super) locating: Option<u64>,
     /// A problem that did not end the document, for the user.
     pub(super) notice: Option<String>,
+    /// What stays true of the file for as long as it is open, such as a
+    /// converted file whose size changed since it was verified.
+    pub(super) caution: Option<String>,
 }
 
 impl Document {
@@ -226,10 +228,11 @@ impl Document {
         &self.bytes
     }
 
-    /// A problem that did not end the document.
+    /// A problem that did not end the document: the last request's, until
+    /// the next input; otherwise what stays true of the file.
     #[must_use]
     pub fn notice(&self) -> Option<&str> {
-        self.notice.as_deref()
+        self.notice.as_deref().or(self.caution.as_deref())
     }
 
     /// The file's length, once open.

@@ -289,14 +289,16 @@ pub fn bind_analysis(window: &AppWindow, send: impl Fn(analysis::Input) + Clone 
     use analysis::{Input, Step};
     let global = window.global::<Analysis>();
     let step = |step: NavStep| match step {
-        NavStep::Up => Step::Up,
-        NavStep::Down => Step::Down,
-        NavStep::PageUp => Step::PageUp,
-        NavStep::PageDown => Step::PageDown,
-        NavStep::Home => Step::Home,
-        NavStep::End => Step::End,
-        NavStep::Left => Step::Left,
-        NavStep::Right => Step::Right,
+        // The window sends no `None`; treat it as no movement.
+        NavStep::None => None,
+        NavStep::Up => Some(Step::Up),
+        NavStep::Down => Some(Step::Down),
+        NavStep::PageUp => Some(Step::PageUp),
+        NavStep::PageDown => Some(Step::PageDown),
+        NavStep::Home => Some(Step::Home),
+        NavStep::End => Some(Step::End),
+        NavStep::Left => Some(Step::Left),
+        NavStep::Right => Some(Step::Right),
     };
     let on = |input: Input| {
         let send = send.clone();
@@ -322,11 +324,19 @@ pub fn bind_analysis(window: &AppWindow, send: impl Fn(analysis::Input) + Clone 
     global.on_layer_filter(on(Input::LayerFilter));
     global.on_move({
         let send = send.clone();
-        move |s| send(Input::Move(step(s)))
+        move |s| {
+            if let Some(s) = step(s) {
+                send(Input::Move(s));
+            }
+        }
     });
     global.on_cursor({
         let send = send.clone();
-        move |s| send(Input::Cursor(step(s)))
+        move |s| {
+            if let Some(s) = step(s) {
+                send(Input::Cursor(s));
+            }
+        }
     });
     global.on_scroll_to({
         let send = send.clone();

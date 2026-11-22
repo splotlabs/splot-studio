@@ -384,6 +384,12 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
     );
     // Nothing is selected: the inspector shows the file.
     assert_eq!(rig.global().get_inspector_title(), "File");
+    // Every control fits a window 800 logical pixels wide.
+    assert!(
+        rig.window.get_fitted_width() <= 800.0,
+        "{}",
+        rig.window.get_fitted_width()
+    );
 
     // Keyboard only: Tab to the navigator, End selects the last row.
     let tabs = rig.tab_to(Key::End, |i| {
@@ -426,6 +432,23 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
         6,
         "82 bytes, 16 a line"
     );
+    // The legend says where each span came from, and the cursor's part is
+    // in words.
+    let legend: Vec<String> = rig
+        .global()
+        .get_legend()
+        .iter()
+        .map(|l| l.label.to_string())
+        .collect();
+    assert_eq!(
+        legend,
+        [
+            "Length prefix (derived)",
+            "Header (located)",
+            "Payload (located)"
+        ]
+    );
+    assert!(rig.global().get_cursor_line().contains("length prefix"));
 
     // Left selects the packet that holds it; Up the TD before that.
     rig.press(Key::LeftArrow);

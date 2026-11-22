@@ -53,7 +53,7 @@ use document::{Place, in_window, line_of};
 pub const MAX_DOCUMENTS: usize = 4;
 
 /// Rows the navigator shows at once; only these are drawn.
-pub const VISIBLE_ROWS: u64 = 16;
+pub const VISIBLE_ROWS: u64 = 12;
 
 /// Rows asked for in one page request.
 pub const PAGE_ROWS: u32 = 64;
@@ -158,7 +158,7 @@ enum Asked {
     Close,
     Page { generation: u64, first: u64 },
     Locate { generation: u64, purpose: Purpose },
-    Bytes { offset: u64 },
+    Bytes { offset: u64, len: u32 },
 }
 
 /// What a locate answer does.
@@ -321,6 +321,8 @@ impl Analysis {
     }
 
     fn document_input(&mut self, at: usize, input: Input, out: &mut Vec<Effect>) {
+        // A problem stays in view until the user does something else here.
+        self.documents[at].notice = None;
         match input {
             Input::RowClicked(slot) => {
                 let Ok(slot) = u64::try_from(slot) else {
@@ -480,6 +482,7 @@ impl Analysis {
                 },
                 locating: None,
                 notice: None,
+                caution: None,
             },
         );
         self.shown = at;
@@ -570,7 +573,7 @@ impl Analysis {
                 if let Origin::Result(result) = &doc.origin
                     && summary.fingerprint.len != result.bytes
                 {
-                    doc.notice = Some(format!(
+                    doc.caution = Some(format!(
                         "This file is {} bytes now; the conversion wrote {} bytes. It may have \
                          changed since.",
                         summary.fingerprint.len, result.bytes
@@ -580,18 +583,30 @@ impl Analysis {
                 self.fill(at, &mut out);
                 self.fetch_bytes(at, &mut out);
             }
-            (Asked::Page { generation, first }, Event::AnalysisPage { total, rows, .. }) => {
+            (
+                Asked::Page { generation, first },
+                Event::AnalysisPage {
+                    first: answered,
+                    total,
+                    rows,
+                    ..
+                },
+            ) => {
                 let doc = &mut self.documents[at];
-                doc.asked.retain(|f| *f != first);
+                doc.asked.retain(|a| *a != (generation, first));
                 if generation == doc.filter_generation {
+                    if answered != first || !page_fits(first, total, rows.len()) {
+                        broken(doc, "a page that does not fit the rows it counts");
+                        return out;
+                    }
                     doc.total = Some(total);
                     for (position, row) in (first..).zip(rows) {
                         doc.rows.insert(position, row);
                     }
                     self.clamp_top(at);
                     self.take_wanted(at, &mut out);
-                    self.fill(at, &mut out);
                 }
+                self.fill(at, &mut out);
             }
             (
                 Asked::Locate {
@@ -602,20 +617,28 @@ impl Analysis {
             ) => {
                 self.located(at, request_id, generation, purpose, row, *found, &mut out);
             }
-            (Asked::Bytes { offset }, Event::AnalysisBytes { bytes, .. }) => {
+            (Asked::Bytes { offset, len }, Event::AnalysisBytes { bytes, .. }) => {
                 let doc = &mut self.documents[at];
-                if doc.bytes.asked.is_some_and(|(_, o)| o == offset) {
+                if doc.bytes.asked == Some((request_id, offset)) {
                     doc.bytes.asked = None;
                 }
-                if doc.bytes.offset == offset {
+                if bytes.len() != len as usize {
+                    broken(doc, "a byte range of another length than asked for");
+                } else if doc.bytes.offset == offset {
                     doc.bytes.data = Some(bytes);
                 }
             }
             (_, Event::AnalysisFailed { code, message, .. }) => {
-                self.failed(at, asked, code, message);
+                self.failed(at, request_id, asked, Some(code), message);
             }
             // A refused cancel: the open was answered first, and decides.
-            _ => {}
+            (Asked::Cancel, Event::Error { .. }) => {}
+            (_, Event::Error { message, .. }) => {
+                self.failed(at, request_id, asked, None, message);
+            }
+            // An answer of the wrong kind breaks the protocol.
+            (Asked::Cancel | Asked::Close, _) => {}
+            _ => broken(&mut self.documents[at], "an answer of the wrong kind"),
         }
         out
     }
@@ -667,30 +690,42 @@ impl Analysis {
         }
     }
 
-    /// A request failed. A changed or unknown document fails as a whole; a
-    /// failed open is the document's answer; anything else is a notice.
-    fn failed(&mut self, at: usize, asked: Asked, code: AnalysisFailure, message: String) {
+    /// A request failed, with the engine's reason (`None` for a refused
+    /// command). A changed or unknown document fails as a whole; a failed
+    /// open is the document's answer; anything else is a notice.
+    fn failed(
+        &mut self,
+        at: usize,
+        request_id: u64,
+        asked: Asked,
+        code: Option<AnalysisFailure>,
+        message: String,
+    ) {
         let doc = &mut self.documents[at];
         match asked {
             Asked::Open => {
                 doc.phase = Phase::Failed {
-                    code: Some(code),
                     message: match code {
-                        AnalysisFailure::Cancelled => "Reading was cancelled.".to_owned(),
+                        Some(AnalysisFailure::Cancelled) => "Reading was cancelled.".to_owned(),
                         _ => message,
                     },
                 };
             }
-            Asked::Page { first, .. } => {
-                doc.asked.retain(|f| *f != first);
+            Asked::Page { generation, first } => {
+                doc.asked.retain(|a| *a != (generation, first));
                 fail_or_notice(doc, code, &message);
             }
-            Asked::Bytes { .. } => {
-                doc.bytes.asked = None;
+            Asked::Bytes { offset, .. } => {
+                if doc.bytes.asked == Some((request_id, offset)) {
+                    doc.bytes.asked = None;
+                }
                 fail_or_notice(doc, code, &message);
             }
             Asked::Locate { .. } => {
-                doc.locating = None;
+                // Only the selecting locate's own failure stops it.
+                if doc.locating == Some(request_id) {
+                    doc.locating = None;
+                }
                 fail_or_notice(doc, code, &message);
             }
             Asked::Cancel | Asked::Close => {}
@@ -703,7 +738,6 @@ impl Analysis {
         for doc in &mut self.documents {
             if !matches!(doc.phase, Phase::Failed { .. }) {
                 doc.phase = Phase::Failed {
-                    code: None,
                     message: format!(
                         "The inspection engine stopped ({detail}). Reopen the file to read it \
                          again."
@@ -833,7 +867,6 @@ impl Analysis {
         doc.filter_generation += 1;
         doc.total = None;
         doc.rows.clear();
-        doc.asked.clear();
         doc.top = 0;
         doc.wanted = None;
         if let Some(selected) = &mut doc.selected {
@@ -861,8 +894,9 @@ impl Analysis {
             }
             (Step::Right, Some(position)) => {
                 let index = doc.selected.as_ref().map(|s| s.row.index);
-                match doc.rows.get(&(position + 1)) {
-                    Some(next) if next.parent.is_some() && next.parent == index => position + 1,
+                let next = position.saturating_add(1);
+                match doc.rows.get(&next) {
+                    Some(row) if row.parent.is_some() && row.parent == index => next,
                     _ => return,
                 }
             }
@@ -870,9 +904,9 @@ impl Analysis {
             (Step::End, _) => last,
             (Step::Home, _) | (_, None) => 0,
             (Step::Up, Some(p)) => p.saturating_sub(1),
-            (Step::Down, Some(p)) => (p + 1).min(last),
+            (Step::Down, Some(p)) => p.saturating_add(1).min(last),
             (Step::PageUp, Some(p)) => p.saturating_sub(VISIBLE_ROWS - 1),
-            (Step::PageDown, Some(p)) => (p + VISIBLE_ROWS - 1).min(last),
+            (Step::PageDown, Some(p)) => p.saturating_add(VISIBLE_ROWS - 1).min(last),
         };
         if let Some(row) = doc.rows.get(&target).cloned() {
             self.select(at, row, Position::Row(target), true, out);
@@ -898,8 +932,8 @@ impl Analysis {
         let doc = &mut self.documents[at];
         if position < doc.top {
             doc.top = position;
-        } else if position >= doc.top + VISIBLE_ROWS {
-            doc.top = position + 1 - VISIBLE_ROWS;
+        } else if position >= doc.top.saturating_add(VISIBLE_ROWS) {
+            doc.top = position.saturating_add(1).saturating_sub(VISIBLE_ROWS);
         }
         self.clamp_top(at);
     }
@@ -921,17 +955,21 @@ impl Analysis {
         let top = doc.top;
         let keep = top.saturating_sub(KEPT_ROWS / 2)..top.saturating_add(KEPT_ROWS / 2);
         doc.rows.retain(|position, _| keep.contains(position));
-        let end = doc.total.map_or(top + 1, |t| t.min(top + VISIBLE_ROWS));
+        let generation = doc.filter_generation;
+        let end = doc.total.map_or(top.saturating_add(1), |t| {
+            t.min(top.saturating_add(VISIBLE_ROWS))
+        });
         let asked = |p: u64| {
-            doc.asked
-                .iter()
-                .any(|f| (*f..f.saturating_add(u64::from(PAGE_ROWS))).contains(&p))
+            doc.asked.iter().any(|&(g, f)| {
+                g == generation && (f..f.saturating_add(u64::from(PAGE_ROWS))).contains(&p)
+            })
         };
         let missing = (top..end).find(|p| !doc.rows.contains_key(p) && !asked(*p));
-        // Two pages in flight per document at most; the engine queues 64.
+        // Two pages in flight per document at most, of any filter; the
+        // engine queues 64.
         if let Some(first) = missing.filter(|_| doc.asked.len() < 2) {
-            doc.asked.push(first);
-            let (id, filter, generation) = (doc.id, doc.filter, doc.filter_generation);
+            doc.asked.push((generation, first));
+            let (id, filter) = (doc.id, doc.filter);
             self.send(
                 id,
                 Asked::Page { generation, first },
@@ -948,19 +986,17 @@ impl Analysis {
 }
 
 /// A failure of a request on an open document.
-fn fail_or_notice(doc: &mut Document, code: AnalysisFailure, message: &str) {
+fn fail_or_notice(doc: &mut Document, code: Option<AnalysisFailure>, message: &str) {
     match code {
-        AnalysisFailure::SourceChanged => {
+        Some(AnalysisFailure::SourceChanged) => {
             doc.phase = Phase::Failed {
-                code: Some(code),
                 message: "The file changed or was replaced since it was opened. Reopen it to \
                           read it again."
                     .to_owned(),
             };
         }
-        AnalysisFailure::UnknownDocument => {
+        Some(AnalysisFailure::UnknownDocument) => {
             doc.phase = Phase::Failed {
-                code: Some(code),
                 message: "The engine no longer has this document open. Reopen it to read it \
                           again."
                     .to_owned(),
@@ -968,4 +1004,22 @@ fn fail_or_notice(doc: &mut Document, code: AnalysisFailure, message: &str) {
         }
         _ => doc.notice = Some(format!("The engine could not answer: {message}")),
     }
+}
+
+/// The engine broke the protocol for this document: nothing more it says
+/// about it is trusted.
+fn broken(doc: &mut Document, what: &str) {
+    doc.phase = Phase::Failed {
+        message: format!("The engine sent {what}. Reopen the file to read it again."),
+    };
+}
+
+/// Whether a page of `len` rows from `first` fits `total` rows: no more
+/// than asked for, none past the end, and none missing at the start.
+fn page_fits(first: u64, total: u64, len: usize) -> bool {
+    let len = len as u64;
+    let end = first.checked_add(len);
+    len <= u64::from(PAGE_ROWS)
+        && end.is_some_and(|end| end <= total)
+        && (len > 0 || first >= total)
 }

@@ -10,6 +10,7 @@ use studio_domain::analysis::{
     ProblemKind, Provenance, ScanOutcome, Span,
 };
 use studio_domain::job::SourceFingerprint;
+use studio_domain::protocol::ErrorCode;
 
 use super::*;
 
@@ -87,8 +88,22 @@ fn summary(elements: u64) -> DocumentSummary {
             temporal: 0,
             embedded: 0,
             count: elements,
+            inferred: 0,
         }],
         outcome: ScanOutcome::Complete,
+    }
+}
+
+/// The engine's filter rule for a whole element.
+fn admits(filter: RowFilter, element: &Element) -> bool {
+    match element {
+        Element::IvfHeader { .. } | Element::Packet { .. } => filter.is_all(),
+        Element::Obu { obu } => filter.admits_obu(
+            obu.obu_type,
+            obu.temporal_layer_id.value,
+            obu.embedded_layer_id.value,
+        ),
+        Element::Unparsed { .. } => filter.admits_unparsed(),
     }
 }
 
@@ -119,7 +134,7 @@ impl Engine {
     fn admitted(&self, filter: RowFilter) -> Vec<&Row> {
         self.rows
             .iter()
-            .filter(|r| filter.admits(&r.element))
+            .filter(|r| admits(filter, &r.element))
             .collect()
     }
 
@@ -159,7 +174,7 @@ impl Engine {
                     LocateTarget::Element { index } => index,
                 };
                 let found = self.rows.get(usize::try_from(index).ok()?)?.clone();
-                let row = filter.admits(&found.element).then(|| {
+                let row = admits(filter, &found.element).then(|| {
                     self.admitted(filter)
                         .iter()
                         .position(|r| r.index == index)
@@ -567,7 +582,7 @@ fn a_dead_process_fails_its_documents_until_reopened() {
     analysis.process_ended("signal: 9");
     assert!(matches!(
         doc(&analysis).phase(),
-        Phase::Failed { code: None, message } if message.contains("signal: 9")
+        Phase::Failed { message } if message.contains("signal: 9")
     ));
     assert_eq!(engine.answer(&mut analysis, pending).len(), 0);
     let effects = analysis.input(Input::Reopen);
@@ -605,10 +620,7 @@ fn a_changed_source_fails_the_document_and_other_failures_are_notices() {
     );
     assert!(matches!(
         doc(&analysis).phase(),
-        Phase::Failed {
-            code: Some(AnalysisFailure::SourceChanged),
-            ..
-        }
+        Phase::Failed { message } if message.contains("changed or was replaced")
     ));
 }
 
@@ -748,4 +760,229 @@ fn left_selects_the_packet_and_right_its_first_obu() {
     let effects = analysis.input(Input::Move(Step::Right));
     assert_eq!(effects.len(), 0);
     assert_eq!(selected(&analysis).map(|s| s.0), Some(1));
+}
+
+fn pages(effects: &[Effect]) -> Vec<(u64, u64)> {
+    effects
+        .iter()
+        .filter_map(|e| match e.command {
+            Command::AnalysisPage { first, .. } => Some((e.request_id, first)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A page of an older filter frees only its own slot: the newer page with
+/// the same first row stays asked for, and two pages at most are out.
+#[test]
+fn a_stale_page_frees_only_its_own_slot() {
+    let (mut analysis, engine) = opened(200);
+    let a = analysis.input(Input::Scroll(100));
+    assert_eq!(pages(&a).len(), 1);
+    // Filter 1: page 0 goes out next to the old one.
+    let b = analysis.input(Input::TypeFilter(1));
+    assert_eq!(pages(&b).len(), 1);
+    // Filter 2: two are out already, so none is sent yet.
+    let c = analysis.input(Input::ClearFilters);
+    assert_eq!(pages(&c), []);
+    // The first stale answer frees a slot for filter 2's page 0.
+    let after_a = engine.answer(&mut analysis, a);
+    assert_eq!(pages(&after_a).len(), 1, "{after_a:?}");
+    // Filter 1's stale page 0 must not free filter 2's page 0.
+    let b_pages: Vec<Effect> = b
+        .into_iter()
+        .filter(|e| matches!(e.command, Command::AnalysisPage { .. }))
+        .collect();
+    let after_b = engine.answer(&mut analysis, b_pages);
+    assert_eq!(pages(&after_b), [], "page 0 asked for twice");
+    engine.settle(&mut analysis, after_a);
+    engine.settle(&mut analysis, c);
+    assert_eq!(doc(&analysis).total(), Some(200));
+    assert_eq!(doc(&analysis).row(0).map(|r| r.index), Some(0));
+}
+
+/// A refused command is a failure like any other: an open fails, and a
+/// page or byte range gives its slot back.
+#[test]
+fn a_refused_command_fails_its_request() {
+    let refusal = |document_message: &str| Event::Error {
+        code: ErrorCode::Malformed,
+        message: document_message.into(),
+    };
+    let mut analysis = Analysis::new();
+    let open = analysis.input(Input::Open(vec![PathBuf::from("/media/a.obu")]));
+    analysis.event(open[0].request_id, refusal("bad frame"));
+    assert!(matches!(
+        doc(&analysis).phase(),
+        Phase::Failed { message } if message == "bad frame"
+    ));
+
+    let (mut analysis, engine) = opened(200);
+    let page = analysis.input(Input::Scroll(100));
+    analysis.event(page[0].request_id, refusal("bad page"));
+    assert!(
+        doc(&analysis)
+            .notice()
+            .is_some_and(|n| n.contains("bad page"))
+    );
+    // The slot is free: the same rows are asked for again.
+    let again = analysis.input(Input::Scroll(1));
+    assert_eq!(pages(&again).len(), 1);
+    engine.settle(&mut analysis, again);
+    let bytes = analysis.input(Input::Cursor(Step::End));
+    let asked: Vec<&Effect> = bytes
+        .iter()
+        .filter(|e| matches!(e.command, Command::AnalysisBytes { .. }))
+        .collect();
+    assert_eq!(asked.len(), 1);
+    analysis.event(asked[0].request_id, refusal("bad range"));
+    // Showing the bytes again asks again.
+    analysis.input(Input::ToggleBytes);
+    let shown = analysis.input(Input::ToggleBytes);
+    assert!(
+        shown
+            .iter()
+            .any(|e| matches!(e.command, Command::AnalysisBytes { .. }))
+    );
+}
+
+/// Answers that break the protocol fail the document; huge totals never
+/// overflow the row arithmetic.
+#[test]
+fn answers_that_do_not_fit_fail_the_document() {
+    let broken = |rows: Vec<Row>, first: u64, total: u64| {
+        let (mut analysis, _engine) = opened(200);
+        let page = analysis.input(Input::Scroll(100));
+        analysis.event(
+            page[0].request_id,
+            Event::AnalysisPage {
+                document: 1,
+                first,
+                total,
+                rows,
+            },
+        );
+        matches!(doc(&analysis).phase(), Phase::Failed { .. })
+    };
+    assert!(broken(stream(65), 100, 200), "more rows than asked for");
+    assert!(broken(stream(64), 100, 150), "rows past the total");
+    assert!(broken(Vec::new(), 100, 200), "no rows where there are some");
+    assert!(
+        broken(stream(1), 99, 200),
+        "another first row than asked for"
+    );
+    assert!(!broken(stream(64), 100, 200));
+
+    let (mut analysis, _engine) = opened(200);
+    let bytes = analysis.input(Input::Cursor(Step::End));
+    let (asked, offset) = bytes
+        .iter()
+        .find_map(|e| match e.command {
+            Command::AnalysisBytes { offset, .. } => Some((e.request_id, offset)),
+            _ => None,
+        })
+        .unwrap_or_default();
+    analysis.event(
+        asked,
+        Event::AnalysisBytes {
+            document: 1,
+            offset,
+            bytes: vec![0; 3],
+        },
+    );
+    assert!(matches!(doc(&analysis).phase(), Phase::Failed { .. }));
+
+    // A document that claims u64::MAX rows: End and Page Down saturate.
+    let (mut analysis, _engine) = opened(200);
+    let page = analysis.input(Input::Scroll(100));
+    analysis.event(
+        page[0].request_id,
+        Event::AnalysisPage {
+            document: 1,
+            first: 100,
+            total: u64::MAX,
+            rows: stream(64),
+        },
+    );
+    let end = analysis.input(Input::Move(Step::End));
+    assert!(matches!(
+        commands(&end)[..],
+        [Command::AnalysisPage { first, .. }] if *first == u64::MAX - VISIBLE_ROWS
+    ));
+    assert_eq!(doc(&analysis).top(), u64::MAX - VISIBLE_ROWS);
+    analysis.input(Input::Scroll(i32::MAX));
+    assert_eq!(doc(&analysis).top(), u64::MAX - VISIBLE_ROWS);
+    analysis.input(Input::Move(Step::PageDown));
+    // Rows that would end past u64::MAX do not fit.
+    analysis.event(
+        end[0].request_id,
+        Event::AnalysisPage {
+            document: 1,
+            first: u64::MAX - VISIBLE_ROWS,
+            total: u64::MAX,
+            rows: stream(VISIBLE_ROWS + 1),
+        },
+    );
+    assert!(matches!(doc(&analysis).phase(), Phase::Failed { .. }));
+}
+
+/// A failed position lookup does not cancel a byte click that waits for
+/// its answer.
+#[test]
+fn a_failed_position_lookup_keeps_a_pending_byte_selection() {
+    let (mut analysis, engine) = opened(40);
+    let effects = analysis.input(Input::RowClicked(3));
+    engine.settle(&mut analysis, effects);
+    let click = analysis.input(Input::ByteClicked(50));
+    let filter = analysis.input(Input::TypeFilter(1));
+    for effect in &filter {
+        if matches!(effect.command, Command::AnalysisLocate { .. }) {
+            analysis.event(
+                effect.request_id,
+                Event::AnalysisFailed {
+                    document: 1,
+                    code: AnalysisFailure::InvalidRequest,
+                    message: "no".into(),
+                },
+            );
+        }
+    }
+    engine.settle(&mut analysis, click);
+    assert_eq!(selected(&analysis).map(|s| s.0), Some(5));
+}
+
+/// A request's problem stays until the next input for that document; what
+/// stays true of the file stays.
+#[test]
+fn notices_clear_at_the_next_input_and_cautions_stay() {
+    let (mut analysis, _engine) = opened(200);
+    let effects = analysis.input(Input::ByteClicked(3));
+    analysis.event(
+        effects[0].request_id,
+        Event::AnalysisFailed {
+            document: 1,
+            code: AnalysisFailure::LimitReached,
+            message: "more than 64 requests are waiting".into(),
+        },
+    );
+    assert!(doc(&analysis).notice().is_some());
+    analysis.input(Input::Scroll(1));
+    assert_eq!(doc(&analysis).notice(), None);
+
+    let engine = Engine { rows: stream(40) };
+    let mut analysis = Analysis::new();
+    let effects = analysis.input(Input::OpenResult(ResultOf {
+        item: 1,
+        source: PathBuf::from("/media/a.y4m"),
+        output: PathBuf::from("/media/a.obu"),
+        bytes: 5,
+    }));
+    engine.settle(&mut analysis, effects);
+    analysis.input(Input::Scroll(1));
+    analysis.input(Input::Move(Step::Down));
+    assert!(
+        doc(&analysis)
+            .notice()
+            .is_some_and(|n| n.contains("conversion wrote 5"))
+    );
 }

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
-//! Analyze scenarios: the app's real `Analysis`, answered with the facts
-//! the inspect engine reports for two hand-built fixtures of the engine
-//! tests (`ivf()` and a truncated `annex_b()` in
-//! `studio-engine/src/inspect/document/tests.rs`), and their bytes.
+//! Analyze scenarios: the app's real session and the real inspect engine
+//! (`splot-studio-engine`, built in the same profile beside `examples/`)
+//! on the hand-built fixtures of the engine tests, written to a temporary
+//! folder.
 //!
 //! `analyze-empty`, `analyze-opening`, `analyze-ivf` (the extended tile
 //! group selected), `analyze-filtered` (temporal delimiters only: the
@@ -12,92 +12,20 @@
 //! unparsed region selected) and `analyze-failed` (not an AV2 stream).
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
 
-use studio_app::analysis::{Analysis, Effect, Input};
-use studio_domain::analysis::{
-    AnalysisFailure, DocumentSummary, Element, Framing, IvfHeaderFact, KindFilter, LayerCount,
-    LayerId, LocateTarget, ObuFact, ObuTypeCount, PacketFact, Problem, ProblemKind, Provenance,
-    Row, ScanOutcome, Span,
-};
-use studio_domain::job::SourceFingerprint;
-use studio_domain::protocol::{Command, Event};
+use studio_app::analysis::{Input, Phase};
+use studio_app::engine::{Delivery, ENGINE_NAME};
+use studio_app::session::{Route, Session};
+use studio_app::state::{AppState, Intent};
+use studio_app::workspace::Workspace;
+use studio_domain::analysis::KindFilter;
 
-/// A document's facts and bytes, as the engine would serve them.
-struct Fixture {
-    summary: DocumentSummary,
-    rows: Vec<Row>,
-    bytes: Vec<u8>,
-}
-
-fn span(offset: u64, len: u64, provenance: Provenance) -> Span {
-    Span {
-        offset,
-        len,
-        provenance,
-    }
-}
-
-/// An OBU fact: `[prefix, obu, header, payload, stream]` spans as
-/// `(offset, len)`, and the three layer ids, signaled when `extension`.
-fn obu(
-    index: u64,
-    packet: Option<u64>,
-    (obu_type, name): (u8, &str),
-    extension: bool,
-    layers: [u8; 3],
-    spans: [(u64, u64); 5],
-) -> Element {
-    use Provenance::{Derived, Inferred, Located, Signaled};
-    let ext = if extension { Signaled } else { Inferred };
-    let [prefix, whole, header, payload, stream] = spans;
-    Element::Obu {
-        obu: ObuFact {
-            index,
-            packet,
-            obu_type,
-            type_name: name.into(),
-            reserved: false,
-            has_extension: extension,
-            temporal_layer_id: LayerId {
-                value: layers[0],
-                provenance: Signaled,
-            },
-            embedded_layer_id: LayerId {
-                value: layers[1],
-                provenance: ext,
-            },
-            extended_layer_id: LayerId {
-                value: layers[2],
-                provenance: ext,
-            },
-            length_prefix: span(prefix.0, prefix.1, Derived),
-            obu: span(whole.0, whole.1, Located),
-            header: span(header.0, header.1, Located),
-            payload: span(payload.0, payload.1, Located),
-            stream: span(stream.0, stream.1, Derived),
-        },
-    }
-}
-
-fn packet(index: u64, at: u64, len: u64, stream: u64) -> Element {
-    Element::Packet {
-        packet: PacketFact {
-            index,
-            pts: index,
-            header: span(at, 12, Provenance::Derived),
-            payload: span(at + 12, len, Provenance::Located),
-            stream: span(stream, len, Provenance::Derived),
-        },
-    }
-}
-
-const TD: (u8, &str) = (2, "OBU_TEMPORAL_DELIMITER");
-const SH: (u8, &str) = (1, "OBU_SEQUENCE_HEADER");
-const TG: (u8, &str) = (7, "OBU_REGULAR_TILE_GROUP");
-
-/// Three records: TD and sequence header, an empty payload, TD and the
-/// extended tile group. 82 bytes.
-fn ivf() -> Fixture {
+/// The engine tests' `ivf()`: three records (TD and sequence header, an
+/// empty payload, TD and a tile group with the extension), 82 bytes.
+fn ivf() -> Vec<u8> {
     let mut bytes = b"DKIF".to_vec();
     bytes.extend(0_u16.to_le_bytes());
     bytes.extend(32_u16.to_le_bytes());
@@ -117,303 +45,128 @@ fn ivf() -> Fixture {
         bytes.extend(pts.to_le_bytes());
         bytes.extend(payload);
     }
-    let elements = vec![
-        Element::IvfHeader {
-            span: span(0, 32, Provenance::Signaled),
-        },
-        packet(0, 32, 7, 0),
-        obu(
-            0,
-            Some(0),
-            TD,
-            false,
-            [0, 0, 31],
-            [(44, 1), (45, 1), (45, 1), (46, 0), (0, 2)],
-        ),
-        obu(
-            1,
-            Some(0),
-            SH,
-            false,
-            [0, 0, 0],
-            [(46, 1), (47, 4), (47, 1), (48, 3), (2, 5)],
-        ),
-        packet(1, 51, 0, 7),
-        packet(2, 63, 7, 7),
-        obu(
-            2,
-            Some(2),
-            TD,
-            false,
-            [0, 0, 31],
-            [(75, 1), (76, 1), (76, 1), (77, 0), (7, 2)],
-        ),
-        obu(
-            3,
-            Some(2),
-            TG,
-            true,
-            [1, 2, 5],
-            [(77, 1), (78, 4), (78, 2), (80, 2), (9, 5)],
-        ),
-    ];
-    let parents = [None, None, Some(1), Some(1), None, None, Some(5), Some(5)];
-    Fixture {
-        summary: DocumentSummary {
-            fingerprint: SourceFingerprint {
-                len: 82,
-                modified: None,
-            },
-            framing: Framing::Ivf,
-            ivf_header: Some(IvfHeaderFact {
-                version: 0,
-                header_len: 32,
-                fourcc: *b"AV02",
-                width: 16,
-                height: 16,
-                timebase_numerator: 1,
-                timebase_denominator: 30,
-                frame_count: 3,
-            }),
-            elements: 8,
-            packets: 3,
-            obus: 4,
-            unparsed: 0,
-            obu_types: vec![count(SH, 1), count(TD, 2), count(TG, 1)],
-            layers: vec![layer(0, 0, 3), layer(1, 2, 1)],
-            outcome: ScanOutcome::Complete,
-        },
-        rows: rows(elements, &parents),
-        bytes,
-    }
+    bytes
 }
 
 /// TD, sequence header, then a padding OBU that declares 131 bytes and has
-/// two: reading stops there. 11 bytes.
-fn damaged() -> Fixture {
-    let message = "the OBU does not parse: OBU payload out of range at byte 9: size 131 exceeds 2 \
-                   remaining byte(s)";
-    let elements = vec![
-        obu(
-            0,
-            None,
-            TD,
-            false,
-            [0, 0, 31],
-            [(0, 1), (1, 1), (1, 1), (2, 0), (0, 2)],
-        ),
-        obu(
-            1,
-            None,
-            SH,
-            false,
-            [0, 0, 0],
-            [(2, 1), (3, 4), (3, 1), (4, 3), (2, 5)],
-        ),
-        Element::Unparsed {
-            span: span(7, 4, Provenance::Derived),
-            kind: ProblemKind::Malformed,
-            message: message.into(),
-        },
-    ];
-    Fixture {
-        summary: DocumentSummary {
-            fingerprint: SourceFingerprint {
-                len: 11,
-                modified: None,
-            },
-            framing: Framing::AnnexB,
-            ivf_header: None,
-            elements: 3,
-            packets: 0,
-            obus: 2,
-            unparsed: 1,
-            obu_types: vec![count(SH, 1), count(TD, 1)],
-            layers: vec![layer(0, 0, 2)],
-            outcome: ScanOutcome::Stopped {
-                problem: Problem {
-                    kind: ProblemKind::Malformed,
-                    offset: 7,
-                    message: message.into(),
-                },
-            },
-        },
-        rows: rows(elements, &[None, None, None]),
-        bytes: vec![
-            0x01, 0x08, 0x04, 0x04, 0xAA, 0xBB, 0xCC, 0x83, 0x01, 0x64, 0x5A,
-        ],
+/// two. 11 bytes.
+const TRUNCATED: [u8; 11] = [
+    0x01, 0x08, 0x04, 0x04, 0xAA, 0xBB, 0xCC, 0x83, 0x01, 0x64, 0x5A,
+];
+
+/// A session over the real inspect engine, and the folder of its files.
+pub struct Scenario {
+    pub session: Session,
+    rx: Receiver<(Route, Delivery)>,
+    folder: PathBuf,
+}
+
+impl Drop for Scenario {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.folder);
     }
 }
 
-fn count((obu_type, name): (u8, &str), count: u64) -> ObuTypeCount {
-    ObuTypeCount {
-        obu_type,
-        type_name: name.into(),
-        count,
+impl Scenario {
+    fn file(&self, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+        let path = self.folder.join(name);
+        std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+        Ok(path)
     }
-}
 
-const fn layer(temporal: u8, embedded: u8, count: u64) -> LayerCount {
-    LayerCount {
-        temporal,
-        embedded,
-        count,
+    fn input(&mut self, input: Input) {
+        self.session.analysis_input(input);
     }
-}
 
-fn rows(elements: Vec<Element>, parents: &[Option<u64>]) -> Vec<Row> {
-    (0..)
-        .zip(elements)
-        .zip(parents)
-        .map(|((index, element), parent)| Row {
-            index,
-            parent: *parent,
-            element,
-        })
-        .collect()
-}
-
-impl Fixture {
-    /// Answers `effects` and everything they lead to.
-    fn settle(&self, analysis: &mut Analysis, mut effects: Vec<Effect>) {
-        while !effects.is_empty() {
-            let mut next = Vec::new();
-            for effect in effects {
-                if let Some(event) = self.answer(&effect.command) {
-                    next.extend(analysis.event(effect.request_id, event));
-                }
-            }
-            effects = next;
+    /// Delivers the engine's answers until nothing is asked for.
+    fn settle(&mut self) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.session.analysis().waiting() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let (route, delivery) = self
+                .rx
+                .recv_timeout(left)
+                .map_err(|e| format!("the inspect engine did not answer: {e}"))?;
+            self.session.deliver(route, delivery, Instant::now());
         }
-    }
-
-    fn answer(&self, command: &Command) -> Option<Event> {
-        Some(match command.clone() {
-            Command::AnalysisOpen { document, .. } => Event::AnalysisOpened {
-                document,
-                summary: self.summary.clone(),
-            },
-            Command::AnalysisPage {
-                document,
-                filter,
-                first,
-                count,
-            } => {
-                let admitted: Vec<&Row> = self
-                    .rows
-                    .iter()
-                    .filter(|r| filter.admits(&r.element))
-                    .collect();
-                Event::AnalysisPage {
-                    document,
-                    first,
-                    total: admitted.len() as u64,
-                    rows: admitted
-                        .into_iter()
-                        .skip(usize::try_from(first).ok()?)
-                        .take(count as usize)
-                        .cloned()
-                        .collect(),
-                }
-            }
-            Command::AnalysisLocate {
-                document,
-                filter,
-                target,
-            } => {
-                let found = match target {
-                    LocateTarget::Element { index } => {
-                        self.rows.get(usize::try_from(index).ok()?)?
-                    }
-                    // The last element that starts at or before the byte.
-                    LocateTarget::Offset { offset } => self
-                        .rows
-                        .iter()
-                        .rev()
-                        .find(|r| studio_app::analysis::extent(&r.element).0 <= offset)?,
-                };
-                let row = filter.admits(&found.element).then(|| {
-                    self.rows
-                        .iter()
-                        .take_while(|r| r.index != found.index)
-                        .filter(|r| filter.admits(&r.element))
-                        .count() as u64
-                });
-                Event::AnalysisLocated {
-                    document,
-                    row,
-                    found: Box::new(found.clone()),
-                }
-            }
-            Command::AnalysisBytes {
-                document,
-                offset,
-                len,
-            } => {
-                let start = usize::try_from(offset).ok()?;
-                Event::AnalysisBytes {
-                    document,
-                    offset,
-                    bytes: self.bytes.get(start..start + len as usize)?.to_vec(),
-                }
-            }
-            _ => return None,
-        })
+        Ok(())
     }
 }
 
-/// The Analyze state of `name`, or `None` when it is no Analyze scenario.
-pub fn scenario(name: &str) -> Option<Analysis> {
-    let mut analysis = Analysis::new();
-    let open = |analysis: &mut Analysis, file: &str| {
-        analysis.input(Input::Open(vec![PathBuf::from(format!(
-            "/home/user/Videos/{file}"
-        ))]))
+/// The Analyze state of `name`, `Ok(None)` when it is no Analyze scenario.
+pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
+    if !name.starts_with("analyze-") {
+        return Ok(None);
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let engine = exe
+        .parent()
+        .and_then(|examples| examples.parent())
+        .map(|profile| profile.join(format!("{ENGINE_NAME}{}", std::env::consts::EXE_SUFFIX)))
+        .filter(|path| path.is_file())
+        .ok_or("build the engine first: cargo build -p studio-engine")?;
+    let folder = std::env::temp_dir().join(format!("studio-snapshot-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
+    let (tx, rx) = mpsc::channel();
+    let post = Arc::new(move |route, delivery| {
+        let _ = tx.send((route, delivery));
+    });
+    let mut scenario = Scenario {
+        session: Session::new(AppState::default(), Ok(engine), post, None),
+        rx,
+        folder,
     };
+    scenario.session.dispatch(
+        Intent::WorkspaceRequested(Workspace::Analyze),
+        Instant::now(),
+    );
     match name {
         "analyze-empty" => {}
         "analyze-opening" => {
-            open(&mut analysis, "park walk.ivf");
+            // Asked for, and never answered here.
+            let path = scenario.file("park walk.ivf", &ivf())?;
+            scenario.input(Input::Open(vec![path]));
         }
         "analyze-ivf" | "analyze-filtered" => {
-            let fixture = ivf();
-            let effects = open(&mut analysis, "park walk.ivf");
-            fixture.settle(&mut analysis, effects);
-            let effects = analysis.input(Input::RowClicked(7));
-            fixture.settle(&mut analysis, effects);
+            let path = scenario.file("park walk.ivf", &ivf())?;
+            scenario.input(Input::Open(vec![path]));
+            scenario.settle()?;
+            scenario.input(Input::RowClicked(7));
+            scenario.settle()?;
             if name == "analyze-filtered" {
-                let td = analysis
+                let td = scenario
+                    .session
+                    .analysis()
                     .type_choices()
                     .iter()
                     .position(|k| *k == KindFilter::Obu { obu_type: 2 })
-                    .and_then(|i| i32::try_from(i).ok())?;
-                let effects = analysis.input(Input::TypeFilter(td));
-                fixture.settle(&mut analysis, effects);
+                    .and_then(|i| i32::try_from(i).ok())
+                    .ok_or("no temporal delimiters")?;
+                scenario.input(Input::TypeFilter(td));
+                scenario.settle()?;
             }
         }
         "analyze-damaged" => {
-            let fixture = damaged();
-            let effects = open(&mut analysis, "cut short.obu");
-            fixture.settle(&mut analysis, effects);
-            let effects = analysis.input(Input::RowClicked(2));
-            fixture.settle(&mut analysis, effects);
+            let path = scenario.file("cut short.obu", &TRUNCATED)?;
+            scenario.input(Input::Open(vec![path]));
+            scenario.settle()?;
+            scenario.input(Input::RowClicked(2));
+            scenario.settle()?;
         }
         "analyze-failed" => {
-            let effects = open(&mut analysis, "notes.txt");
-            for effect in effects {
-                analysis.event(
-                    effect.request_id,
-                    Event::AnalysisFailed {
-                        document: 1,
-                        code: AnalysisFailure::Unsupported,
-                        message: "neither an IVF file nor an AV2 Annex B stream that starts with \
-                                  a temporal delimiter OBU"
-                            .into(),
-                    },
-                );
+            let path = scenario.file("notes.txt", b"not a stream")?;
+            scenario.input(Input::Open(vec![path]));
+            scenario.settle()?;
+            let failed = scenario
+                .session
+                .analysis()
+                .shown()
+                .is_some_and(|d| matches!(d.phase(), Phase::Failed { .. }));
+            if !failed {
+                return Err("the engine opened a text file".into());
             }
         }
-        _ => return None,
+        other => return Err(format!("unknown scenario {other:?}")),
     }
-    Some(analysis)
+    Ok(Some(scenario))
 }

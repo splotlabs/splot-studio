@@ -27,7 +27,7 @@
 //! journal cannot be written), `many` (eight rows, the list scrolls) and
 //! `restored` (the list after the app stopped mid-job). `already-open` is the
 //! window a second instance shows. The `analyze-*` scenarios show the Analyze
-//! workspace; see `analyze.rs`.
+//! workspace with the real inspect engine; see `analyze.rs`.
 //!
 //! The picture area is drawn by the app's real `Preview`, its requests
 //! answered with painted test pictures (a landscape, coarser on the result
@@ -732,15 +732,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "preview-compare" | "preview-unavailable" => "completed",
         other => other,
     };
-    if let Some(analysis) = analyze::scenario(name) {
-        let mut state = AppState::default();
-        state.apply(
-            Intent::WorkspaceRequested(studio_app::workspace::Workspace::Analyze),
-            now,
-            &NoFiles,
-        );
-        studio_app::render(&window, &state, now);
-        studio_app::render_analysis(&window, &analysis);
+    if let Some(scenario) = analyze::scenario(name)? {
+        studio_app::render(&window, scenario.session.state(), now);
+        studio_app::render_analysis(&window, scenario.session.analysis());
         window.show()?;
         return capture(&window, out);
     }

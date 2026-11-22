@@ -71,6 +71,17 @@ pub const fn provenance(provenance: Provenance) -> &'static str {
     }
 }
 
+/// Where a value came from, in one word.
+#[must_use]
+pub const fn provenance_word(provenance: Provenance) -> &'static str {
+    match provenance {
+        Provenance::Signaled => "signaled",
+        Provenance::Inferred => "inferred",
+        Provenance::Located => "located",
+        Provenance::Derived => "derived",
+    }
+}
+
 /// The framing, for people.
 #[must_use]
 pub const fn framing(framing: Framing) -> &'static str {
@@ -173,11 +184,25 @@ pub fn row_detail(row: &Row) -> String {
         Element::Obu { obu } => format!(
             "{} · T{} M{}",
             byte_count(obu.obu.len),
-            obu.temporal_layer_id.value,
-            obu.embedded_layer_id.value
+            layer_value(obu.temporal_layer_id),
+            layer_value(obu.embedded_layer_id)
         ),
     }
 }
+
+/// A layer id as its value, followed by "inferred" when the file does not
+/// signal it. Rows, their clipboard and screen-reader lines and the layer
+/// filter all use this rule.
+fn layer_value(id: LayerId) -> String {
+    if id.provenance == Provenance::Inferred {
+        format!("{} {INFERRED}", id.value)
+    } else {
+        id.value.to_string()
+    }
+}
+
+/// The word that follows an inferred layer id.
+const INFERRED: &str = "inferred";
 
 /// A row's first byte in hexadecimal: `0x2C`.
 #[must_use]
@@ -223,15 +248,22 @@ pub fn layer_label(layer: Option<LayerFilter>, summary: Option<&DocumentSummary>
     match layer {
         None => "All layers".to_owned(),
         Some(layer) => {
-            let n = summary
+            let (n, inferred) = summary
                 .and_then(|s| {
                     s.layers
                         .iter()
                         .find(|l| l.temporal == layer.temporal && l.embedded == layer.embedded)
                 })
-                .map_or(0, |l| l.count);
+                .map_or((0, 0), |l| (l.count, l.inferred));
+            // The pair holds OBUs whose mlayer is signaled and OBUs whose
+            // mlayer is inferred with the same value.
+            let mark = match inferred {
+                0 => String::new(),
+                i if i == n => format!(" {INFERRED}"),
+                i => format!(" {INFERRED} in {}", count(i)),
+            };
             format!(
-                "tlayer {} · mlayer {} ({})",
+                "tlayer {} · mlayer {}{mark} ({})",
                 layer.temporal,
                 layer.embedded,
                 count(n)
@@ -505,12 +537,6 @@ fn obu_properties(obu: &ObuFact, parent: Option<u64>) -> Vec<Property> {
     rows
 }
 
-/// The text of one row of the property list for the clipboard.
-#[must_use]
-pub fn property_line(property: &Property) -> String {
-    format!("{}: {}", property.label, property.value)
-}
-
 #[cfg(test)]
 mod tests {
     use studio_domain::analysis::{LayerCount, ObuTypeCount, Problem};
@@ -539,11 +565,20 @@ mod tests {
                 type_name: "OBU_TEMPORAL_DELIMITER".into(),
                 count: 2,
             }],
-            layers: vec![LayerCount {
-                temporal: 1,
-                embedded: 2,
-                count: 1,
-            }],
+            layers: vec![
+                LayerCount {
+                    temporal: 1,
+                    embedded: 2,
+                    count: 1,
+                    inferred: 0,
+                },
+                LayerCount {
+                    temporal: 0,
+                    embedded: 0,
+                    count: 3,
+                    inferred: 2,
+                },
+            ],
             outcome,
         }
     }
@@ -640,6 +675,16 @@ mod tests {
             ),
             "tlayer 1 · mlayer 2 (1)"
         );
+        assert_eq!(
+            layer_label(
+                Some(LayerFilter {
+                    temporal: 0,
+                    embedded: 0
+                }),
+                Some(&s)
+            ),
+            "tlayer 0 · mlayer 0 inferred in 2 (3)"
+        );
         assert_eq!(rows_line(RowFilter::default(), Some(8), 8), "8 elements");
         assert_eq!(rows_line(RowFilter::default(), None, 8), "Loading rows…");
         let tds = RowFilter {
@@ -651,5 +696,57 @@ mod tests {
             rows_line(tds, Some(0), 8),
             "No element matches the filters."
         );
+    }
+}
+
+#[cfg(test)]
+mod layer_tests {
+    use studio_domain::analysis::{LayerId, ObuFact, Provenance, Row, Span};
+
+    use super::*;
+
+    /// An inferred layer id is never shown as a signaled one: the row, its
+    /// line for the clipboard and screen readers say so.
+    #[test]
+    fn inferred_layer_ids_are_marked() {
+        let span = Span {
+            offset: 0,
+            len: 1,
+            provenance: Provenance::Located,
+        };
+        let layer = |value, provenance| LayerId { value, provenance };
+        let row = |extension: bool| Row {
+            index: 0,
+            parent: None,
+            element: Element::Obu {
+                obu: ObuFact {
+                    index: 0,
+                    packet: None,
+                    obu_type: 2,
+                    type_name: "OBU_TEMPORAL_DELIMITER".into(),
+                    reserved: false,
+                    has_extension: extension,
+                    temporal_layer_id: layer(0, Provenance::Signaled),
+                    embedded_layer_id: layer(
+                        0,
+                        if extension {
+                            Provenance::Signaled
+                        } else {
+                            Provenance::Inferred
+                        },
+                    ),
+                    extended_layer_id: layer(31, Provenance::Inferred),
+                    length_prefix: span,
+                    obu: span,
+                    header: span,
+                    payload: span,
+                    stream: span,
+                },
+            },
+        };
+        assert_eq!(row_detail(&row(false)), "1 byte · T0 M0 inferred");
+        assert!(row_line(&row(false)).contains("M0 inferred"));
+        assert_eq!(row_detail(&row(true)), "1 byte · T0 M0");
+        assert!(!row_line(&row(true)).contains("inferred"));
     }
 }

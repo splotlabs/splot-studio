@@ -17,9 +17,13 @@
 //! - An IVF record whose payload does not parse keeps its packet and the OBUs
 //!   before the fault; the rest of the payload is a region, and the next
 //!   record is read as usual.
-//! - A truncated last IVF record, a partial record header, an over-cap unit,
-//!   a read failure or the element limit ends reading; the rest of the file,
-//!   from the start of that record, is one region.
+//! - A truncated last IVF record, a partial record header, an over-cap unit
+//!   or a read failure ends reading; the rest of the file, from the start of
+//!   that record, is one region.
+//! - The element limit ends reading too; the rest of the file, from the end
+//!   of the last element kept, is one region. When that element is inside
+//!   an IVF payload, the region starts inside the payload and ends past it,
+//!   so it belongs to no packet.
 //!
 //! Splot reports where each OBU header starts, its size and its payload; a
 //! length prefix span, an IVF record header span and every elementary-stream
@@ -294,7 +298,7 @@ impl Item {
     /// Whether `filter` admits it.
     const fn admitted(&self, filter: RowFilter) -> bool {
         match self {
-            Self::IvfHeader { .. } | Self::Packet { .. } => filter.admits_wrapper(),
+            Self::IvfHeader { .. } | Self::Packet { .. } => filter.is_all(),
             Self::Obu { header, .. } => filter.admits_obu(
                 header.obu_type.raw(),
                 header.temporal_layer_id.get(),
@@ -473,24 +477,27 @@ impl Scanned {
     /// The layer pairs present. `obu_tlayer_id` has two bits and
     /// `obu_mlayer_id` three.
     fn layers(&self) -> Vec<LayerCount> {
-        let mut counts = [[0_u64; 8]; 4];
+        // (all, inferred) per pair.
+        let mut counts = [[(0_u64, 0_u64); 8]; 4];
         for item in &self.items {
             if let Item::Obu { header, .. } = item
                 && let Some(slot) = counts
                     .get_mut(usize::from(header.temporal_layer_id.get()))
                     .and_then(|row| row.get_mut(usize::from(header.embedded_layer_id.get())))
             {
-                *slot += 1;
+                slot.0 += 1;
+                slot.1 += u64::from(!header.has_header_extension);
             }
         }
         let mut layers = Vec::new();
         for (temporal, row) in (0_u8..).zip(counts) {
-            for (embedded, count) in (0_u8..).zip(row) {
+            for (embedded, (count, inferred)) in (0_u8..).zip(row) {
                 if count > 0 {
                     layers.push(LayerCount {
                         temporal,
                         embedded,
                         count,
+                        inferred,
                     });
                 }
             }
@@ -833,7 +840,8 @@ fn clip(mut message: String) -> String {
 }
 
 /// The packet whose payload holds the element at `at`, if any. Only the
-/// OBUs and unparsed regions after a packet and inside its payload have one.
+/// OBUs and unparsed regions after a packet and wholly inside its payload
+/// have one.
 fn parent(items: &[Item], at: usize) -> Option<usize> {
     let item = items.get(at)?;
     if !matches!(
@@ -848,7 +856,8 @@ fn parent(items: &[Item], at: usize) -> Option<usize> {
     let packet = items[..at]
         .iter()
         .rposition(|i| matches!(i, Item::Packet { .. }))?;
-    (item.start() < items[packet].end()).then_some(packet)
+    let inside = item.start() < items[packet].end() && item.end() <= items[packet].end();
+    inside.then_some(packet)
 }
 
 fn row(items: &[Item], at: usize) -> Row {

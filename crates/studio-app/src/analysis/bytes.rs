@@ -56,7 +56,6 @@ impl Analysis {
         };
         match parse_offset(text).filter(|o| *o < len) {
             Some(offset) => {
-                doc.notice = None;
                 doc.bytes.cursor = offset;
                 if !in_window(doc.bytes.offset, offset) {
                     doc.bytes.offset = line_of(offset);
@@ -98,13 +97,16 @@ impl Analysis {
         // At most WINDOW_BYTES, which MAX_BYTE_RANGE covers.
         let count = u32::try_from((len - offset).min(WINDOW_BYTES)).unwrap_or(1);
         let document = doc.id;
-        let id = self.send(document, Asked::Bytes { offset }, out, move |document| {
-            Command::AnalysisBytes {
+        let id = self.send(
+            document,
+            Asked::Bytes { offset, len: count },
+            out,
+            move |document| Command::AnalysisBytes {
                 document,
                 offset,
                 len: count,
-            }
-        });
+            },
+        );
         self.documents[at].bytes.asked = Some((id, offset));
     }
 }

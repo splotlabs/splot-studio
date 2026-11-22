@@ -158,11 +158,12 @@ fn property(p: PropertyText) -> Property {
 /// has not.
 fn rows(doc: &Document) -> ModelRc<NavRow> {
     let selected = doc.selected().map(|s| s.row.index);
-    let end = doc
-        .total()
-        .map_or(doc.top() + 1, |t| t.min(doc.top() + VISIBLE_ROWS));
+    let top = doc.top();
+    let end = doc.total().map_or(top.saturating_add(1), |t| {
+        t.min(top.saturating_add(VISIBLE_ROWS))
+    });
     model(
-        (doc.top()..end)
+        (top..end)
             .map(|position| match doc.row(position) {
                 Some(row) => NavRow {
                     loaded: true,
@@ -202,26 +203,30 @@ fn region(element: Option<&Element>, offset: u64) -> ByteRegion {
     }
 }
 
-/// The legend for the selected element: its parts that the engine
-/// located, and where each span came from.
+/// The legend for the selected element: its parts, each with where its
+/// span came from.
 fn legend(element: Option<&Element>) -> Vec<Legend> {
-    let item = |label: &str, region| Legend {
-        label: label.into(),
+    let item = |label: &str, span: Span, region| Legend {
+        label: format!("{label} ({})", text::provenance_word(span.provenance)).into(),
         region,
     };
     match element {
         None => Vec::new(),
-        Some(Element::IvfHeader { .. }) => vec![item("IVF file header", ByteRegion::FileHeader)],
-        Some(Element::Packet { .. }) => vec![
-            item("Record header (derived)", ByteRegion::RecordHeader),
-            item("Payload (located)", ByteRegion::Payload),
+        Some(Element::IvfHeader { span }) => {
+            vec![item("IVF file header", *span, ByteRegion::FileHeader)]
+        }
+        Some(Element::Packet { packet }) => vec![
+            item("Record header", packet.header, ByteRegion::RecordHeader),
+            item("Payload", packet.payload, ByteRegion::Payload),
         ],
-        Some(Element::Obu { .. }) => vec![
-            item("Length prefix (derived)", ByteRegion::Prefix),
-            item("Header (located)", ByteRegion::Header),
-            item("Payload (located)", ByteRegion::Payload),
+        Some(Element::Obu { obu }) => vec![
+            item("Length prefix", obu.length_prefix, ByteRegion::Prefix),
+            item("Header", obu.header, ByteRegion::Header),
+            item("Payload", obu.payload, ByteRegion::Payload),
         ],
-        Some(Element::Unparsed { .. }) => vec![item("Unparsed", ByteRegion::Unparsed)],
+        Some(Element::Unparsed { span, .. }) => {
+            vec![item("Unparsed", *span, ByteRegion::Unparsed)]
+        }
     }
 }
 

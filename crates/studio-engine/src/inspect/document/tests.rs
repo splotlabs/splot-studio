@@ -968,9 +968,11 @@ fn the_summary_counts_types_layers_and_unparsed_regions() -> Result<(), Refusal>
     let layers: Vec<_> = summary
         .layers
         .iter()
-        .map(|l| (l.temporal, l.embedded, l.count))
+        .map(|l| (l.temporal, l.embedded, l.count, l.inferred))
         .collect();
-    assert_eq!(layers, [(0, 0, 3), (1, 2, 1), (3, 0, 1)]);
+    // Only the tile group carries the extension, so only its mlayer is
+    // signaled.
+    assert_eq!(layers, [(0, 0, 3, 3), (1, 2, 1, 0), (3, 0, 1, 1)]);
     assert_eq!(summary.unparsed, 0);
     // A truncated stream: one region.
     let mut cut = annex_b();
@@ -1230,6 +1232,38 @@ fn the_ivf_element_limit_counts_the_header() -> Result<(), Refusal> {
             IVF_FRAME_HEADER_SIZE as u64
         ))
     );
+    Ok(())
+}
+
+/// The element limit reached inside a payload leaves a region that starts
+/// in that payload and ends past it: it belongs to no packet.
+#[test]
+fn the_region_after_an_element_limit_in_a_payload_has_no_packet() -> Result<(), Refusal> {
+    let mut bytes = ivf_header(*b"AV02", 32);
+    // The header and these records take all but three slots.
+    let empty = MAX_RETAINED_ELEMENTS - 3;
+    for pts in 0..empty as u64 {
+        bytes.extend(record(pts, &[]));
+    }
+    // A packet and one OBU fit; the second OBU is over the limit.
+    bytes.extend(record(empty as u64, &[0x01, 0x08, 0x01, 0x08, 0x01, 0x08]));
+    bytes.extend(record(empty as u64 + 1, &TD_SH));
+    let scanned = scanned(&bytes)?;
+    let last = scanned.items.len() - 1;
+    let packet = last - 2;
+    assert!(matches!(scanned.items[packet], Item::Packet { .. }));
+    assert!(matches!(
+        scanned.items[last],
+        Item::Unparsed {
+            kind: ProblemKind::LimitReached,
+            ..
+        }
+    ));
+    // It starts inside the packet's payload and ends at the end of the file.
+    assert!(scanned.items[last].start() < scanned.items[packet].end());
+    assert_eq!(scanned.items[last].end(), bytes.len() as u64);
+    assert_eq!(parent(&scanned.items, last), None);
+    assert_eq!(parent(&scanned.items, last - 1), Some(packet));
     Ok(())
 }
 

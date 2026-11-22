@@ -17,8 +17,24 @@ import { IconButton } from "stage.slint";
 // What the shown document is doing; `empty` when none is open.
 export enum AnalysisState { empty, opening, open, failed }
 
-// A keyboard movement in the navigator or the byte view.
-export enum NavStep { up, down, page-up, page-down, home, end, left, right }
+// A keyboard movement in the navigator or the byte view; `none` for a key
+// that is no movement.
+export enum NavStep { none, up, down, page-up, page-down, home, end, left, right }
+
+// The movement a key asks for, the same in the navigator and the bytes.
+global Steps {
+    public pure function of(key: string) -> NavStep {
+        return key == Key.UpArrow ? NavStep.up
+            : key == Key.DownArrow ? NavStep.down
+            : key == Key.PageUp ? NavStep.page-up
+            : key == Key.PageDown ? NavStep.page-down
+            : key == Key.Home ? NavStep.home
+            : key == Key.End ? NavStep.end
+            : key == Key.LeftArrow ? NavStep.left
+            : key == Key.RightArrow ? NavStep.right
+            : NavStep.none;
+    }
+}
 
 // Which part of the selected element a byte belongs to, from the spans the
 // engine reported; `outside` for bytes of other elements.
@@ -85,7 +101,7 @@ export global Analysis {
 
     in property <[NavRow]> rows;
     // How many rows the navigator shows; Rust sends at most this many.
-    in property <int> visible-rows: 16;
+    in property <int> visible-rows: 12;
     in property <int> total-rows;
     in property <int> top-row;
     in property <bool> can-back;
@@ -151,47 +167,13 @@ component Navigator inherits KeyboardFocus {
     accessible-label: "Elements";
     accessible-description: Analysis.rows-line + ". Up and Down select, Left selects the packet that holds the selection.";
     key-pressed(event) => {
-        if event.text == Key.UpArrow {
-            root.keyboard-used();
-            Analysis.move(NavStep.up);
-            return accept;
+        let step = Steps.of(event.text);
+        if step == NavStep.none {
+            return reject;
         }
-        if event.text == Key.DownArrow {
-            root.keyboard-used();
-            Analysis.move(NavStep.down);
-            return accept;
-        }
-        if event.text == Key.PageUp {
-            root.keyboard-used();
-            Analysis.move(NavStep.page-up);
-            return accept;
-        }
-        if event.text == Key.PageDown {
-            root.keyboard-used();
-            Analysis.move(NavStep.page-down);
-            return accept;
-        }
-        if event.text == Key.Home {
-            root.keyboard-used();
-            Analysis.move(NavStep.home);
-            return accept;
-        }
-        if event.text == Key.End {
-            root.keyboard-used();
-            Analysis.move(NavStep.end);
-            return accept;
-        }
-        if event.text == Key.LeftArrow {
-            root.keyboard-used();
-            Analysis.move(NavStep.left);
-            return accept;
-        }
-        if event.text == Key.RightArrow {
-            root.keyboard-used();
-            Analysis.move(NavStep.right);
-            return accept;
-        }
-        reject
+        root.keyboard-used();
+        Analysis.move(step);
+        accept
     }
 
     FocusRing {
@@ -273,7 +255,7 @@ component Navigator inherits KeyboardFocus {
             }
 
             Text {
-                width: 64px;
+                width: 48px;
                 text: row.offset;
                 color: Tokens.text-secondary;
                 font-size: Tokens.type-caption * 1rem;
@@ -429,52 +411,18 @@ component ByteView inherits KeyboardFocus {
     accessible-label: "Bytes. " + Analysis.cursor-line;
     accessible-description: "Arrow keys move the cursor; Enter selects the element at the cursor.";
     key-pressed(event) => {
-        if event.text == Key.LeftArrow {
-            root.keyboard-used();
-            Analysis.cursor(NavStep.left);
-            return accept;
-        }
-        if event.text == Key.RightArrow {
-            root.keyboard-used();
-            Analysis.cursor(NavStep.right);
-            return accept;
-        }
-        if event.text == Key.UpArrow {
-            root.keyboard-used();
-            Analysis.cursor(NavStep.up);
-            return accept;
-        }
-        if event.text == Key.DownArrow {
-            root.keyboard-used();
-            Analysis.cursor(NavStep.down);
-            return accept;
-        }
-        if event.text == Key.PageUp {
-            root.keyboard-used();
-            Analysis.cursor(NavStep.page-up);
-            return accept;
-        }
-        if event.text == Key.PageDown {
-            root.keyboard-used();
-            Analysis.cursor(NavStep.page-down);
-            return accept;
-        }
-        if event.text == Key.Home {
-            root.keyboard-used();
-            Analysis.cursor(NavStep.home);
-            return accept;
-        }
-        if event.text == Key.End {
-            root.keyboard-used();
-            Analysis.cursor(NavStep.end);
-            return accept;
-        }
         if event.text == Key.Return || event.text == " " {
             root.keyboard-used();
             Analysis.select-at-cursor();
             return accept;
         }
-        reject
+        let step = Steps.of(event.text);
+        if step == NavStep.none {
+            return reject;
+        }
+        root.keyboard-used();
+        Analysis.cursor(step);
+        accept
     }
 
     FocusRing {
@@ -611,10 +559,13 @@ component StateCard inherits Rectangle {
 // The whole workspace.
 export component AnalyzeView inherits VerticalLayout {
     in property <string> open-shortcut;
-    property <length> navigator-width: 360px;
-    property <length> detail-width: 520px;
+    property <length> navigator-width: 320px;
+    property <length> detail-width: 380px;
+    property <length> full-width: root.navigator-width + Tokens.space-4 + root.detail-width;
 
-    spacing: Tokens.space-3;
+    min-width: root.full-width;
+    preferred-width: root.full-width;
+    spacing: Tokens.space-2;
     accessible-role: main;
     accessible-label: "Analyze";
 
@@ -624,7 +575,6 @@ export component AnalyzeView inherits VerticalLayout {
     // The documents and what reading the shown one found.
     if Analysis.documents.length > 0: HorizontalLayout {
         spacing: Tokens.space-2;
-        width: root.navigator-width + Tokens.space-4 + root.detail-width;
 
         ComboBox {
             width: root.navigator-width;
@@ -709,7 +659,7 @@ export component AnalyzeView inherits VerticalLayout {
     }
 
     if Analysis.state == AnalysisState.open: VerticalLayout {
-        spacing: Tokens.space-3;
+        spacing: Tokens.space-2;
 
         Text {
             text: Analysis.outcome-line;
@@ -786,6 +736,9 @@ export component AnalyzeView inherits VerticalLayout {
             }
         }
 
+        // The navigator and the selected element's properties side by
+        // side; the bytes under both, so the view fits a window 800
+        // pixels wide.
         HorizontalLayout {
             spacing: Tokens.space-4;
             alignment: start;
@@ -809,7 +762,7 @@ export component AnalyzeView inherits VerticalLayout {
 
             VerticalLayout {
                 width: root.detail-width;
-                spacing: Tokens.space-2;
+                spacing: Tokens.space-1;
 
                 HorizontalLayout {
                     spacing: Tokens.space-2;
@@ -825,7 +778,7 @@ export component AnalyzeView inherits VerticalLayout {
                     }
 
                     LinkButton {
-                        min-height: 24px;
+                        min-height: 20px;
                         text: "Copy Value";
                         quiet: true;
                         description: "Copy the chosen property's value";
@@ -836,7 +789,7 @@ export component AnalyzeView inherits VerticalLayout {
                     }
 
                     LinkButton {
-                        min-height: 24px;
+                        min-height: 20px;
                         text: "Copy Row";
                         quiet: true;
                         description: "Copy the selected element's row";
@@ -847,7 +800,7 @@ export component AnalyzeView inherits VerticalLayout {
                     }
 
                     LinkButton {
-                        min-height: 24px;
+                        min-height: 20px;
                         text: "Copy Offset";
                         quiet: true;
                         description: "Copy the selected element's first byte offset";
@@ -865,35 +818,46 @@ export component AnalyzeView inherits VerticalLayout {
                         root.copy(text);
                     }
                 }
+            }
+        }
 
-                HorizontalLayout {
-                    spacing: Tokens.space-2;
+        VerticalLayout {
+            spacing: Tokens.space-1;
 
-                    LinkButton {
-                        min-height: 24px;
-                        text: Analysis.bytes-shown ? "Hide Bytes" : "Show Bytes";
-                        quiet: true;
-                        description: "The file's bytes around the selection";
-                        accessible-expandable: true;
-                        accessible-expanded: Analysis.bytes-shown;
-                        clicked => {
-                            Analysis.toggle-bytes();
-                        }
-                    }
+            HorizontalLayout {
+                spacing: Tokens.space-2;
 
-                    Caption {
-                        horizontal-stretch: 1;
-                        text: Analysis.bytes-title;
-                        vertical-alignment: center;
-                        wrap: no-wrap;
-                        overflow: elide;
+                LinkButton {
+                    min-height: 20px;
+                    text: Analysis.bytes-shown ? "Hide Bytes" : "Show Bytes";
+                    quiet: true;
+                    description: "The file's bytes around the selection";
+                    accessible-expandable: true;
+                    accessible-expanded: Analysis.bytes-shown;
+                    clicked => {
+                        Analysis.toggle-bytes();
                     }
                 }
 
-                if Analysis.bytes-shown: ByteView { }
+                Caption {
+                    horizontal-stretch: 1;
+                    text: Analysis.bytes-title;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                    overflow: elide;
+                }
+            }
 
-                if Analysis.bytes-shown && Analysis.legend.length > 0: HorizontalLayout {
-                    spacing: Tokens.space-3;
+            if Analysis.bytes-shown: HorizontalLayout {
+                spacing: Tokens.space-4;
+                alignment: start;
+
+                ByteView { }
+
+                // Which part each tint is, and the byte under the cursor in
+                // words: the parts do not rest on the tints alone.
+                VerticalLayout {
+                    spacing: Tokens.space-1;
                     alignment: start;
 
                     for item in Analysis.legend: HorizontalLayout {
@@ -913,6 +877,12 @@ export component AnalyzeView inherits VerticalLayout {
                             text: item.label;
                             wrap: no-wrap;
                         }
+                    }
+
+                    Caption {
+                        text: Analysis.cursor-line;
+                        color: Tokens.text;
+                        accessible-role: none;
                     }
                 }
             }
