@@ -618,6 +618,7 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
     assert_eq!(rig.global().get_document_index(), 0);
 
     offsets_are_never_cut(&rig);
+    line_offsets_are_never_cut(&rig);
 
     eprintln!("Tab stops: navigator after {tabs}, byte view {byte_tabs} later");
 }
@@ -669,5 +670,75 @@ fn offsets_are_never_cut(rig: &Rig) {
     assert!(
         long * 6 >= short * 15,
         "cut: {long} px for 18 characters, {short} px for 6"
+    );
+}
+
+/// The byte view's line offsets follow the same rule: 16 hex digits are
+/// drawn whole. The lines have no bytes and nothing is drawn beside them,
+/// so the pixels that differ between the two drawings are the offsets.
+fn line_offsets_are_never_cut(rig: &Rig) {
+    let lines = rig.global().get_byte_lines();
+    let full = lines
+        .row_data(0)
+        .unwrap_or_else(|| unreachable!("no byte line"));
+    let mut line = full.clone();
+    line.cells = slint::ModelRc::default();
+    line.ascii = SharedString::new();
+    let set = |offsets: [&str; 2]| {
+        let rows: Vec<_> = offsets
+            .iter()
+            .map(|offset| {
+                let mut row = line.clone();
+                row.offset = (*offset).into();
+                row
+            })
+            .collect();
+        rig.global()
+            .set_byte_lines(Rc::new(slint::VecModel::from(rows)).into());
+        rig.pixels()
+    };
+    // Nothing else is drawn beside the lines.
+    let (legend, cursor) = (rig.global().get_legend(), rig.global().get_cursor_line());
+    rig.global().set_legend(slint::ModelRc::default());
+    rig.global().set_cursor_line(SharedString::new());
+    let blank = set(["", ""]);
+    let drawn = set(["FFFFFF", "FFFFFFFFFFFFFFFF"]);
+    let width = SIZE.0 as usize;
+    let differ: Vec<(usize, usize)> = (0..blank.len())
+        .filter(|&at| blank[at] != drawn[at])
+        .map(|at| (at % width, at / width))
+        .collect();
+    let top = differ.iter().map(|p| p.1).min().unwrap_or(0);
+    // The two lines are 18 px apart; split the glyphs between them.
+    let ink = |first: bool| {
+        let xs: Vec<usize> = differ
+            .iter()
+            .filter(|p| (p.1 < top + 18) == first)
+            .map(|p| p.0)
+            .collect();
+        xs.iter()
+            .max()
+            .zip(xs.iter().min())
+            .map_or(0, |(max, min)| max - min)
+    };
+    let (short, long) = (ink(true), ink(false));
+    assert!(short > 0, "the short offset was not drawn");
+    assert!(
+        long * 6 >= short * 13,
+        "cut: {long} px for 16 digits, {short} px for 6"
+    );
+    // With its 16 bytes and the legend beside it, a line with the longest
+    // offset still fits a window 800 logical pixels wide.
+    rig.global().set_legend(legend);
+    rig.global().set_cursor_line(cursor);
+    let mut longest = full;
+    longest.offset = "FFFFFFFFFFFFFFF0".into();
+    rig.global()
+        .set_byte_lines(Rc::new(slint::VecModel::from(vec![longest])).into());
+    rig.pixels();
+    assert!(
+        rig.window.get_fitted_width() <= 800.0,
+        "{}",
+        rig.window.get_fitted_width()
     );
 }
