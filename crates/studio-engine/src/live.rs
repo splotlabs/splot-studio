@@ -8,10 +8,10 @@
 //! [`Feed`], which copies it into a queue of [`QUEUE_UNITS`] units with a
 //! non-blocking send. When the decoder falls that far behind, the unit is
 //! dropped and so is every later one up to the next random access point
-//! (see [`crate::stream`]), where the decoder starts afresh: a decoder
-//! cannot skip a unit, and the Splot decoder has no way to resynchronise
-//! other than a new session at a key frame. The packets are only read, so
-//! the output is the same with or without live pictures.
+//! (see [`crate::stream`]), where the decoder is flushed and starts afresh:
+//! a decoder cannot skip a unit, and the Splot decoder has no way to
+//! resynchronise other than a new session at a key frame. The packets are
+//! only read, so the output is the same with or without live pictures.
 //!
 //! The decoder runs on [`DECODE_THREADS`] worker. Of its pictures, the
 //! newest is converted and offered at most once per [`INTERVAL`]; the
@@ -21,6 +21,7 @@
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
+use splot_core::stream_reader::is_random_access_point;
 use splot_decode::{DataProps, Decoder, Picture, SendStatus};
 use studio_domain::preview::{
     ColorBasis, MediaTime, PictureBox, PictureHeader, PictureOrigin, PictureView,
@@ -30,13 +31,6 @@ use crate::{picture, stream};
 
 /// The shortest gap between two live pictures: about four a second.
 pub const INTERVAL: Duration = Duration::from_millis(250);
-
-/// The longest the live thread waits for the picture of the unit it just
-/// sent before going back to its queue.
-const UNIT_WAIT: Duration = Duration::from_secs(2);
-
-/// How often it looks for that picture while waiting.
-const UNIT_POLL: Duration = Duration::from_millis(5);
 
 /// Temporal units waiting for the live decoder before units are dropped.
 pub const QUEUE_UNITS: usize = 32;
@@ -107,7 +101,7 @@ impl Feed {
     pub fn packet(&mut self, data: &[u8]) {
         let index = self.next;
         self.next += 1;
-        let random_access = stream::is_random_access(data);
+        let random_access = is_random_access_point(data);
         if self.lost && !random_access {
             return;
         }
@@ -131,6 +125,7 @@ pub fn run(rx: &Receiver<Message>, size: PictureBox, offer: &dyn Fn(PictureHeade
     let mut live = Live {
         stream: None,
         decoder: None,
+        waiting: true,
         held: None,
         next_offer: Instant::now(),
         size,
@@ -172,6 +167,8 @@ pub fn run(rx: &Receiver<Message>, size: PictureBox, offer: &dyn Fn(PictureHeade
 struct Live {
     stream: Option<Stream>,
     decoder: Option<Decoder>,
+    /// The decoder needs a new session, at the next random access point.
+    waiting: bool,
     /// The newest picture not yet offered.
     held: Option<Picture>,
     next_offer: Instant,
@@ -180,18 +177,19 @@ struct Live {
 
 impl Live {
     fn unit(&mut self, data: &[u8], index: u64, random_access: bool, restart: bool) {
-        if restart || self.decoder.is_none() {
-            // A decoder can only start at a random access point.
-            self.decoder = None;
+        if restart || self.waiting {
+            self.waiting = true;
             if !random_access {
                 return;
             }
-            self.decoder = stream::decoder(DECODE_THREADS).ok();
+            match self.decoder.as_mut() {
+                Some(decoder) => decoder.flush(),
+                None => self.decoder = stream::decoder(DECODE_THREADS).ok(),
+            }
+            self.waiting = self.decoder.is_none();
         }
-        if self.feed(data, index).is_err() {
-            // A failed session stays failed; wait for the next key frame.
-            self.decoder = None;
-        }
+        // A failed session stays failed until the next key frame.
+        self.waiting |= self.feed(data, index).is_err();
     }
 
     fn feed(&mut self, data: &[u8], index: u64) -> splot_decode::Result<()> {
@@ -204,25 +202,12 @@ impl Live {
                 self.held = Some(picture);
             }
         }
-        // The decoder works on its own thread and `get_picture` does not wait
-        // for it, so the unit just sent is usually not out yet. Without this
-        // wait its picture would only be collected when the next packet
-        // arrives, which at encoder speed can be a whole group of frames
-        // later. Bounded, and only this thread waits: the job never does.
-        let deadline = Instant::now() + UNIT_WAIT;
-        loop {
-            match decoder.get_picture()? {
-                Some(picture) => {
-                    let done = picture.props().user_data >= index;
-                    self.held = Some(picture);
-                    if done {
-                        return Ok(());
-                    }
-                }
-                None if Instant::now() >= deadline => return Ok(()),
-                None => std::thread::sleep(UNIT_POLL),
-            }
+        // Without this wait the unit's picture would only be collected when
+        // the next packet arrives. Only this thread waits: the job never does.
+        while let Some(picture) = decoder.wait_picture()? {
+            self.held = Some(picture);
         }
+        Ok(())
     }
 
     fn offer(&mut self, offer: &dyn Fn(PictureHeader, Vec<u8>)) {

@@ -23,7 +23,8 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
 use splot_core::annexb::AnnexBObuCursor;
-use splot_core::stream_reader::{StreamUnit, TemporalUnitReader};
+use splot_core::span::ByteOffset;
+use splot_core::stream_reader::{TemporalUnitReader, is_random_access_point};
 use splot_core::types::ObuType;
 use splot_decode::{DataProps, Decoder, SendStatus};
 use studio_domain::job::{SourceFingerprint, WirePath};
@@ -191,9 +192,14 @@ impl ResultPictures {
             !session.drained && session.next_out <= index && session.next_out >= start as u64
         });
         if !reusable {
-            self.session = None;
-            let decoder = stream::decoder(PREVIEW_DECODE_THREADS)
-                .map_err(|e| unreadable(format!("cannot start the decoder: {e}")))?;
+            let decoder = match self.session.take() {
+                Some(mut session) => {
+                    session.decoder.flush();
+                    session.decoder
+                }
+                None => stream::decoder(PREVIEW_DECODE_THREADS)
+                    .map_err(|e| unreadable(format!("cannot start the decoder: {e}")))?,
+            };
             self.session = Some(Session {
                 decoder,
                 next_send: start,
@@ -297,20 +303,35 @@ fn facts_of(reference: &SourceRef) -> (Option<ColorMatrix>, Option<(u32, u32)>) 
 
 type Index = (Vec<Unit>, Option<String>, Option<(u32, u32)>);
 
+/// Why an Annex B temporal unit cannot be shown: it must open with a temporal
+/// delimiter and every OBU in it must parse.
+fn annex_b_fault(unit: &[u8]) -> Result<(), String> {
+    let mut cursor = AnnexBObuCursor::new(unit, ByteOffset::new(0));
+    let mut first = true;
+    loop {
+        match cursor.next_obu() {
+            Ok(Some(obu)) if first && obu.header.obu_type != ObuType::TemporalDelimiter => {
+                return Err("does not start with a temporal delimiter".into());
+            }
+            Ok(Some(_)) => first = false,
+            Ok(None) => return Ok(()),
+            Err(e) => return Err(format!("does not parse: {e}")),
+        }
+    }
+}
+
 /// Reads the file's framing: the temporal units, why reading stopped early
 /// (if it did), and the IVF time base.
 fn index(file: File) -> Index {
     let mut reader = TemporalUnitReader::with_max_unit_bytes(BufReader::new(file), MAX_UNIT_BYTES);
     let mut units: Vec<Unit> = Vec::new();
-    // The Annex B unit being gathered: start, length, OBU kinds seen.
-    let mut open: Option<(Unit, bool, bool)> = None;
     let mut damaged = None;
     loop {
         if units.len() >= MAX_UNITS {
             damaged = Some(format!("only the first {MAX_UNITS} frames are read"));
             break;
         }
-        let unit = match reader.next_unit() {
+        let unit = match reader.next_temporal_unit() {
             Ok(Some(unit)) => unit,
             Ok(None) => break,
             Err(e) => {
@@ -318,77 +339,21 @@ fn index(file: File) -> Index {
                 break;
             }
         };
-        match unit {
-            StreamUnit::IvfFrame { payload, .. } if payload.len() > MAX_UNIT_BYTES => {
-                damaged = Some(format!("a frame is larger than {MAX_UNIT_BYTES} bytes"));
-                break;
-            }
-            StreamUnit::IvfFrame {
-                pts,
-                payload_offset,
-                payload,
-                ..
-            } => units.push(Unit {
-                offset: payload_offset.get(),
-                len: payload.len(),
-                pts,
-                random_access: stream::is_random_access(payload),
-            }),
-            StreamUnit::IvfWarning(warning) => {
-                damaged = Some(format!("the IVF file is damaged ({})", warning.rule_id()));
-                break;
-            }
-            StreamUnit::AnnexBObu { offset, bytes } => {
-                let kind = match AnnexBObuCursor::new(bytes, offset).next_obu() {
-                    Ok(Some(obu)) => obu.header.obu_type,
-                    Ok(None) => continue,
-                    Err(e) => {
-                        damaged = Some(format!(
-                            "an OBU near byte {} does not parse: {e}",
-                            offset.get()
-                        ));
-                        open = None;
-                        break;
-                    }
-                };
-                if kind == ObuType::TemporalDelimiter {
-                    if let Some((unit, sequence, key)) = open.take() {
-                        units.push(Unit {
-                            random_access: sequence && key,
-                            ..unit
-                        });
-                    }
-                    open = Some((
-                        Unit {
-                            offset: offset.get(),
-                            len: 0,
-                            pts: 0,
-                            random_access: false,
-                        },
-                        false,
-                        false,
-                    ));
-                }
-                let Some((unit, sequence, key)) = open.as_mut() else {
-                    damaged = Some("the stream does not start with a temporal delimiter".into());
-                    break;
-                };
-                unit.len += bytes.len();
-                if unit.len > MAX_UNIT_BYTES {
-                    damaged = Some(format!("a frame is larger than {MAX_UNIT_BYTES} bytes"));
-                    open = None;
-                    break;
-                }
-                *sequence |= kind == ObuType::SequenceHeader;
-                *key |= kind == ObuType::ClosedLoopKey;
-            }
+        if unit.pts.is_none()
+            && let Err(fault) = annex_b_fault(unit.bytes)
+        {
+            damaged = Some(format!("the unit at byte {} {fault}", unit.offset.get()));
+            break;
         }
-    }
-    if let Some((unit, sequence, key)) = open {
         units.push(Unit {
-            random_access: sequence && key,
-            ..unit
+            offset: unit.offset.get(),
+            len: unit.bytes.len(),
+            pts: unit.pts.unwrap_or(0),
+            random_access: is_random_access_point(unit.bytes),
         });
+    }
+    if let Some(warning) = reader.ivf_warning() {
+        damaged = Some(format!("the IVF file is damaged ({})", warning.rule_id()));
     }
     let time_base = reader
         .ivf_header()
