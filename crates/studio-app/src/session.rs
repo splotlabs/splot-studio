@@ -219,10 +219,11 @@ impl Session {
         self.analysis.set_storage_problem(problem);
     }
 
-    /// Reads the restored documents not read yet, once Analyze is shown.
+    /// Reads the shown document if it is not read yet, once Analyze is
+    /// shown.
     fn read_if_shown(&mut self) {
         if self.state.workspace() == Workspace::Analyze {
-            let effects = self.analysis.read_unread(&RealDisk);
+            let effects = self.analysis.read_shown(&RealDisk);
             self.send_inspect(effects);
         }
     }
@@ -381,6 +382,8 @@ impl Session {
         }
         let effects = self.analysis.input(input);
         self.send_inspect(effects);
+        // A document shown now, or relinked, may not be read yet.
+        self.read_if_shown();
         self.persist_view();
         outcome.analysis = self.analysis.take_dirty();
         outcome

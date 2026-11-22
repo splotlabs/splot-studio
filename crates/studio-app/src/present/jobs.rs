@@ -145,7 +145,7 @@ fn read(doc: &crate::analysis::Document, state: State) -> String {
         (State::Cancelling, _) => "Stopping; what was read is kept.".to_owned(),
         (_, Phase::Open(summary)) => found(summary),
         // Nothing about a changed file is shown before it is read as new.
-        (_, Phase::Changed(_)) => {
+        (_, Phase::Changed { .. }) => {
             "The file changed since it was last read; it waits in Analyze to be read as new."
                 .to_owned()
         }

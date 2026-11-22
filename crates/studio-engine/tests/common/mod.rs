@@ -264,7 +264,7 @@ pub fn fingerprint(path: &Path) -> SourceFingerprint {
             len: 0,
             modified: None,
         },
-        |metadata| studio_engine::source::fingerprint(&metadata),
+        |metadata| SourceFingerprint::of(&metadata),
     )
 }
 

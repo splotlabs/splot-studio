@@ -18,7 +18,7 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use studio_domain::job::{JobSpec, WirePath};
+use studio_domain::job::{JobSpec, SourceFingerprint, WirePath};
 use studio_domain::settings::EncoderSettings;
 
 use crate::analysis::Saved;
@@ -42,7 +42,7 @@ pub enum Kind {
     Other,
 }
 
-/// The two questions recovery asks the file system.
+/// The questions recovery asks the file system.
 pub trait Disk {
     /// What is at `path`.
     fn kind(&self, path: &Path) -> Kind;
@@ -50,6 +50,12 @@ pub trait Disk {
     /// Whether anything is at `path`, a dangling symlink included.
     fn exists(&self, path: &Path) -> bool {
         self.kind(path) != Kind::Missing
+    }
+
+    /// The size and modification time of the file at `path`, following a
+    /// symlink as the engine does; `None` when that cannot be told.
+    fn fingerprint(&self, _path: &Path) -> Option<SourceFingerprint> {
+        None
     }
 }
 
@@ -66,6 +72,13 @@ impl Disk for RealDisk {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Kind::Missing,
             Ok(_) | Err(_) => Kind::Other,
         }
+    }
+
+    fn fingerprint(&self, path: &Path) -> Option<SourceFingerprint> {
+        fs::metadata(path)
+            .ok()
+            .filter(fs::Metadata::is_file)
+            .map(|m| SourceFingerprint::of(&m))
     }
 }
 
@@ -865,6 +878,27 @@ mod tests {
         assert_eq!(dir.entries(), ["precious.mov"]);
         // Already gone.
         assert_eq!(remove_partial(&partial, &destination), PartialFate::Gone);
+    }
+
+    // Unix only: creating a symlink on Windows needs a privilege CI
+    // runners do not grant.
+    #[cfg(unix)]
+    #[test]
+    fn a_fingerprint_follows_a_symlink_to_a_file_only() {
+        let dir = Scratch::new("fingerprint");
+        let file = dir.path("clip.obu");
+        assert!(fs::write(&file, b"twelve bytes").is_ok());
+        let link = dir.path("link.obu");
+        assert!(std::os::unix::fs::symlink(&file, &link).is_ok());
+        let of_file = fs::metadata(&file).ok().map(|m| SourceFingerprint::of(&m));
+        assert_eq!(of_file.map(|f| f.len), Some(12));
+        assert_eq!(RealDisk.fingerprint(&link), of_file);
+        assert_eq!(RealDisk.fingerprint(&file), of_file);
+        // A folder, and a link to nothing: no fingerprint.
+        assert_eq!(RealDisk.fingerprint(&dir.path("")), None);
+        let dangling = dir.path("dangling.obu");
+        assert!(std::os::unix::fs::symlink(dir.path("gone.obu"), &dangling).is_ok());
+        assert_eq!(RealDisk.fingerprint(&dangling), None);
     }
 
     // Unix only: creating a symlink on Windows needs a privilege CI

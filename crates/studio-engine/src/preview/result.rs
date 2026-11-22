@@ -96,7 +96,7 @@ impl ResultPictures {
         if !metadata.is_file() {
             return Err(unreadable("the output is not a regular file"));
         }
-        let fingerprint = source::fingerprint(&metadata);
+        let fingerprint = SourceFingerprint::of(&metadata);
         let reader = file
             .try_clone()
             .map_err(|e| unreadable(format!("cannot read the output: {e}")))?;
@@ -123,7 +123,7 @@ impl ResultPictures {
 
     pub fn check(&self) -> Outcome<()> {
         let now = std::fs::metadata(&self.path)
-            .map(|m| source::fingerprint(&m))
+            .map(|m| SourceFingerprint::of(&m))
             .map_err(|e| unreadable(format!("the output is gone: {e}")))?;
         if now == self.fingerprint {
             Ok(())

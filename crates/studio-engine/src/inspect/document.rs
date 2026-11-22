@@ -149,7 +149,7 @@ impl Document {
         if !metadata.is_file() {
             return Err(not_a_file());
         }
-        let fingerprint = source::fingerprint(&metadata);
+        let fingerprint = SourceFingerprint::of(&metadata);
         let id = FileId::of_file(&file, &path).map_err(|e| io("cannot identify the file", e))?;
         let reader = file
             .try_clone()

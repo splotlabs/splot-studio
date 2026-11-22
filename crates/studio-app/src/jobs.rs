@@ -131,7 +131,11 @@ fn read(doc: &Document, first_read: Option<u64>) -> Option<State> {
         Phase::Opening if Some(doc.id()) == first_read => State::Running,
         Phase::Opening => State::Queued,
         Phase::Cancelling => State::Cancelling,
-        Phase::Open(summary) | Phase::Changed(summary) => match &summary.outcome {
+        Phase::Open(summary)
+        | Phase::Changed {
+            read: Some(summary),
+            ..
+        } => match &summary.outcome {
             ScanOutcome::Stopped { problem } => match problem.kind {
                 ProblemKind::Cancelled => State::Cancelled,
                 ProblemKind::Io | ProblemKind::LimitReached => State::Failed,
@@ -145,6 +149,6 @@ fn read(doc: &Document, first_read: Option<u64>) -> Option<State> {
             ReadEnd::Cancel => State::Cancelled,
             ReadEnd::EngineStopped => State::Interrupted,
         },
-        Phase::Unread | Phase::Missing => return None,
+        Phase::Unread | Phase::Missing | Phase::Changed { read: None, .. } => return None,
     })
 }

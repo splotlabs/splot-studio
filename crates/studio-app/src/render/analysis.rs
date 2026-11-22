@@ -112,12 +112,11 @@ fn render_phase<'a>(global: &Global<'_>, doc: &'a Document) -> Option<&'a Docume
             global.set_message(format!("Reading {name}. Nothing is decoded.").into());
             None
         }
-        Phase::Changed(summary) => {
+        Phase::Changed { now, .. } => {
             let was = doc.restore().map(|r| r.fingerprint.len);
             global.set_state(AnalysisState::Attention);
             global.set_heading("This file changed".into());
-            global
-                .set_message(text::changed(&name, doc.path(), was, summary.fingerprint.len).into());
+            global.set_message(text::changed(&name, doc.path(), was, now.len).into());
             global.set_action("Read as New".into());
             global.set_action_description(
                 "Read the file as it is now; the earlier selection and filters are dropped".into(),
