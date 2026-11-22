@@ -188,13 +188,14 @@ fn the_switch_leads_the_keys_and_a_round_trip_keeps_encode() {
     let mut state = eight_files();
     studio_app::render(&window, &state, Instant::now());
     let top = pixels(&platform, &window);
+    // The wheel over the second visible row of the file list.
     let scroll = WindowEvent::PointerScrolled {
-        position: LogicalPosition::new(150.0, 90.0),
+        position: LogicalPosition::new(150.0, 160.0),
         delta_x: 0.0,
         delta_y: -400.0,
     };
     window.window().dispatch_event(WindowEvent::PointerMoved {
-        position: LogicalPosition::new(150.0, 90.0),
+        position: LogicalPosition::new(150.0, 160.0),
     });
     window.window().dispatch_event(scroll);
     // The pointer leaves, so no row shows a hover it would lose anyway.

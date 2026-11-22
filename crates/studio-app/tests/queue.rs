@@ -409,7 +409,8 @@ fn open_in_analyze_reads_the_result_and_leaves_the_queue_alone() {
     };
     // b waits; then the result goes to Analyze.
     h.add(std::slice::from_ref(&b));
-    let journal = Harness::wait_for_journal(&scratch, "b.y4m");
+    // Saved once b was read: it waits.
+    let journal = Harness::wait_for_journal(&scratch, r#""kind": "waiting""#);
     let items = h.state().items().to_vec();
     h.dispatch(Intent::RowSelected(0));
     h.session.analyze_result(Instant::now());
