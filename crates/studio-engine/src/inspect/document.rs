@@ -678,6 +678,9 @@ impl Builder {
         let Some(framing) = self.framing else {
             return Err(match stop {
                 Some((ProblemKind::Io, message)) => Refusal::new(AnalysisFailure::Io, message),
+                Some((ProblemKind::Cancelled, _)) => {
+                    Refusal::new(AnalysisFailure::Cancelled, "the open was cancelled")
+                }
                 _ if len == 0 => Refusal::new(AnalysisFailure::Unsupported, "the file is empty"),
                 _ => Refusal::new(
                     AnalysisFailure::Unsupported,
@@ -734,41 +737,49 @@ impl Builder {
 
 /// Reads the framing of a file of `len` bytes from `input`.
 fn scan(input: impl Read, len: u64, cancelled: &dyn Fn() -> bool) -> Result<Scanned, Refusal> {
-    let cancel = || Refusal::new(AnalysisFailure::Cancelled, "the open was cancelled");
+    let cancel = || {
+        Step::Stop(
+            ProblemKind::Cancelled,
+            "reading was cancelled; the elements read before are kept".to_owned(),
+        )
+    };
     let mut units = TemporalUnitReader::with_max_unit_bytes(input, MAX_UNIT_BYTES);
     let mut doc = Builder::default();
     let mut header: Option<IvfHeader> = None;
     let stop = loop {
-        if cancelled() {
-            return Err(cancel());
-        }
-        let step = match units.next_unit() {
-            Ok(None) => Step::End,
-            Ok(Some(StreamUnit::AnnexBObu { offset, bytes })) => doc.annex_b(offset, bytes),
-            Ok(Some(StreamUnit::IvfFrame {
-                index,
-                pts,
-                payload_offset,
-                payload,
-            })) => doc.ivf_frame(index, pts, payload_offset, payload),
-            Ok(Some(StreamUnit::IvfWarning(warning))) => problem(
-                ProblemKind::Malformed,
-                format!(
-                    "the file ends inside an IVF record header ({})",
-                    warning.rule_id()
+        let step = if cancelled() {
+            cancel()
+        } else {
+            match units.next_unit() {
+                Ok(None) => Step::End,
+                Ok(Some(StreamUnit::AnnexBObu { offset, bytes })) => doc.annex_b(offset, bytes),
+                Ok(Some(StreamUnit::IvfFrame {
+                    index,
+                    pts,
+                    payload_offset,
+                    payload,
+                })) => doc.ivf_frame(index, pts, payload_offset, payload),
+                Ok(Some(StreamUnit::IvfWarning(warning))) => problem(
+                    ProblemKind::Malformed,
+                    format!(
+                        "the file ends inside an IVF record header ({})",
+                        warning.rule_id()
+                    ),
                 ),
-            ),
-            Err(ReaderError::UnitTooLarge { declared, cap, .. }) => problem(
-                ProblemKind::LimitReached,
-                format!("a unit declares {declared} bytes; at most {cap} are read"),
-            ),
-            // Splot reads a file as IVF exactly when it starts with `DKIF`.
-            Err(ReaderError::Ivf(e)) => {
-                doc.framing = Some(Framing::Ivf);
-                problem(ProblemKind::Malformed, format!("{e} ({})", e.rule_id()))
+                Err(ReaderError::UnitTooLarge { declared, cap, .. }) => problem(
+                    ProblemKind::LimitReached,
+                    format!("a unit declares {declared} bytes; at most {cap} are read"),
+                ),
+                // Splot reads a file as IVF exactly when it starts with `DKIF`.
+                Err(ReaderError::Ivf(e)) => {
+                    doc.framing = Some(Framing::Ivf);
+                    problem(ProblemKind::Malformed, format!("{e} ({})", e.rule_id()))
+                }
+                Err(ReaderError::Io(_)) if cancelled() => cancel(),
+                Err(ReaderError::Io(e)) => {
+                    problem(ProblemKind::Io, format!("reading stopped: {e}"))
+                }
             }
-            Err(ReaderError::Io(_)) if cancelled() => return Err(cancel()),
-            Err(ReaderError::Io(e)) => problem(ProblemKind::Io, format!("reading stopped: {e}")),
         };
         // Splot reads the IVF file header with the first record; it goes in
         // front of what was read with it.

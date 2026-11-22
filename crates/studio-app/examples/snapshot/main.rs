@@ -4,7 +4,7 @@
 //! Renders the real window once and writes a renderer snapshot as binary PPM.
 //!
 //! ```text
-//! cargo run -p studio-app --example snapshot -- OUT.ppm light|dark [about] [advanced] [long] [SCENARIO]
+//! cargo run -p studio-app --example snapshot -- OUT.ppm light|dark [about] [advanced] [jobs] [long] [SCENARIO]
 //! ```
 //!
 //! This is Slint's own `Window::take_snapshot`, not an OS screenshot: no
@@ -27,7 +27,9 @@
 //! journal cannot be written), `many` (eight rows, the list scrolls) and
 //! `restored` (the list after the app stopped mid-job). `already-open` is the
 //! window a second instance shows. The `analyze-*` scenarios show the Analyze
-//! workspace with the real inspect engine; see `analyze.rs`.
+//! workspace with the real inspect engine; see `analyze.rs`. `jobs` opens
+//! the Jobs list over any scenario; `analyze-jobs` lists the reads of
+//! `analyze.rs` with the conversion of `running`.
 //!
 //! The picture area is drawn by the app's real `Preview`, its requests
 //! answered with painted test pictures (a landscape, coarser on the result
@@ -455,6 +457,7 @@ fn restored_scenario(now: Instant) -> AppState {
         settings: studio_app::state::INITIAL_SETTINGS,
     };
     let journal = Journal {
+        view: studio_app::journal::JournalView::default(),
         version: studio_app::journal::VERSION,
         next_id: 4,
         settings: studio_app::state::INITIAL_SETTINGS,
@@ -692,7 +695,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [out, scheme, rest @ ..] = args.as_slice() else {
         return Err(
-            "usage: snapshot OUT.ppm light|dark [about] [advanced] [long] [SCENARIO]".into(),
+            "usage: snapshot OUT.ppm light|dark [about] [advanced] [jobs] [long] [SCENARIO]".into(),
         );
     };
     let scheme = match scheme.as_str() {
@@ -704,7 +707,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let long = rest.iter().any(|a| a == "long");
     let mut name = "empty";
     for arg in rest {
-        if !matches!(arg.as_str(), "about" | "advanced" | "long") {
+        if !matches!(arg.as_str(), "about" | "advanced" | "jobs" | "long") {
             name = arg;
         }
     }
@@ -732,14 +735,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "preview-compare" | "preview-unavailable" => "completed",
         other => other,
     };
-    if let Some(scenario) = analyze::scenario(name)? {
-        studio_app::render(&window, scenario.session.state(), now);
-        studio_app::render_analysis(&window, scenario.session.analysis());
+    let jobs = rest.iter().any(|a| a == "jobs");
+    if let Some(analyze) = analyze::scenario(name)? {
+        let encode = if name == "analyze-jobs" {
+            scenario("running", long, now)?
+        } else {
+            analyze.session.state().clone()
+        };
+        studio_app::render(&window, analyze.session.state(), now);
+        studio_app::render_analysis(&window, analyze.session.analysis());
+        studio_app::render_jobs(
+            &window,
+            &studio_app::jobs::list(&encode, analyze.session.analysis()),
+        );
         window.show()?;
+        if jobs {
+            window.invoke_show_jobs();
+        }
         return capture(&window, out);
     }
     let state = scenario(base, long, now)?;
     studio_app::render(&window, &state, now);
+    studio_app::render_jobs(
+        &window,
+        &studio_app::jobs::list(&state, &studio_app::analysis::Analysis::new()),
+    );
     let preview = picture_area(&window, &state, name);
     let all = preview::Dirty {
         picture: true,
@@ -749,6 +769,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     studio_app::render_preview(&window, &state, &preview, all);
     window.set_engine_identity("renderer snapshot, no engine ran".into());
     window.show()?;
+    if jobs {
+        window.invoke_show_jobs();
+    }
     capture(&window, out)
 }
 

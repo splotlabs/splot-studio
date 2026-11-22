@@ -15,7 +15,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command as Process, Stdio};
 use common::{Clip, TestResult, run_job, spec};
 use studio_domain::analysis::{
     AnalysisFailure, DocumentSummary, Element, Framing, KindFilter, LocateTarget,
-    MAX_PAGE_ELEMENTS, ObuFact, RowFilter, ScanOutcome, Span,
+    MAX_PAGE_ELEMENTS, ObuFact, ProblemKind, RowFilter, ScanOutcome, Span,
 };
 use studio_domain::job::WirePath;
 use studio_domain::protocol::{
@@ -352,6 +352,44 @@ fn long_stream(path: &Path) -> std::io::Result<()> {
     fs::write(path, bytes)
 }
 
+/// Whether the document is open after a cancel answered `cancel` and its
+/// open answered `open`.
+fn kept_after_cancel(cancel: &Event, open: &Event) -> Result<bool, String> {
+    // The order is a real race: cancelled before reading (nothing kept),
+    // while reading (what was read is kept and the outcome says why it
+    // stopped), or too late (the whole document).
+    Ok(match (cancel, open) {
+        (
+            Event::CancelRequested,
+            Event::AnalysisFailed {
+                code: AnalysisFailure::Cancelled,
+                ..
+            },
+        ) => false,
+        (Event::CancelRequested, Event::AnalysisOpened { summary, .. }) => {
+            match &summary.outcome {
+                ScanOutcome::Stopped { problem } => {
+                    assert_eq!(problem.kind, ProblemKind::Cancelled, "{summary:?}");
+                    assert!(summary.obus >= 1 && summary.unparsed == 1, "{summary:?}");
+                }
+                other => assert_eq!(*other, ScanOutcome::Complete),
+            }
+            true
+        }
+        (
+            Event::Error {
+                code: ErrorCode::WrongState,
+                ..
+            },
+            Event::AnalysisOpened { summary, .. },
+        ) => {
+            assert_eq!(summary.outcome, ScanOutcome::Complete);
+            true
+        }
+        other => return Err(format!("inconsistent: {other:?}")),
+    })
+}
+
 #[test]
 fn a_cancel_and_the_open_it_cancels_agree() -> TestResult {
     let dir = tempfile::tempdir()?;
@@ -378,33 +416,21 @@ fn a_cancel_and_the_open_it_cancels_agree() -> TestResult {
     let (Some(open), Some(cancel)) = (open, cancel) else {
         return Err("both answered".into());
     };
-    let cancelled = match (&cancel, &open) {
-        (
-            Event::CancelRequested,
-            Event::AnalysisFailed {
-                code: AnalysisFailure::Cancelled,
-                ..
-            },
-        ) => true,
-        (
-            Event::Error {
-                code: ErrorCode::WrongState,
-                ..
-            },
-            Event::AnalysisOpened { .. },
-        ) => false,
-        other => return Err(format!("inconsistent: {other:?}").into()),
-    };
+    let kept = kept_after_cancel(&cancel, &open)?;
     let page = inspect.ask(Command::AnalysisPage {
         document: 1,
         filter: RowFilter::default(),
         first: 0,
         count: 1,
     })?;
-    if cancelled {
-        assert_eq!(failure(&page), Some(AnalysisFailure::UnknownDocument));
-    } else {
+    if kept {
         assert!(matches!(page, Event::AnalysisPage { .. }), "{page:?}");
+        assert!(matches!(
+            inspect.ask(Command::AnalysisClose { document: 1 })?,
+            Event::AnalysisClosed { document: 1 }
+        ));
+    } else {
+        assert_eq!(failure(&page), Some(AnalysisFailure::UnknownDocument));
     }
     // Nothing left to cancel, and the inspect process refuses the job
     // cancel, which names no document.
@@ -564,10 +590,13 @@ fn cancelling_one_open_leaves_another_alone() -> TestResult {
                 ..
             })
         ) | (
-            Some(Event::Error {
-                code: ErrorCode::WrongState,
-                ..
-            }),
+            Some(
+                Event::CancelRequested
+                    | Event::Error {
+                        code: ErrorCode::WrongState,
+                        ..
+                    }
+            ),
             Some(Event::AnalysisOpened { document: 2, .. })
         )
     );
@@ -615,10 +644,11 @@ fn a_changed_source_closes_its_document() -> TestResult {
     Ok(())
 }
 
-/// After `CancelRequested`, the open is answered as cancelled even when it
-/// would have failed for another reason (here: too many documents).
+/// A cancel does not hide why an open failed: an open cancelled before it
+/// started is answered cancelled, one that already failed (here: too many
+/// documents) keeps its reason.
 #[test]
-fn a_cancelled_open_is_answered_cancelled_whatever_else_happened() -> TestResult {
+fn a_cancel_does_not_hide_why_an_open_failed() -> TestResult {
     let dir = tempfile::tempdir()?;
     let small = dir.path().join("td.obu");
     fs::write(&small, [0x01, 0x08])?;
@@ -658,13 +688,57 @@ fn a_cancelled_open_is_answered_cancelled_whatever_else_happened() -> TestResult
             Some(Event::CancelRequested),
             Some(AnalysisFailure::Cancelled)
         ) | (
-            Some(Event::Error {
-                code: ErrorCode::WrongState,
-                ..
-            }),
+            Some(
+                Event::CancelRequested
+                    | Event::Error {
+                        code: ErrorCode::WrongState,
+                        ..
+                    }
+            ),
             Some(AnalysisFailure::LimitReached)
         )
     );
     assert!(consistent, "{answers:?}");
+    Ok(())
+}
+
+/// A document closed while it is read gives its slot back before a later
+/// open, whether the cancel stopped the read or came too late: the close
+/// waits behind the open in the queue.
+#[test]
+fn a_document_closed_while_read_frees_its_slot() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let small = dir.path().join("td.obu");
+    fs::write(&small, [0x01, 0x08])?;
+    let long = dir.path().join("long.obu");
+    long_stream(&long)?;
+    let mut inspect = Inspect::spawn()?;
+    for document in 1..=3 {
+        inspect.open(document, &small)?;
+    }
+    let ids = inspect.send(vec![
+        Command::AnalysisOpen {
+            document: 4,
+            source: WirePath::from_path(&long),
+        },
+        Command::AnalysisCancel { document: 4 },
+        Command::AnalysisClose { document: 4 },
+        Command::AnalysisOpen {
+            document: 5,
+            source: WirePath::from_path(&small),
+        },
+    ])?;
+    let mut answers = std::collections::HashMap::new();
+    for _ in 0..4 {
+        let answer = inspect.next()?;
+        answers.insert(answer.request_id, answer.body);
+    }
+    assert!(
+        matches!(
+            answers.get(&ids[3]),
+            Some(Event::AnalysisOpened { document: 5, .. })
+        ),
+        "{answers:?}"
+    );
     Ok(())
 }

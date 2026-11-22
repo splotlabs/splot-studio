@@ -9,19 +9,25 @@
 //! `analyze-empty`, `analyze-opening`, `analyze-ivf` (the extended tile
 //! group selected), `analyze-filtered` (temporal delimiters only: the
 //! selection is hidden), `analyze-damaged` (a truncated Annex B stream, its
-//! unparsed region selected) and `analyze-failed` (not an AV2 stream).
+//! unparsed region selected), `analyze-failed` (not an AV2 stream),
+//! `analyze-jobs` (two files read, one reading and one queued behind it,
+//! the first shown, for the Jobs list), and two documents restored from a last session:
+//! `analyze-changed` (the file was replaced since) and `analyze-missing`
+//! (nothing is at its path any more).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use studio_app::analysis::{Input, Phase};
+use studio_app::analysis::{Input, Origin, Phase, Restore, Saved};
 use studio_app::engine::{Delivery, ENGINE_NAME};
+use studio_app::recovery::{Recovered, RestoredView};
 use studio_app::session::{Route, Session};
-use studio_app::state::{AppState, Intent};
+use studio_app::state::{AppState, INITIAL_SETTINGS, Intent, Startup};
 use studio_app::workspace::Workspace;
-use studio_domain::analysis::KindFilter;
+use studio_domain::analysis::{KindFilter, RowFilter};
+use studio_domain::job::SourceFingerprint;
 
 /// The engine tests' `ivf()`: three records (TD and sequence header, an
 /// empty payload, TD and a tile group with the extension), 82 bytes.
@@ -93,6 +99,41 @@ impl Scenario {
     }
 }
 
+/// A state restored from a last session that had `path` open in Analyze,
+/// as a file of 4096 bytes with its seventh element selected.
+fn restored(path: PathBuf) -> AppState {
+    let saved = Saved {
+        path,
+        origin: Origin::File,
+        restore: Some(Restore {
+            fingerprint: SourceFingerprint {
+                len: 4096,
+                modified: Some((1_795_000_000, 0)),
+            },
+            selected: Some(7),
+            filter: RowFilter::default(),
+            bytes_shown: true,
+        }),
+    };
+    AppState::new(Startup {
+        recovered: Some(Recovered {
+            items: Vec::new(),
+            next_id: 1,
+            settings: INITIAL_SETTINGS,
+            cleanups: Vec::new(),
+            dropped: 0,
+            view: RestoredView {
+                workspace: Workspace::Analyze,
+                documents: vec![saved],
+                shown: 0,
+                dropped: 0,
+                unreadable: None,
+            },
+        }),
+        problem: None,
+    })
+}
+
 /// The Analyze state of `name`, `Ok(None)` when it is no Analyze scenario.
 pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
     if !name.starts_with("analyze-") {
@@ -111,8 +152,17 @@ pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
     let post = Arc::new(move |route, delivery| {
         let _ = tx.send((route, delivery));
     });
+    // The file at each path was replaced or moved away since.
+    let state = match name {
+        "analyze-changed" => {
+            std::fs::write(folder.join("park walk.ivf"), ivf()).map_err(|e| e.to_string())?;
+            restored(folder.join("park walk.ivf"))
+        }
+        "analyze-missing" => restored(PathBuf::from("/home/user/Videos/drone over the jetty.ivf")),
+        _ => AppState::default(),
+    };
     let mut scenario = Scenario {
-        session: Session::new(AppState::default(), Ok(engine), post, None),
+        session: Session::new(state, Ok(engine), post, None),
         rx,
         folder,
     };
@@ -153,6 +203,20 @@ pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
             scenario.input(Input::RowClicked(2));
             scenario.settle()?;
         }
+        "analyze-jobs" => {
+            for (name, bytes) in [("park walk.ivf", &ivf()[..]), ("cut short.obu", &TRUNCATED)] {
+                let path = scenario.file(name, bytes)?;
+                scenario.input(Input::Open(vec![path]));
+                scenario.settle()?;
+            }
+            // Asked for, and never answered here: reading, then queued.
+            for name in ["drone over the jetty.ivf", "harbour at dusk.obu"] {
+                let path = scenario.file(name, &ivf())?;
+                scenario.input(Input::Open(vec![path]));
+            }
+            scenario.input(Input::Show(0));
+        }
+        "analyze-changed" | "analyze-missing" => scenario.settle()?,
         "analyze-failed" => {
             let path = scenario.file("notes.txt", b"not a stream")?;
             scenario.input(Input::Open(vec![path]));

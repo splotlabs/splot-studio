@@ -34,7 +34,7 @@ use studio_domain::settings::{Crf, EncoderSettings, OutputKind, SpeedPreset};
 use crate::activity::{self, Changed};
 use crate::analysis::ResultOf;
 use crate::queue::{Acknowledgement, Item, ItemId, ItemState, PartialFate};
-use crate::recovery::{Disk, Recovered};
+use crate::recovery::{Disk, Recovered, RestoredView};
 use crate::simple::{Priority, Quality};
 use crate::source::{ProbeFailure, ProbeRequest, TrackPicker};
 use crate::workspace::Workspace;
@@ -263,6 +263,9 @@ pub struct Confirmation {
 pub enum JournalProblem {
     /// It did not parse and was moved here; the list started empty.
     MovedAside(PathBuf),
+    /// Its Analyze documents did not parse and were not restored; the list
+    /// was. A copy of it as it was is here.
+    ViewUnreadable(PathBuf),
     /// A newer Splot Studio wrote it; it is left untouched and not saved.
     TooNew {
         /// The file.
@@ -354,8 +357,12 @@ pub struct AppState {
     journal_problem: Option<JournalProblem>,
     save_error: Option<String>,
     next_request: u64,
-    /// The workspace the window shows: view state, not journalled.
+    /// The workspace the window shows: view state, journalled with the
+    /// Analyze documents.
     workspace: Workspace,
+    /// The Analyze documents the journal recorded, until the session takes
+    /// them.
+    restored_view: RestoredView,
 }
 
 impl Default for AppState {
@@ -385,6 +392,7 @@ impl AppState {
             save_error: None,
             next_request: 1,
             workspace: Workspace::Encode,
+            restored_view: RestoredView::default(),
         };
         if let Some(recovered) = startup.recovered {
             let interrupted = recovered
@@ -406,8 +414,17 @@ impl AppState {
             state.items = recovered.items;
             state.next_id = recovered.next_id;
             state.settings = recovered.settings;
+            if recovered.view.workspace.available() {
+                state.workspace = recovered.view.workspace;
+            }
+            state.restored_view = recovered.view;
         }
         state
+    }
+
+    /// Hands over the Analyze documents the journal recorded, once.
+    pub fn take_restored_view(&mut self) -> RestoredView {
+        std::mem::take(&mut self.restored_view)
     }
 
     /// Applies one intent at time `now`, judging destinations on `disk`.
@@ -724,6 +741,16 @@ impl AppState {
             .filter(|i| i.state == ItemState::Probing || self.startable(i))
             .count();
         Some((started, started + ahead))
+    }
+
+    /// Whether the run converts `item` after the converting file: it has
+    /// not reached it, is not stopping, and could start it now.
+    #[must_use]
+    pub fn queued(&self, item: &Item) -> bool {
+        self.run
+            .as_ref()
+            .is_some_and(|run| !run.stop_after_current && !run.attempted.contains(&item.id))
+            && self.startable(item)
     }
 
     /// How many files Convert would start now.

@@ -13,10 +13,15 @@
 //! at a time, run by the [`session::Session`]; their events reach the Slint
 //! thread through [`slint::invoke_from_event_loop`].
 //!
+//! [`jobs`] lists the operations of both workspaces (conversions and
+//! stream reads) for the toolbar's Jobs.
+//!
 //! The queue survives the app: it is journalled ([`journal`]) in the per-user
 //! data folder ([`instance`]), which one running app owns at a time, and is
-//! reconciled on the next launch ([`recovery`]). Encoding never continues
-//! without the window; after a restart nothing starts by itself.
+//! reconciled on the next launch ([`recovery`]). So are the workspace and the
+//! Analyze documents, as where to read them again; their files are checked
+//! before anything about them is shown. Encoding never continues without the
+//! window; after a restart nothing starts by itself.
 //!
 //! Licensed under `PolyForm` Noncommercial 1.0.0; commercial use requires a
 //! separate written license from Bartosz Tomczyk.
@@ -27,6 +32,7 @@ mod controller;
 pub mod cpu;
 pub mod engine;
 pub mod instance;
+pub mod jobs;
 pub mod journal;
 pub mod present;
 pub mod preview;
@@ -56,10 +62,10 @@ use crate::session::Session;
 use crate::simple::{Priority, Quality};
 use crate::state::{AppState, JournalProblem, Startup};
 
-pub use render::{render, render_analysis, render_counters, render_preview};
+pub use render::{render, render_analysis, render_counters, render_jobs, render_preview};
 pub use ui::{
-    Analysis, AnalysisState, AppWindow, ByteRegion, CheckRow, Fact, JobView, NavStep, Notice,
-    NoticeWindow, Palette, QueueRow, RowState, SourceView, StageState, Tone, ViewMode,
+    Analysis, AnalysisState, AppWindow, ByteRegion, CheckRow, Fact, JobRow, JobView, NavStep,
+    Notice, NoticeWindow, Palette, QueueRow, RowState, SourceView, StageState, Tone, ViewMode,
     WorkspaceView,
 };
 
@@ -122,7 +128,8 @@ pub fn version_text() -> String {
 #[derive(Debug)]
 pub enum Opening {
     /// This process owns the data folder (or has none and saves nothing).
-    Owner(Prepared),
+    /// Boxed: it carries the whole restored journal.
+    Owner(Box<Prepared>),
     /// Another running Splot Studio owns this data folder.
     AlreadyOpen(PathBuf),
 }
@@ -144,14 +151,14 @@ pub struct Prepared {
 #[must_use]
 pub fn prepare(dir: Result<PathBuf, String>) -> Opening {
     let unsaved = |why: String| {
-        Opening::Owner(Prepared {
+        Opening::Owner(Box::new(Prepared {
             instance: None,
             journal: None,
             startup: Startup {
                 recovered: None,
                 problem: Some(JournalProblem::NoFolder(why)),
             },
-        })
+        }))
     };
     let dir = match dir {
         Ok(dir) => dir,
@@ -172,15 +179,21 @@ pub fn prepare(dir: Result<PathBuf, String>) -> Opening {
             recovery::clean_up(&mut recovered);
             (Some(recovered), None)
         }
+        Loaded::ViewUnreadable { journal, copy, .. } => {
+            let mut recovered = recovery::recover(journal, &RealDisk);
+            recovery::clean_up(&mut recovered);
+            recovered.view.unreadable = Some(copy.clone());
+            (Some(recovered), Some(JournalProblem::ViewUnreadable(copy)))
+        }
         Loaded::TooNew { version } => (None, Some(JournalProblem::TooNew { path, version })),
         Loaded::MovedAside { to, .. } => (None, Some(JournalProblem::MovedAside(to))),
         Loaded::Unreadable { error } => (None, Some(JournalProblem::Unreadable { path, error })),
     };
-    Opening::Owner(Prepared {
+    Opening::Owner(Box::new(Prepared {
         instance: Some(instance),
         journal: save,
         startup: Startup { recovered, problem },
-    })
+    }))
 }
 
 /// The window and everything it drives. Dropping it (or [`Studio::run`]
@@ -307,6 +320,7 @@ pub fn bind_analysis(window: &AppWindow, send: impl Fn(analysis::Input) + Clone 
     global.on_close(on(Input::Close));
     global.on_reopen(on(Input::Reopen));
     global.on_cancel(on(Input::Cancel));
+    global.on_resolve(on(Input::Resolve));
     global.on_select_at_cursor(on(Input::SelectAtCursor));
     global.on_toggle_bytes(on(Input::ToggleBytes));
     global.on_back(on(Input::Back));

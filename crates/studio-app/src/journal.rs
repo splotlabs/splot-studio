@@ -6,13 +6,24 @@
 //!
 //! The format is the DTOs below, not the app's types. They embed the
 //! domain's transport values (`WirePath`, `JobSpec`, `SourceFacts`,
-//! `JobReport`, `Failure`, settings) as their serde forms; a change to any of
-//! those forms needs a new [`VERSION`] and a migration.
+//! `JobReport`, `Failure`, settings, `SourceFingerprint`, and `RowFilter`
+//! with its `KindFilter` and `LayerFilter`) as their serde forms; a change
+//! to any of those forms needs a new [`VERSION`] and a migration.
+//!
+//! Version 2 adds the [`JournalView`]: the workspace shown and the Analyze
+//! documents, as where to read them and the view to restore, never their
+//! facts. A version 1 journal is read as version 2 with the Encode
+//! workspace and no documents; its items and settings are the same DTOs,
+//! so nothing of them changes. The next save writes version 2, and the
+//! session saves once at start.
 //!
 //! Load rules: a missing file is an empty queue; a newer [`VERSION`] (or a
 //! file that cannot be read at all) is left untouched and this session does
-//! not save; anything else that does not parse is moved aside as
-//! `queue.json.corrupt-<n>` and the queue starts empty.
+//! not save. When only the view does not parse, the file is copied aside as
+//! `queue.json.corrupt-<n>` and the queue and settings are restored with
+//! the default view, so the next save loses nothing that is not in the
+//! copy. Anything else that does not parse is moved aside the same way
+//! and the queue starts empty.
 //!
 //! Writes go through [`Writer`], a thread that writes the latest submitted
 //! journal (older unwritten ones are skipped), so a slow disk never holds up
@@ -25,17 +36,23 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 
 use serde::{Deserialize, Serialize};
+use studio_domain::analysis::RowFilter;
 use studio_domain::job::{
     Failure, FailureCode, JobReport, JobSpec, Omissions, SourceFacts, SourceFingerprint, WirePath,
 };
 use studio_domain::settings::EncoderSettings;
 
+use crate::analysis::{Origin, Restore, ResultOf, Saved};
 use crate::queue::{
     Acknowledgement, Cause, Ending, Interruption, Item, ItemId, ItemState, PartialFate,
 };
+use crate::workspace::Workspace;
 
-/// The journal format this build reads and writes.
-pub const VERSION: u32 = 1;
+/// The journal format this build writes.
+pub const VERSION: u32 = 2;
+
+/// The oldest journal format this build reads and migrates.
+pub const OLDEST_VERSION: u32 = 1;
 
 /// The journal's file name in the data folder.
 pub const FILE_NAME: &str = "queue.json";
@@ -51,6 +68,74 @@ pub struct Journal {
     pub settings: EncoderSettings,
     /// The items, in list order.
     pub items: Vec<JournalItem>,
+    /// The workspace and the Analyze documents; absent before version 2.
+    #[serde(default)]
+    pub view: JournalView,
+}
+
+/// What the window showed: the workspace and the Analyze documents.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalView {
+    /// The workspace shown.
+    pub workspace: JournalWorkspace,
+    /// The index of the document shown in Analyze.
+    pub shown_document: usize,
+    /// The Analyze documents, in the order they were opened.
+    pub documents: Vec<JournalDocument>,
+}
+
+/// A [`Workspace`] that has a flow.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JournalWorkspace {
+    /// Encode.
+    #[default]
+    Encode,
+    /// Analyze.
+    Analyze,
+}
+
+/// One Analyze document: where to read it and what to restore once it is
+/// read again. No fact about the file is kept.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalDocument {
+    /// The file.
+    pub source: WirePath,
+    /// Where it came from.
+    pub origin: JournalOrigin,
+    /// Its last good read and the view on it; `None` when it was never
+    /// read.
+    pub read: Option<JournalRead>,
+}
+
+/// An [`Origin`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum JournalOrigin {
+    /// Opened for analysis.
+    File,
+    /// A converted file from Encode.
+    Result {
+        /// The queue item that produced it.
+        item: ItemId,
+        /// Its source file.
+        source: WirePath,
+        /// Its size when the job verified it.
+        bytes: u64,
+    },
+}
+
+/// A [`Restore`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalRead {
+    /// The file as it was read.
+    pub fingerprint: SourceFingerprint,
+    /// The selected element, by index.
+    pub selected_element: Option<u64>,
+    /// The navigator's filter.
+    pub filter: RowFilter,
+    /// The byte view was shown.
+    pub bytes_shown: bool,
 }
 
 /// One item.
@@ -200,14 +285,92 @@ pub enum JournalCause {
     AppStopped,
 }
 
-/// The journal of `items` with `settings`.
+/// The journal of `items` with `settings`, and of `view`.
 #[must_use]
-pub fn snapshot(next_id: ItemId, settings: EncoderSettings, items: &[Item]) -> Journal {
+pub fn snapshot(
+    next_id: ItemId,
+    settings: EncoderSettings,
+    items: &[Item],
+    view: JournalView,
+) -> Journal {
     Journal {
         version: VERSION,
         next_id,
         settings,
         items: items.iter().map(item).collect(),
+        view,
+    }
+}
+
+/// The view record of `workspace` and the Analyze documents `saved`, with
+/// the one at `shown` shown. Compare has no flow and is saved as Encode.
+#[must_use]
+pub fn view(workspace: Workspace, saved: &[Saved], shown: usize) -> JournalView {
+    JournalView {
+        workspace: match workspace {
+            Workspace::Analyze => JournalWorkspace::Analyze,
+            Workspace::Encode | Workspace::Compare => JournalWorkspace::Encode,
+        },
+        shown_document: shown,
+        documents: saved
+            .iter()
+            .map(|saved| JournalDocument {
+                source: WirePath::from_path(&saved.path),
+                origin: match &saved.origin {
+                    Origin::File => JournalOrigin::File,
+                    Origin::Result(result) => JournalOrigin::Result {
+                        item: result.item,
+                        source: WirePath::from_path(&result.source),
+                        bytes: result.bytes,
+                    },
+                },
+                read: saved.restore.map(|r| JournalRead {
+                    fingerprint: r.fingerprint,
+                    selected_element: r.selected,
+                    filter: r.filter,
+                    bytes_shown: r.bytes_shown,
+                }),
+            })
+            .collect(),
+    }
+}
+
+/// The model's value of a journalled document, or `None` when a path in
+/// it was written on another kind of system.
+#[must_use]
+pub fn saved(dto: &JournalDocument) -> Option<Saved> {
+    let path = dto.source.to_path_buf().ok()?;
+    let origin = match &dto.origin {
+        JournalOrigin::File => Origin::File,
+        JournalOrigin::Result {
+            item,
+            source,
+            bytes,
+        } => Origin::Result(ResultOf {
+            item: *item,
+            source: source.to_path_buf().ok()?,
+            output: path.clone(),
+            bytes: *bytes,
+        }),
+    };
+    Some(Saved {
+        path,
+        origin,
+        restore: dto.read.map(|r| Restore {
+            fingerprint: r.fingerprint,
+            selected: r.selected_element,
+            filter: r.filter,
+            bytes_shown: r.bytes_shown,
+        }),
+    })
+}
+
+/// The model's value of a journalled workspace.
+#[must_use]
+pub const fn workspace(dto: JournalWorkspace) -> Workspace {
+    match dto {
+        JournalWorkspace::Encode => Workspace::Encode,
+        JournalWorkspace::Analyze => Workspace::Analyze,
     }
 }
 
@@ -400,6 +563,16 @@ pub enum Loaded {
         /// The version it states.
         version: u32,
     },
+    /// The queue and settings parsed and the view did not. The file was
+    /// copied here first; the journal comes with the default view.
+    ViewUnreadable {
+        /// The journal without its view.
+        journal: Journal,
+        /// The copy of the file as it was.
+        copy: PathBuf,
+        /// What was wrong with the view.
+        error: String,
+    },
     /// The journal did not parse and was moved here; the queue starts empty.
     MovedAside {
         /// Where it is now.
@@ -421,7 +594,7 @@ impl Loaded {
     pub const fn may_save(&self) -> bool {
         matches!(
             self,
-            Self::Missing | Self::Found(_) | Self::MovedAside { .. }
+            Self::Missing | Self::Found(_) | Self::ViewUnreadable { .. } | Self::MovedAside { .. }
         )
     }
 }
@@ -446,10 +619,41 @@ pub fn load(path: &Path) -> Loaded {
     };
     let error = match serde_json::from_slice::<Header>(&bytes) {
         Ok(Header { version }) if version > VERSION => return Loaded::TooNew { version },
-        Ok(Header { version }) if version < VERSION => format!("unknown version {version}"),
+        Ok(Header { version }) if version < OLDEST_VERSION => {
+            format!("unknown version {version}")
+        }
+        // Version 1 is version 2 without the view, which defaults.
         Ok(_) => match serde_json::from_slice::<Journal>(&bytes) {
-            Ok(journal) => return Loaded::Found(journal),
-            Err(e) => e.to_string(),
+            Ok(journal) => {
+                return Loaded::Found(Journal {
+                    version: VERSION,
+                    ..journal
+                });
+            }
+            Err(e) => match without_view(&bytes) {
+                Some(journal) => {
+                    // The copy is synced before any save can replace the file.
+                    return match free_name(path).and_then(|copy| {
+                        fs::copy(path, &copy)?;
+                        // Writable: Windows flushes only a handle that can write.
+                        OpenOptions::new().write(true).open(&copy)?.sync_all()?;
+                        Ok(copy)
+                    }) {
+                        Ok(copy) => Loaded::ViewUnreadable {
+                            journal: Journal {
+                                version: VERSION,
+                                ..journal
+                            },
+                            copy,
+                            error: e.to_string(),
+                        },
+                        Err(c) => Loaded::Unreadable {
+                            error: format!("{e}; it could not be copied aside: {c}"),
+                        },
+                    };
+                }
+                None => e.to_string(),
+            },
         },
         Err(e) => e.to_string(),
     };
@@ -461,8 +665,22 @@ pub fn load(path: &Path) -> Loaded {
     }
 }
 
+/// The journal in `bytes` with its view left out, when the rest parses.
+fn without_view(bytes: &[u8]) -> Option<Journal> {
+    let mut value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    value.as_object_mut()?.remove("view")?;
+    serde_json::from_value(value).ok()
+}
+
 /// Renames `path` to the first free `<name>.corrupt-<n>` beside it.
 fn move_aside(path: &Path) -> io::Result<PathBuf> {
+    let to = free_name(path)?;
+    fs::rename(path, &to)?;
+    Ok(to)
+}
+
+/// The first free `<name>.corrupt-<n>` beside `path`.
+fn free_name(path: &Path) -> io::Result<PathBuf> {
     let name = path
         .file_name()
         .ok_or_else(|| io::Error::other("the journal path has no file name"))?
@@ -471,12 +689,9 @@ fn move_aside(path: &Path) -> io::Result<PathBuf> {
     for n in 1..=1000 {
         let to = path.with_file_name(format!("{name}.corrupt-{n}"));
         // Only this instance touches the folder (it holds the lock), so the
-        // name is still free when the rename runs.
+        // name is still free when it is used.
         match fs::symlink_metadata(&to) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                fs::rename(path, &to)?;
-                return Ok(to);
-            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(to),
             Err(e) => return Err(e),
             Ok(_) => {}
         }
@@ -667,6 +882,37 @@ mod tests {
             version: VERSION,
             next_id: 9,
             settings: INITIAL_SETTINGS,
+            view: JournalView {
+                workspace: JournalWorkspace::Analyze,
+                shown_document: 1,
+                documents: vec![
+                    JournalDocument {
+                        source: WirePath::from_path(&abs("/m/never read.obu")),
+                        origin: JournalOrigin::File,
+                        read: None,
+                    },
+                    JournalDocument {
+                        source: WirePath::from_path(&abs("/m/1.ivf")),
+                        origin: JournalOrigin::Result {
+                            item: 1,
+                            source: WirePath::from_path(&abs("/m/1.mp4")),
+                            bytes: 82,
+                        },
+                        read: Some(JournalRead {
+                            fingerprint: SourceFingerprint {
+                                len: 82,
+                                modified: Some((5, 6)),
+                            },
+                            selected_element: Some(3),
+                            filter: RowFilter {
+                                kind: studio_domain::analysis::KindFilter::Obu { obu_type: 2 },
+                                layer: None,
+                            },
+                            bytes_shown: false,
+                        }),
+                    },
+                ],
+            },
             items: vec![
                 item(1, JournalState::Waiting),
                 item(
@@ -712,18 +958,153 @@ mod tests {
         assert_eq!(dir.entries(), [FILE_NAME]);
         // The format is readable and names the version first.
         let text = String::from_utf8(bytes).unwrap_or_default();
-        assert!(text.starts_with("{\n  \"version\": 1,"), "{text}");
+        assert!(text.starts_with("{\n  \"version\": 2,"), "{text}");
         assert!(text.contains("\"kind\": \"running\""), "{text}");
+    }
+
+    /// A journal as a version 1 build wrote it: a completed conversion with
+    /// its settings, report and acknowledgement, a chosen destination, and
+    /// one interrupted while publishing.
+    const VERSION_1: &str = r#"{
+  "version": 1,
+  "next_id": 7,
+  "settings": {"output": "ivf", "preset": 6, "crf": 20},
+  "items": [
+    {
+      "id": 5,
+      "source": {"kind": "utf8", "value": "/m/harbour.mp4"},
+      "size": 4096,
+      "video_stream": 1,
+      "facts": null,
+      "destination": {"kind": "utf8", "value": "/out/harbour.obu"},
+      "destination_chosen": true,
+      "acknowledgement": {
+        "fingerprint": {"len": 4096, "modified": [1795352441, 421141523]},
+        "video_stream": 1,
+        "omissions": {"other_video": 0, "audio": 2, "subtitles": 1, "attachments": 0, "other": 0, "chapters": 3},
+        "settings": {"output": "av2_annex_b", "preset": 9, "crf": 40}
+      },
+      "state": {
+        "kind": "completed",
+        "job": {
+          "source": {"kind": "utf8", "value": "/m/harbour.mp4"},
+          "fingerprint": {"len": 4096, "modified": [1795352441, 421141523]},
+          "video_stream": 1,
+          "omissions_acknowledged": true,
+          "destination": {"kind": "utf8", "value": "/out/harbour.obu"},
+          "settings": {"output": "av2_annex_b", "preset": 9, "crf": 40}
+        },
+        "report": {
+          "destination": {"kind": "utf8", "value": "/out/harbour.obu"},
+          "frames": 6,
+          "bytes": 178,
+          "checks": [],
+          "disclosures": []
+        }
+      }
+    },
+    {
+      "id": 6,
+      "source": {"kind": "unix", "value": [47, 109, 47, 255]},
+      "size": null,
+      "video_stream": null,
+      "facts": null,
+      "destination": {"kind": "utf8", "value": "/out/raw.ivf"},
+      "destination_chosen": false,
+      "acknowledgement": null,
+      "state": {
+        "kind": "interrupted",
+        "job": {
+          "source": {"kind": "unix", "value": [47, 109, 47, 255]},
+          "fingerprint": {"len": 10, "modified": null},
+          "video_stream": 0,
+          "omissions_acknowledged": false,
+          "destination": {"kind": "utf8", "value": "/out/raw.ivf"},
+          "settings": {"output": "ivf", "preset": 6, "crf": 20}
+        },
+        "publishing": true,
+        "cause": "app_stopped",
+        "destination_present": false,
+        "partial": {"fate": "removed", "path": {"kind": "utf8", "value": "/out/.raw.ivf.Ab12.partial"}}
+      }
+    }
+  ]
+}"#;
+
+    #[test]
+    fn a_version_1_journal_migrates_without_losing_anything() {
+        let dir = Scratch::new("migrate");
+        let path = dir.path(FILE_NAME);
+        assert!(fs::write(&path, VERSION_1).is_ok());
+        let Loaded::Found(migrated) = load(&path) else {
+            unreachable!("{:?}", load(&path))
+        };
+        assert_eq!(migrated.version, VERSION);
+        assert_eq!(migrated.view, JournalView::default());
+        // Read only; the file stays as it was until the next save.
+        assert_eq!(fs::read(&path).ok().as_deref(), Some(VERSION_1.as_bytes()));
+        // Every item, setting and id is the same JSON as before: settings,
+        // jobs, reports, output paths and acknowledgements.
+        let bytes = encode(&migrated).unwrap_or_default();
+        let value = |bytes: &[u8]| -> serde_json::Value {
+            serde_json::from_slice(bytes).unwrap_or_else(|e| unreachable!("{e}"))
+        };
+        let (before, after) = (value(VERSION_1.as_bytes()), value(&bytes));
+        for key in ["items", "settings", "next_id"] {
+            assert_eq!(before[key], after[key], "{key}");
+        }
+        assert_eq!(after["version"], 2);
+        // The migrated journal saves and loads as version 2.
+        assert!(write_atomically(&path, &bytes).is_ok());
+        assert_eq!(load(&path), Loaded::Found(migrated));
+    }
+
+    #[test]
+    fn an_unreadable_view_keeps_the_queue_and_a_copy_of_the_file() {
+        let dir = Scratch::new("bad-view");
+        let path = dir.path(FILE_NAME);
+        let mut text: serde_json::Value =
+            serde_json::from_slice(&encode(&journal()).unwrap_or_default()).unwrap_or_default();
+        text["view"]["workspace"] = "compare".into();
+        let bytes = serde_json::to_vec(&text).unwrap_or_default();
+        assert!(fs::write(&path, &bytes).is_ok());
+        let loaded = load(&path);
+        assert!(loaded.may_save());
+        let Loaded::ViewUnreadable {
+            journal: kept,
+            copy,
+            error,
+        } = loaded
+        else {
+            unreachable!("{loaded:?}")
+        };
+        assert!(error.contains("compare"), "{error}");
+        // The queue and settings are all there; the view is the default.
+        assert_eq!(
+            kept,
+            Journal {
+                view: JournalView::default(),
+                ..journal()
+            }
+        );
+        // The file stays, and a copy of it as it was is beside it.
+        assert_eq!(copy, dir.path("queue.json.corrupt-1"));
+        assert_eq!(fs::read(&copy).ok(), Some(bytes.clone()));
+        assert_eq!(fs::read(&path).ok(), Some(bytes));
+        // Items that do not parse still move the whole file aside.
+        text["items"] = "renamed".into();
+        assert!(fs::write(&path, serde_json::to_vec(&text).unwrap_or_default()).is_ok());
+        assert!(matches!(load(&path), Loaded::MovedAside { .. }));
     }
 
     #[test]
     fn a_newer_version_is_left_untouched_and_not_saved_over() {
         let dir = Scratch::new("too-new");
         let path = dir.path(FILE_NAME);
-        let future = br#"{"version": 7, "anything": ["from", "the", "future"]}"#;
+        let future = br#"{"version": 3, "items": "renamed", "view": {"tabs": []}}"#;
         assert!(fs::write(&path, future).is_ok());
         let loaded = load(&path);
-        assert_eq!(loaded, Loaded::TooNew { version: 7 });
+        assert_eq!(loaded, Loaded::TooNew { version: 3 });
         assert!(!loaded.may_save());
         assert_eq!(fs::read(&path).ok().as_deref(), Some(&future[..]));
     }

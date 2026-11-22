@@ -21,9 +21,11 @@ use std::path::{Component, Path, PathBuf};
 use studio_domain::job::{JobSpec, WirePath};
 use studio_domain::settings::EncoderSettings;
 
-use crate::journal::{self, Journal, JournalItem, JournalState};
+use crate::analysis::Saved;
+use crate::journal::{self, Journal, JournalItem, JournalState, JournalView};
 use crate::queue::{Attempt, Cause, Destination, Ending, Item, ItemId, ItemState, PartialFate};
 use crate::source::ProbeFailure;
+use crate::workspace::Workspace;
 
 /// What is at a path, without following a symlink.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +167,48 @@ pub struct Recovered {
     /// Items that could not be restored: a duplicate id, or a path written
     /// on another kind of system.
     pub dropped: usize,
+    /// The workspace and documents the window showed.
+    pub view: RestoredView,
+}
+
+/// The view the journal recorded. Its documents are only where to read
+/// them again; nothing about their files is restored before that.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoredView {
+    /// The workspace shown.
+    pub workspace: Workspace,
+    /// The Analyze documents.
+    pub documents: Vec<Saved>,
+    /// The index of the document shown.
+    pub shown: usize,
+    /// Documents whose path was written on another kind of system.
+    pub dropped: usize,
+    /// The view did not parse and nothing of it was restored; a copy of
+    /// the journal as it was is here.
+    pub unreadable: Option<PathBuf>,
+}
+
+/// The model's values of a journalled view.
+#[must_use]
+pub fn view(dto: &JournalView) -> RestoredView {
+    let kept: Vec<(usize, Saved)> = dto
+        .documents
+        .iter()
+        .enumerate()
+        .filter_map(|(at, d)| journal::saved(d).map(|saved| (at, saved)))
+        .collect();
+    // The shown one, counted among those kept.
+    let shown = kept
+        .iter()
+        .position(|(at, _)| *at == dto.shown_document)
+        .unwrap_or(0);
+    RestoredView {
+        workspace: journal::workspace(dto.workspace),
+        dropped: dto.documents.len() - kept.len(),
+        documents: kept.into_iter().map(|(_, saved)| saved).collect(),
+        shown,
+        unreadable: None,
+    }
 }
 
 /// Rebuilds the queue from `journal`. Items that were converting become
@@ -172,6 +216,7 @@ pub struct Recovered {
 /// [`Recovered::cleanups`] (and marked [`PartialFate::Pending`]).
 #[must_use]
 pub fn recover(journal: Journal, disk: &dyn Disk) -> Recovered {
+    let view = view(&journal.view);
     let mut items: Vec<Item> = Vec::with_capacity(journal.items.len());
     let mut dropped = 0;
     for dto in journal.items {
@@ -203,6 +248,7 @@ pub fn recover(journal: Journal, disk: &dyn Disk) -> Recovered {
         settings: journal.settings,
         cleanups,
         dropped,
+        view,
     }
 }
 
@@ -434,6 +480,7 @@ mod tests {
             version: VERSION,
             next_id: 2,
             settings: INITIAL_SETTINGS,
+            view: JournalView::default(),
             items: vec![JournalItem {
                 id: 1,
                 source: WirePath::from_path(&abs("/in/clip.y4m")),
@@ -698,6 +745,58 @@ mod tests {
         assert_eq!(recovered.items[0].source(), abs("/in/clip.y4m"));
         // Never below an id already used.
         assert_eq!(recovered.next_id, 41);
+    }
+
+    #[test]
+    fn the_view_comes_back_as_documents_to_read_again() {
+        use crate::analysis::Origin;
+        use crate::journal::{JournalDocument, JournalOrigin, JournalWorkspace};
+        let mut j = journal(JournalState::Waiting);
+        #[cfg(not(windows))]
+        let foreign = WirePath::Windows(vec![0xD800]);
+        #[cfg(windows)]
+        let foreign = WirePath::Unix(vec![0xff]);
+        let document = |source: WirePath, origin| JournalDocument {
+            source,
+            origin,
+            read: None,
+        };
+        j.view = JournalView {
+            workspace: JournalWorkspace::Analyze,
+            // The last one, the second kept.
+            shown_document: 3,
+            documents: vec![
+                document(WirePath::from_path(&abs("/in/a.obu")), JournalOrigin::File),
+                document(foreign.clone(), JournalOrigin::File),
+                document(
+                    WirePath::from_path(&abs("/out/clip.ivf")),
+                    JournalOrigin::Result {
+                        item: 1,
+                        source: foreign,
+                        bytes: 9,
+                    },
+                ),
+                document(
+                    WirePath::from_path(&abs("/out/clip.ivf")),
+                    JournalOrigin::Result {
+                        item: 1,
+                        source: WirePath::from_path(&abs("/in/clip.y4m")),
+                        bytes: 9,
+                    },
+                ),
+            ],
+        };
+        let view = recover(j, &FakeDisk::default()).view;
+        assert_eq!(view.workspace, Workspace::Analyze);
+        assert_eq!(view.shown, 1);
+        // A path from the other platform family, in the file or its origin.
+        assert_eq!(view.dropped, 2);
+        let paths: Vec<_> = view.documents.iter().map(|d| d.path.clone()).collect();
+        assert_eq!(paths, [abs("/in/a.obu"), abs("/out/clip.ivf")]);
+        assert!(matches!(
+            &view.documents[1].origin,
+            Origin::Result(r) if r.output == abs("/out/clip.ivf") && r.bytes == 9
+        ));
     }
 
     #[test]

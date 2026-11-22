@@ -15,6 +15,7 @@ use studio_domain::settings::OutputKind;
 
 use crate::activity::{self, Phase};
 use crate::engine::Picture;
+use crate::jobs::Job;
 use crate::present::queue::{self as text, RowKind};
 use crate::present::{self, Tone as ToneText};
 use crate::preview::{Dirty, Preview, StageState as Stage};
@@ -22,8 +23,8 @@ use crate::queue::{Ending, Item, ItemState};
 use crate::simple::{self, Priority, Quality};
 use crate::state::{AppState, Mode, Severity};
 use crate::ui::{
-    AppWindow, CheckRow, Fact, JobView, Notice, QueueRow, RowState, SourceView, StageState, Tone,
-    ViewMode, WorkspaceView,
+    AppWindow, CheckRow, Fact, JobRow, JobView, Notice, QueueRow, RowState, SourceView, StageState,
+    Tone, ViewMode, WorkspaceView,
 };
 use crate::workspace::Workspace;
 
@@ -521,6 +522,47 @@ pub(crate) const fn tone(tone: ToneText) -> Tone {
         ToneText::Success => Tone::Success,
         ToneText::Warning => Tone::Warning,
         ToneText::Error => Tone::Error,
+    }
+}
+
+/// Pushes the Jobs entry and list. Rows that did not change are not
+/// touched, so a focused Cancel keeps its focus while counts move.
+///
+/// Public so renderer snapshots and UI tests can show a state.
+pub fn render_jobs(window: &AppWindow, jobs: &[Job<'_>]) {
+    let (label, description) = present::jobs::entry(jobs);
+    window.set_jobs_label(label.into());
+    window.set_jobs_description(description.into());
+    let rows: Vec<JobRow> = jobs
+        .iter()
+        .map(|job| {
+            let line = present::jobs::line(job);
+            JobRow {
+                accessible: format!(
+                    "{} {}: {}. {}",
+                    line.kind, line.name, line.state, line.detail
+                )
+                .into(),
+                kind: line.kind.into(),
+                name: line.name.into(),
+                state: line.state.into(),
+                tone: tone(line.tone),
+                detail: line.detail.into(),
+                progress_known: line.fraction.is_some(),
+                progress: line.fraction.unwrap_or(0.0),
+                can_cancel: job.can_cancel(),
+            }
+        })
+        .collect();
+    let shown = window.get_jobs();
+    if shown.row_count() == rows.len() {
+        for (index, row) in rows.into_iter().enumerate() {
+            if shown.row_data(index).as_ref() != Some(&row) {
+                shown.set_row_data(index, row);
+            }
+        }
+    } else {
+        window.set_jobs(model(rows));
     }
 }
 

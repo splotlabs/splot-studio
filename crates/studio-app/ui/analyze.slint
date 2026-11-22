@@ -15,7 +15,8 @@ import { Caption, LinkButton, SectionTitle } from "controls.slint";
 import { IconButton } from "stage.slint";
 
 // What the shown document is doing; `empty` when none is open.
-export enum AnalysisState { empty, opening, open, failed }
+// `attention`: a restored document whose file changed or is missing.
+export enum AnalysisState { empty, opening, open, failed, attention }
 
 // A keyboard movement in the navigator or the byte view; `none` for a key
 // that is no movement.
@@ -90,6 +91,12 @@ export global Analysis {
     in property <string> message;
     // A problem that did not end the document.
     in property <string> notice;
+    // The attention state's heading and its way out.
+    in property <string> heading;
+    in property <string> action;
+    in property <string> action-description;
+    // The read was cancelled and kept only the start of the file.
+    in property <bool> can-read-again;
 
     in property <[string]> type-labels;
     in-out property <int> type-index;
@@ -124,6 +131,7 @@ export global Analysis {
     callback close();
     callback reopen();
     callback cancel();
+    callback resolve();
     callback show(int);
     callback row-clicked(int);
     callback move(NavStep);
@@ -658,15 +666,44 @@ export component AnalyzeView inherits VerticalLayout {
         }
     }
 
+    if Analysis.state == AnalysisState.attention: StateCard {
+        height: 220px;
+        heading: Analysis.heading;
+        text: Analysis.message;
+        action: Analysis.action;
+        action-description: Analysis.action-description;
+        second: "Close";
+        act => {
+            Analysis.resolve();
+        }
+        second-act => {
+            Analysis.close();
+        }
+    }
+
     if Analysis.state == AnalysisState.open: VerticalLayout {
         spacing: Tokens.space-2;
 
-        Text {
-            text: Analysis.outcome-line;
-            color: Analysis.outcome-problem ? Tokens.warning : Tokens.text-secondary;
-            font-size: Tokens.type-caption * 1rem;
-            font-weight: Analysis.outcome-problem ? Tokens.weight-semibold : Tokens.weight-regular;
-            wrap: word-wrap;
+        HorizontalLayout {
+            spacing: Tokens.space-2;
+
+            Text {
+                horizontal-stretch: 1;
+                text: Analysis.outcome-line;
+                color: Analysis.outcome-problem ? Tokens.warning : Tokens.text-secondary;
+                font-size: Tokens.type-caption * 1rem;
+                font-weight: Analysis.outcome-problem ? Tokens.weight-semibold : Tokens.weight-regular;
+                wrap: word-wrap;
+            }
+
+            if Analysis.can-read-again: LinkButton {
+                min-height: 0;
+                text: "Read Again";
+                description: "Read the whole file; the selection is kept";
+                clicked => {
+                    Analysis.reopen();
+                }
+            }
         }
 
         // History, filters and go to offset.

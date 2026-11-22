@@ -30,7 +30,13 @@ codec is young.
   reads AV2 IVF and Annex B files without changing them: a navigator of IVF records, OBUs and
   regions that did not parse, the selected element's envelope and header properties with
   their exact offsets, and its bytes. Filters by OBU type and layer, Back and Forward, go to
-  offset and copy.
+  offset and copy. A cancelled read keeps what it read. The open documents, their selection
+  and filters, and the workspace are restored at the next start, after each file is checked
+  again: a file that changed or is missing is said so, and nothing about it is shown until
+  you read it again or locate it.
+- Jobs (in the toolbar) lists every conversion and stream read of the session with its own
+  state: queued, running, cancelling, completed, cancelled, failed or interrupted, with real
+  counts where the engine reports them.
 
 **What it refuses, with a reason**
 
@@ -43,7 +49,7 @@ rotation or cropping, RGB or alpha, encrypted streams, network and playlist inpu
   workspaces (Encode, Analyze and Compare) and shared Jobs; see the
   [roadmap](https://github.com/splotlabs/splot-studio/issues/33). Analyze shows envelope and
   header facts only: no syntax trees, validation findings or playback yet. Compare is not
-  built, and the Jobs entry in the toolbar is reserved and not available yet.
+  built. A stream read reports no progress until it ends.
 - Audio, subtitles and chapters are not carried over; the app lists what a file would lose
   and asks before converting. Container output with audio is planned in
   [#12](https://github.com/splotlabs/splot-studio/issues/12).

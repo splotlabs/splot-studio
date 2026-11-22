@@ -8,7 +8,13 @@
 //! [`Session::dispatch`] applies an intent and carries out its effects:
 //! starting probe and job workers, talking to them, removing a dead
 //! worker's temporary file, and submitting the journal whenever the
-//! durable state changed (never for progress counters). What only a window
+//! durable state changed (never for progress counters). The journal also
+//! records the workspace and the Analyze documents; documents restored from
+//! it are read again only once Analyze is shown.
+//!
+//! The inspect process is started when a document needs it and let go as
+//! soon as none does (every document closed, failed or not read), so an
+//! idle Analyze holds no process, file handle or kept facts. What only a window
 //! can do (dialogs, timers, Show in Folder) comes back as [`UiEffect`]s.
 //! Worker events are handed to `post` on their reader threads; whoever owns
 //! the session brings them back to its thread and calls [`Session::deliver`].
@@ -19,6 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use studio_domain::analysis::RowFilter;
 use studio_domain::job::WirePath;
 use studio_domain::protocol::{BuildIdentity, Command, Envelope, Event, ProtocolError};
 use studio_domain::settings::OutputKind;
@@ -26,11 +33,12 @@ use studio_domain::settings::OutputKind;
 use crate::activity::{self, Changed};
 use crate::analysis::{self, Analysis};
 use crate::engine::{self, Delivery, Ending, EngineStatus, Role, Worker};
-use crate::journal::{self, Writer};
+use crate::jobs::{self, Work};
+use crate::journal::{self, JournalView, Writer};
 use crate::preview::{self, Dirty, Preview};
 use crate::recovery::{self, RealDisk};
 use crate::source::ProbeFailure;
-use crate::state::{AppState, Effect, Intent};
+use crate::state::{AppState, Effect, Intent, JournalProblem};
 use crate::workspace::Workspace;
 
 /// The request id of the startup `Hello`; probes and jobs count from 1.
@@ -61,6 +69,9 @@ pub enum UiEffect {
     ShowOpenDialog,
     /// Show the native Open dialog, to open AV2 streams in Analyze.
     ShowAnalyzeDialog,
+    /// Show the native Open dialog for one file: where the shown missing
+    /// document is now. Answer with [`Session::locate_picked`].
+    ShowLocateDialog,
     /// Show the native Save dialog.
     ShowSaveDialog {
         /// The folder to start in.
@@ -135,11 +146,15 @@ pub struct Session {
     inspectors_started: u64,
     /// The Analyze Open dialog is showing.
     analyze_dialog: bool,
+    /// The Locate dialog is showing for the missing document of this path.
+    locating: Option<PathBuf>,
     /// The window is not minimized; the picture area also needs Encode shown.
     window_visible: bool,
     journal: Option<Writer>,
     /// The journal bytes last submitted.
     saved: Option<Vec<u8>>,
+    /// The view record in them.
+    saved_view: Option<JournalView>,
     shut_down: bool,
 }
 
@@ -149,11 +164,12 @@ impl Session {
     /// when given. Saves once right away, so a recovered queue is recorded.
     #[must_use]
     pub fn new(
-        state: AppState,
+        mut state: AppState,
         engine: Result<PathBuf, String>,
         post: Post,
         journal: Option<Writer>,
     ) -> Self {
+        let view = state.take_restored_view();
         let mut session = Self {
             state,
             engine,
@@ -164,17 +180,57 @@ impl Session {
             preview: Preview::new(),
             previewer: None,
             previewers_started: 0,
-            analysis: Analysis::new(),
+            analysis: Analysis::restored(view),
             inspector: None,
             inspectors_started: 0,
             analyze_dialog: false,
+            locating: None,
             window_visible: true,
             journal,
             saved: None,
+            saved_view: None,
             shut_down: false,
         };
+        session.note_storage();
+        session.read_if_shown();
         session.persist();
         session
+    }
+
+    /// Tells Analyze when its documents are not saved, as Encode's notices
+    /// say for the list.
+    fn note_storage(&mut self) {
+        let problem = if let Some(reason) = self.state.save_error() {
+            Some(format!(
+                "The documents cannot be saved: {reason}. They are kept until the app closes."
+            ))
+        } else if matches!(
+            self.state.journal_problem(),
+            Some(
+                JournalProblem::TooNew { .. }
+                    | JournalProblem::Unreadable { .. }
+                    | JournalProblem::NoFolder(_)
+            )
+        ) {
+            Some("The documents are not saved in this session; Encode says why.".to_owned())
+        } else {
+            None
+        };
+        self.analysis.set_storage_problem(problem);
+    }
+
+    /// Reads the restored documents not read yet, once Analyze is shown.
+    fn read_if_shown(&mut self) {
+        if self.state.workspace() == Workspace::Analyze {
+            let effects = self.analysis.read_unread(&RealDisk);
+            self.send_inspect(effects);
+        }
+    }
+
+    /// Whether an inspect process runs, for tests of its lifecycle.
+    #[must_use]
+    pub const fn inspecting(&self) -> bool {
+        self.inspector.is_some()
     }
 
     /// The state.
@@ -284,6 +340,8 @@ impl Session {
             }
         }
         if outcome.changed == Changed::Phase {
+            self.note_storage();
+            outcome.analysis |= self.analysis.take_dirty();
             self.persist();
             let effects = self.preview.sync(preview::scene(&self.state));
             self.send_preview(effects);
@@ -294,6 +352,8 @@ impl Session {
                 .preview
                 .input(preview::Input::Visible(self.picture_visible()));
             self.send_preview(effects);
+            self.read_if_shown();
+            outcome.analysis |= self.analysis.take_dirty();
         }
         outcome.preview = self.preview.take_dirty();
         outcome
@@ -309,10 +369,81 @@ impl Session {
         if self.shut_down {
             return outcome;
         }
+        if input == analysis::Input::Resolve
+            && let Some(doc) = self.analysis.shown()
+            && *doc.phase() == analysis::Phase::Missing
+        {
+            // The answer goes to this document, whichever is shown then.
+            if self.locating.replace(doc.path().to_path_buf()).is_none() {
+                outcome.ui.push(UiEffect::ShowLocateDialog);
+            }
+            return outcome;
+        }
         let effects = self.analysis.input(input);
         self.send_inspect(effects);
+        self.persist_view();
         outcome.analysis = self.analysis.take_dirty();
         outcome
+    }
+
+    /// The Locate dialog closed; `None` means it was cancelled.
+    pub fn locate_picked(&mut self, path: Option<PathBuf>) -> Outcome {
+        match (self.locating.take(), path) {
+            (Some(missing), Some(to)) => {
+                self.analysis_input(analysis::Input::Relink { missing, to })
+            }
+            _ => Outcome::nothing(),
+        }
+    }
+
+    /// Every job of both workspaces; see [`jobs::list`].
+    #[must_use]
+    pub fn jobs(&self) -> Vec<jobs::Job<'_>> {
+        jobs::list(&self.state, &self.analysis)
+    }
+
+    /// Shows the job at `index` of [`Self::jobs`] where it belongs: its
+    /// file in Encode, or its document in Analyze.
+    pub fn show_job(&mut self, index: usize, now: Instant) -> Outcome {
+        let target = self.jobs().get(index).map(|job| match job.work {
+            Work::Convert(item) => (Workspace::Encode, self.index_of_item(item.id())),
+            Work::Inspect(at, _) => (Workspace::Analyze, Some(at)),
+        });
+        let mut outcome = Outcome::nothing();
+        match target {
+            Some((Workspace::Analyze, Some(at))) => {
+                outcome.merge(self.analysis_input(analysis::Input::Show(int(at))));
+                outcome.merge(self.dispatch(Intent::WorkspaceRequested(Workspace::Analyze), now));
+            }
+            Some((_, row)) => {
+                outcome.merge(self.dispatch(Intent::WorkspaceRequested(Workspace::Encode), now));
+                if let Some(row) = row {
+                    outcome.merge(self.dispatch(Intent::RowSelected(int(row)), now));
+                }
+            }
+            None => {}
+        }
+        outcome
+    }
+
+    /// Cancels the job at `index` of [`Self::jobs`], if it can be.
+    pub fn cancel_job(&mut self, index: usize, now: Instant) -> Outcome {
+        let target = self
+            .jobs()
+            .get(index)
+            .filter(|job| job.can_cancel())
+            .map(|job| job.work);
+        match target {
+            Some(Work::Convert(_)) => self.dispatch(Intent::CancelRequested, now),
+            Some(Work::Inspect(at, _)) => {
+                self.analysis_input(analysis::Input::CancelDocument(int(at)))
+            }
+            None => Outcome::nothing(),
+        }
+    }
+
+    fn index_of_item(&self, id: crate::queue::ItemId) -> Option<usize> {
+        self.state.items().iter().position(|i| i.id() == id)
     }
 
     /// Open to Analyze: shows Analyze and its Open dialog.
@@ -356,7 +487,7 @@ impl Session {
                 match self.spawn_as(Role::Inspect, Route::Inspect(spawn)) {
                     Ok(worker) => self.inspector = Some((spawn, worker)),
                     Err(why) => {
-                        self.analysis.process_ended(&why);
+                        self.analysis.engine_failed(&why);
                         return;
                     }
                 }
@@ -366,6 +497,12 @@ impl Session {
             {
                 worker.close_input();
             }
+        }
+        if self.inspector.is_some() && !self.analysis.needs_engine() {
+            // Dropping it ends its input; it exits and is reaped without
+            // blocking. Its late answers are for an older spawn.
+            self.inspector = None;
+            self.analysis.engine_released();
         }
     }
 
@@ -392,6 +529,7 @@ impl Session {
             }
         };
         self.send_inspect(effects);
+        self.persist_view();
         Outcome {
             analysis: self.analysis.take_dirty(),
             ..Outcome::nothing()
@@ -658,8 +796,40 @@ impl Session {
             .map_err(|e| e.to_string())
     }
 
+    /// The view record of the workspace and the Analyze documents.
+    fn view(&self) -> JournalView {
+        let (saved, shown) = self.analysis.saved();
+        journal::view(self.state.workspace(), &saved, shown)
+    }
+
+    /// Submits the journal when the documents or the workspace changed.
+    /// A selection, filter or byte view alone waits for the next save (any
+    /// change of the queue, or quit), so moving through rows costs no
+    /// write each.
+    fn persist_view(&mut self) {
+        let outline = |view: &JournalView| {
+            let mut view = view.clone();
+            for doc in &mut view.documents {
+                if let Some(read) = &mut doc.read {
+                    read.selected_element = None;
+                    read.filter = RowFilter::default();
+                    read.bytes_shown = true;
+                }
+            }
+            view
+        };
+        let changed = self
+            .saved_view
+            .as_ref()
+            .is_none_or(|saved| outline(saved) != outline(&self.view()));
+        if self.journal.is_some() && changed {
+            self.persist();
+        }
+    }
+
     /// Submits the journal if it differs from the last one submitted.
     fn persist(&mut self) {
+        let view = self.view();
         let Some(writer) = &self.journal else {
             return;
         };
@@ -667,7 +837,9 @@ impl Session {
             self.state.next_id(),
             self.state.settings(),
             self.state.items(),
+            view.clone(),
         );
+        self.saved_view = Some(view);
         let Ok(bytes) = journal::encode(&journal) else {
             return;
         };
@@ -716,6 +888,10 @@ const fn more(a: Changed, b: Changed) -> Changed {
         (Changed::Counters, _) | (_, Changed::Counters) => Changed::Counters,
         (Changed::Nothing, Changed::Nothing) => Changed::Nothing,
     }
+}
+
+fn int(index: usize) -> i32 {
+    i32::try_from(index).unwrap_or(i32::MAX)
 }
 
 fn ending_text(ending: &Ending) -> String {

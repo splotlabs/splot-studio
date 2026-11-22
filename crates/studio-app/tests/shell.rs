@@ -161,8 +161,9 @@ fn the_switch_leads_the_keys_and_a_round_trip_keeps_encode() {
         1,
         "Right on the switch did not choose Analyze"
     );
-    // Encode is still shown until Rust says otherwise: the next stop is
-    // Encode's Open….
+    // Encode is still shown until Rust says otherwise: after Jobs, the
+    // next stop is Encode's Open….
+    press(&window, Key::Tab);
     press(&window, Key::Tab);
     press(&window, " ");
     assert_eq!(opened.get(), 1, "Tab did not reach Encode's Open… next");
@@ -181,12 +182,13 @@ fn the_switch_leads_the_keys_and_a_round_trip_keeps_encode() {
     studio_app::render(&window, &state, Instant::now());
 
     // With Analyze shown, Encode's controls take no focus: the stop after
-    // the switch is Analyze's Open….
+    // the switch and Jobs is Analyze's Open….
     workspace(&mut state, Workspace::Analyze);
     studio_app::render(&window, &state, Instant::now());
     studio_app::render_analysis(&window, &Analysis::new());
     assert_eq!(window.get_workspace(), WorkspaceView::Analyze);
     assert_eq!(window.get_workspace_index(), 1);
+    press(&window, Key::Tab);
     press(&window, Key::Tab);
     press(&window, Key::Tab);
     press(&window, " ");
