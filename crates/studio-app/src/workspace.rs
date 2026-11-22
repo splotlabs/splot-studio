@@ -7,9 +7,9 @@
 //! workspace; changing it never touches the queue, the global settings or
 //! the immutable `JobSpec` a converting item took, and it is not journalled.
 //!
-//! Only Encode exists. Analyze and Compare are approved directions, not
-//! features: they are known here so the shell can refuse them, and the
-//! window offers no way to reach them until their flows land.
+//! Encode and Analyze exist. Compare is an approved direction, not a
+//! feature: it is known here so the shell can refuse it, and the window
+//! offers no way to reach it until its flow lands.
 
 /// A task area of the window. Jobs is shared by all of them, so it is not
 /// one.
@@ -18,7 +18,7 @@ pub enum Workspace {
     /// Convert video to AV2: the queue, settings, progress and preview.
     #[default]
     Encode,
-    /// Read-only inspection of AV2 streams. Not built.
+    /// Read-only inspection of AV2 streams: OBUs, properties and bytes.
     Analyze,
     /// Source against result, or result against result. Not built.
     Compare,
@@ -38,6 +38,17 @@ impl Workspace {
     /// The workspace has a working flow in this build and may be shown.
     #[must_use]
     pub const fn available(self) -> bool {
-        matches!(self, Self::Encode)
+        matches!(self, Self::Encode | Self::Analyze)
+    }
+
+    /// The workspaces the switch offers, in its order: the available ones.
+    pub const OFFERED: [Self; 2] = [Self::Encode, Self::Analyze];
+
+    /// The workspace at `index` of [`Self::OFFERED`].
+    #[must_use]
+    pub fn offered(index: i32) -> Option<Self> {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| Self::OFFERED.get(i).copied())
     }
 }

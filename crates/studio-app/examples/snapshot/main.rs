@@ -26,7 +26,8 @@
 //! `batch-confirm` (the confirmation for seven files), `save-failed` (the
 //! journal cannot be written), `many` (eight rows, the list scrolls) and
 //! `restored` (the list after the app stopped mid-job). `already-open` is the
-//! window a second instance shows.
+//! window a second instance shows. The `analyze-*` scenarios show the Analyze
+//! workspace; see `analyze.rs`.
 //!
 //! The picture area is drawn by the app's real `Preview`, its requests
 //! answered with painted test pictures (a landscape, coarser on the result
@@ -36,6 +37,8 @@
 //! `preview-compare` (held on a result), `preview-native` (actual pixels),
 //! `preview-unavailable` (the output file is gone) and `preview-untimed` (no
 //! frame timing) show its other states.
+
+mod analyze;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -729,6 +732,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "preview-compare" | "preview-unavailable" => "completed",
         other => other,
     };
+    if let Some(analysis) = analyze::scenario(name) {
+        let mut state = AppState::default();
+        state.apply(
+            Intent::WorkspaceRequested(studio_app::workspace::Workspace::Analyze),
+            now,
+            &NoFiles,
+        );
+        studio_app::render(&window, &state, now);
+        studio_app::render_analysis(&window, &analysis);
+        window.show()?;
+        return capture(&window, out);
+    }
     let state = scenario(base, long, now)?;
     studio_app::render(&window, &state, now);
     let preview = picture_area(&window, &state, name);

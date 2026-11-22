@@ -1,0 +1,184 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+// Small controls shared by the shell and the workspaces: text styles, the
+// quiet link action and the workspace switch.
+
+import { Tokens } from "tokens.slint";
+import { FocusRing, KeyboardFocus } from "focus.slint";
+
+export component Caption inherits Text {
+    color: Tokens.text-secondary;
+    font-size: Tokens.type-caption * 1rem;
+    wrap: word-wrap;
+}
+
+export component Label inherits Text {
+    color: Tokens.text;
+    font-size: Tokens.type-body * 1rem;
+    font-weight: Tokens.weight-semibold;
+}
+
+export component SectionTitle inherits Text {
+    color: Tokens.text-secondary;
+    font-size: Tokens.type-caption * 1rem;
+    font-weight: Tokens.weight-semibold;
+    accessible-role: none;
+}
+
+// A quiet text action ("Change…", "Advanced"). Enter or Space activates it.
+// `quiet` makes it smaller and grey until pointed at, for the many rows of
+// the file list.
+export component LinkButton inherits KeyboardFocus {
+    in property <string> text;
+    in property <string> description;
+    in property <bool> quiet;
+    // A quiet action in the accent colour: the selected row's.
+    in property <bool> highlighted;
+    callback clicked();
+
+    min-height: Tokens.control-height;
+    horizontal-stretch: 0;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-description: root.description;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if root.enabled {
+            root.clicked();
+        }
+    }
+    key-pressed(event) => {
+        if root.enabled && (event.text == Key.Return || event.text == " ") {
+            root.clicked();
+            return accept;
+        }
+        reject
+    }
+
+    FocusRing {
+        shown: root.ring;
+        x: -3px;
+        y: -3px;
+        width: root.width + 6px;
+        height: root.height + 6px;
+        radius: Tokens.radius-small;
+    }
+
+    HorizontalLayout {
+        Text {
+            text: root.text;
+            color: !root.enabled ? Tokens.text-disabled
+                : touch.has-hover ? Tokens.accent-hover
+                : root.quiet && !root.highlighted ? Tokens.text-secondary
+                : Tokens.accent;
+            font-size: (root.quiet ? Tokens.type-caption : Tokens.type-body) * 1rem;
+            font-weight: Tokens.weight-semibold;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// The shell's workspace switch: the workspaces as caption-sized tabs, read
+// as a radio group. One Tab stop; Left and Right (Home, End) choose. The
+// shown workspace is bold with an accent bar under it, so it does not rest
+// on colour. It is no taller than a caption line, so the workspace below
+// starts where it did without a switch.
+export component WorkspaceSwitch inherits KeyboardFocus {
+    in property <[string]> options;
+    in property <int> selected;
+    callback chosen(int);
+
+    property <int> count: root.options.length;
+    accessible-role: tab-list;
+    accessible-label: "Workspace";
+    key-pressed(event) => {
+        if root.count == 0 {
+            return reject;
+        }
+        if event.text == Key.RightArrow {
+            root.keyboard-used();
+            root.chosen(min(root.count - 1, root.selected + 1));
+            return accept;
+        }
+        if event.text == Key.LeftArrow {
+            root.keyboard-used();
+            root.chosen(max(0, root.selected - 1));
+            return accept;
+        }
+        if event.text == Key.Home {
+            root.keyboard-used();
+            root.chosen(0);
+            return accept;
+        }
+        if event.text == Key.End {
+            root.keyboard-used();
+            root.chosen(root.count - 1);
+            return accept;
+        }
+        reject
+    }
+
+    HorizontalLayout {
+        spacing: Tokens.space-3;
+
+        for option[i] in root.options: Rectangle {
+            property <bool> on: i == root.selected;
+            horizontal-stretch: 0;
+            min-width: label.preferred-width;
+            accessible-role: tab;
+            accessible-label: option;
+            accessible-item-selectable: true;
+            accessible-item-selected: self.on;
+            accessible-item-index: i;
+            accessible-item-count: root.count;
+            accessible-action-default => {
+                root.chosen(i);
+            }
+
+            label := Text {
+                text: option;
+                color: parent.on ? Tokens.text : touch.has-hover ? Tokens.accent-hover : Tokens.text-secondary;
+                font-size: Tokens.type-caption * 1rem;
+                font-weight: parent.on ? Tokens.weight-semibold : Tokens.weight-regular;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+
+            // Below the text, inside the gap under the toolbar.
+            if self.on: Rectangle {
+                y: parent.height + 1px;
+                height: 2px;
+                width: parent.width;
+                border-radius: 1px;
+                background: Tokens.accent;
+            }
+
+            touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.focus();
+                    root.chosen(i);
+                }
+            }
+
+            FocusRing {
+                shown: root.ring && parent.on;
+                x: -4px;
+                y: -2px;
+                width: parent.width + 8px;
+                height: parent.height + 4px;
+                radius: Tokens.radius-small - 2px;
+            }
+        }
+    }
+}

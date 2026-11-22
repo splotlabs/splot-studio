@@ -1,0 +1,919 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+// The Analyze workspace: a navigator of the document's elements, the
+// selected element's properties and the bytes around it. Rust owns every
+// value through the `Analysis` global, including the selection, the
+// visible rows and the byte window; every callback is an input that Rust
+// answers by setting the global again. Only the visible rows and one byte
+// window exist here, however large the file. Nothing here reads files.
+
+import { Button, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
+import { Tokens } from "tokens.slint";
+import { FocusRing, KeyboardFocus } from "focus.slint";
+import { Caption, LinkButton, SectionTitle } from "controls.slint";
+import { IconButton } from "stage.slint";
+
+// What the shown document is doing; `empty` when none is open.
+export enum AnalysisState { empty, opening, open, failed }
+
+// A keyboard movement in the navigator or the byte view.
+export enum NavStep { up, down, page-up, page-down, home, end, left, right }
+
+// Which part of the selected element a byte belongs to, from the spans the
+// engine reported; `outside` for bytes of other elements.
+export enum ByteRegion { outside, prefix, header, payload, record-header, file-header, unparsed }
+
+// One visible navigator row; `loaded` is false until its page arrives.
+export struct NavRow {
+    loaded: bool,
+    // 1 for an OBU or region inside an IVF packet.
+    depth: int,
+    title: string,
+    detail: string,
+    offset: string,
+    selected: bool,
+    accessible: string,
+}
+
+// One property of the inspector.
+export struct Property {
+    label: string,
+    value: string,
+    note: string,
+}
+
+// One byte of the window.
+export struct ByteCell {
+    text: string,
+    region: ByteRegion,
+    cursor: bool,
+}
+
+// One line of the byte window.
+export struct ByteLine {
+    offset: string,
+    cells: [ByteCell],
+    ascii: string,
+}
+
+// One entry of the byte legend.
+export struct Legend {
+    label: string,
+    region: ByteRegion,
+}
+
+export global Analysis {
+    in property <AnalysisState> state;
+    in property <[string]> documents;
+    in-out property <int> document-index;
+    in property <string> summary-line;
+    in property <string> outcome-line;
+    in property <bool> outcome-problem;
+    // Opening and failed states, and the empty state's caption.
+    in property <string> message;
+    // A problem that did not end the document.
+    in property <string> notice;
+
+    in property <[string]> type-labels;
+    in-out property <int> type-index;
+    in property <[string]> layer-labels;
+    in-out property <int> layer-index;
+    in property <bool> filtered;
+    in property <string> rows-line;
+    in property <string> hidden-note;
+
+    in property <[NavRow]> rows;
+    in property <int> total-rows;
+    in property <int> top-row;
+    in property <bool> can-back;
+    in property <bool> can-forward;
+
+    in property <string> inspector-title;
+    in property <[Property]> properties;
+    // What Copy Row and Copy Offset copy; empty without a selection.
+    in property <string> selected-line;
+    in property <string> selected-offset;
+
+    in property <bool> bytes-shown;
+    in property <string> bytes-title;
+    in property <[ByteLine]> byte-lines;
+    in property <[Legend]> legend;
+    // The byte under the cursor, in words.
+    in property <string> cursor-line;
+
+    callback open();
+    callback close();
+    callback reopen();
+    callback cancel();
+    callback show(int);
+    callback row-clicked(int);
+    callback move(NavStep);
+    callback scroll(int);
+    callback scroll-to(float);
+    callback byte-clicked(int);
+    callback cursor(NavStep);
+    callback select-at-cursor();
+    callback toggle-bytes();
+    callback back();
+    callback forward();
+    callback go-to(string);
+    callback type-filter(int);
+    callback layer-filter(int);
+    callback clear-filters();
+
+    public pure function tint(region: ByteRegion) -> color {
+        return region == ByteRegion.prefix ? Tokens.accent.transparentize(0.55)
+            : region == ByteRegion.header ? Tokens.accent.transparentize(0.3)
+            : region == ByteRegion.payload ? Tokens.accent.transparentize(0.8)
+            : region == ByteRegion.record-header || region == ByteRegion.file-header ? Tokens.border-strong
+            : region == ByteRegion.unparsed ? Tokens.error.transparentize(0.7)
+            : transparent;
+    }
+}
+
+// The navigator: the visible rows of the document, one Tab stop. Up and
+// Down (Page Up, Page Down, Home, End) select, Left selects the packet that
+// holds the selection and Right its first OBU. The wheel and the bar on the
+// right scroll.
+component Navigator inherits KeyboardFocus {
+    in property <length> row-height: 24px;
+    in property <int> visible-rows: 16;
+
+    property <int> count: Analysis.rows.length;
+    property <length> track: root.visible-rows * root.row-height;
+    property <length> thumb: Analysis.total-rows <= root.visible-rows ? root.track
+        : max(24px, root.track * root.visible-rows / Analysis.total-rows);
+    height: root.track;
+    accessible-role: list;
+    accessible-label: "Elements";
+    accessible-description: Analysis.rows-line + ". Up and Down select, Left selects the packet that holds the selection.";
+    key-pressed(event) => {
+        if event.text == Key.UpArrow {
+            root.keyboard-used();
+            Analysis.move(NavStep.up);
+            return accept;
+        }
+        if event.text == Key.DownArrow {
+            root.keyboard-used();
+            Analysis.move(NavStep.down);
+            return accept;
+        }
+        if event.text == Key.PageUp {
+            root.keyboard-used();
+            Analysis.move(NavStep.page-up);
+            return accept;
+        }
+        if event.text == Key.PageDown {
+            root.keyboard-used();
+            Analysis.move(NavStep.page-down);
+            return accept;
+        }
+        if event.text == Key.Home {
+            root.keyboard-used();
+            Analysis.move(NavStep.home);
+            return accept;
+        }
+        if event.text == Key.End {
+            root.keyboard-used();
+            Analysis.move(NavStep.end);
+            return accept;
+        }
+        if event.text == Key.LeftArrow {
+            root.keyboard-used();
+            Analysis.move(NavStep.left);
+            return accept;
+        }
+        if event.text == Key.RightArrow {
+            root.keyboard-used();
+            Analysis.move(NavStep.right);
+            return accept;
+        }
+        reject
+    }
+
+    FocusRing {
+        shown: root.ring;
+        x: -3px;
+        y: -3px;
+        width: root.width + 6px;
+        height: root.height + 6px;
+        radius: Tokens.radius-small;
+    }
+
+    TouchArea {
+        scroll-event(event) => {
+            if event.delta-y != 0 {
+                Analysis.scroll(event.delta-y > 0 ? min(-1, round(-event.delta-y / root.row-height))
+                    : max(1, round(-event.delta-y / root.row-height)));
+                return accept;
+            }
+            reject
+        }
+    }
+
+    for row[i] in Analysis.rows: Rectangle {
+        x: 0;
+        y: i * root.row-height;
+        width: root.width - 10px;
+        height: root.row-height;
+        background: row.selected ? Tokens.row-selected : touch.has-hover ? Tokens.row-hover : transparent;
+        accessible-role: list-item;
+        accessible-label: row.accessible;
+        accessible-item-selectable: row.loaded;
+        accessible-item-selected: row.selected;
+        accessible-item-index: Analysis.top-row + i;
+        accessible-item-count: Analysis.total-rows;
+        accessible-action-default => {
+            Analysis.row-clicked(i);
+        }
+
+        touch := TouchArea {
+            enabled: row.loaded;
+            mouse-cursor: row.loaded ? pointer : default;
+            clicked => {
+                root.focus();
+                Analysis.row-clicked(i);
+            }
+        }
+
+        // The selection's bar: its shape says what the tint says.
+        if row.selected: Rectangle {
+            x: 0;
+            width: 3px;
+            height: parent.height;
+            background: Tokens.accent;
+        }
+
+        HorizontalLayout {
+            padding-left: Tokens.space-2 + row.depth * Tokens.space-4;
+            padding-right: Tokens.space-2;
+            spacing: Tokens.space-2;
+
+            Text {
+                horizontal-stretch: 1;
+                text: row.loaded ? row.title : "Loading…";
+                color: row.loaded ? Tokens.text : Tokens.text-secondary;
+                font-size: Tokens.type-caption * 1rem;
+                font-weight: row.selected ? Tokens.weight-semibold : Tokens.weight-regular;
+                vertical-alignment: center;
+                overflow: elide;
+                accessible-role: none;
+            }
+
+            Text {
+                horizontal-stretch: 0;
+                text: row.detail;
+                color: Tokens.text-secondary;
+                font-size: Tokens.type-caption * 1rem;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+
+            Text {
+                width: 64px;
+                text: row.offset;
+                color: Tokens.text-secondary;
+                font-size: Tokens.type-caption * 1rem;
+                font-family: "monospace";
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+        }
+    }
+
+    // Where the visible rows are among all of them; drag or click to move.
+    if Analysis.total-rows > root.visible-rows: Rectangle {
+        x: root.width - 6px;
+        width: 6px;
+        height: root.track;
+        border-radius: 3px;
+        background: Tokens.track;
+
+        Rectangle {
+            y: (root.track - root.thumb) * Analysis.top-row / max(1, Analysis.total-rows - root.visible-rows);
+            width: parent.width;
+            height: root.thumb;
+            border-radius: 3px;
+            background: Tokens.border-strong;
+        }
+
+        bar := TouchArea {
+            mouse-cursor: pointer;
+            pointer-event(event) => {
+                if event.kind == PointerEventKind.down {
+                    Analysis.scroll-to(max(0, min(1, (self.mouse-y - root.thumb / 2) / max(1px, root.track - root.thumb))));
+                }
+            }
+            moved => {
+                if self.pressed {
+                    Analysis.scroll-to(max(0, min(1, (self.mouse-y - root.thumb / 2) / max(1px, root.track - root.thumb))));
+                }
+            }
+        }
+    }
+}
+
+// The selected element's properties, one Tab stop. Up and Down choose a
+// property; Command or Control+C copies its value.
+component Inspector inherits KeyboardFocus {
+    in-out property <int> current: 0;
+    callback copy(string);
+
+    property <int> count: Analysis.properties.length;
+    accessible-role: list;
+    accessible-label: "Properties of " + Analysis.inspector-title;
+    key-pressed(event) => {
+        if root.count == 0 {
+            return reject;
+        }
+        if event.text == Key.DownArrow {
+            root.keyboard-used();
+            root.current = min(root.count - 1, root.current + 1);
+            return accept;
+        }
+        if event.text == Key.UpArrow {
+            root.keyboard-used();
+            root.current = max(0, root.current - 1);
+            return accept;
+        }
+        if event.modifiers.control && (event.text == "c" || event.text == "C") {
+            root.copy(Analysis.properties[min(root.current, root.count - 1)].value);
+            return accept;
+        }
+        reject
+    }
+
+    FocusRing {
+        shown: root.ring;
+        x: -3px;
+        y: -3px;
+        width: root.width + 6px;
+        height: root.height + 6px;
+        radius: Tokens.radius-small;
+    }
+
+    ScrollView {
+        VerticalLayout {
+        alignment: start;
+
+        for property[i] in Analysis.properties: HorizontalLayout {
+            padding-left: Tokens.space-2;
+            padding-right: Tokens.space-2;
+            padding-top: 2px;
+            padding-bottom: 2px;
+            spacing: Tokens.space-2;
+            accessible-role: list-item;
+            accessible-label: property.label + ": " + property.value + (property.note != "" ? ". " + property.note : "");
+            accessible-item-selectable: true;
+            accessible-item-selected: i == root.current;
+            accessible-item-index: i;
+            accessible-item-count: root.count;
+
+            Rectangle {
+                width: 3px;
+                background: root.has-focus && i == root.current ? Tokens.accent : transparent;
+            }
+
+            Text {
+                width: 92px;
+                text: property.label;
+                color: Tokens.text-secondary;
+                font-size: Tokens.type-caption * 1rem;
+                accessible-role: none;
+            }
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+
+                Text {
+                    text: property.value;
+                    color: Tokens.text;
+                    font-size: Tokens.type-caption * 1rem;
+                    font-weight: i == root.current && root.has-focus ? Tokens.weight-semibold : Tokens.weight-regular;
+                    wrap: word-wrap;
+                    accessible-role: none;
+                }
+
+                if property.note != "": Text {
+                    text: property.note;
+                    color: Tokens.text-secondary;
+                    font-size: Tokens.type-caption * 0.9rem;
+                    wrap: word-wrap;
+                    accessible-role: none;
+                }
+            }
+
+            TouchArea {
+                clicked => {
+                    root.focus();
+                    root.current = i;
+                }
+            }
+        }
+        }
+    }
+}
+
+// The byte window, one Tab stop. The arrows move the cursor, Page Up and
+// Page Down a window, Home and End to the file's ends; Enter or Space
+// selects the element at the cursor, as a click on a byte does.
+component ByteView inherits KeyboardFocus {
+    in property <length> cell-width: 20px;
+    in property <length> line-height: 18px;
+
+    accessible-role: text;
+    accessible-label: "Bytes. " + Analysis.cursor-line;
+    accessible-description: "Arrow keys move the cursor; Enter selects the element at the cursor.";
+    key-pressed(event) => {
+        if event.text == Key.LeftArrow {
+            root.keyboard-used();
+            Analysis.cursor(NavStep.left);
+            return accept;
+        }
+        if event.text == Key.RightArrow {
+            root.keyboard-used();
+            Analysis.cursor(NavStep.right);
+            return accept;
+        }
+        if event.text == Key.UpArrow {
+            root.keyboard-used();
+            Analysis.cursor(NavStep.up);
+            return accept;
+        }
+        if event.text == Key.DownArrow {
+            root.keyboard-used();
+            Analysis.cursor(NavStep.down);
+            return accept;
+        }
+        if event.text == Key.PageUp {
+            root.keyboard-used();
+            Analysis.cursor(NavStep.page-up);
+            return accept;
+        }
+        if event.text == Key.PageDown {
+            root.keyboard-used();
+            Analysis.cursor(NavStep.page-down);
+            return accept;
+        }
+        if event.text == Key.Home {
+            root.keyboard-used();
+            Analysis.cursor(NavStep.home);
+            return accept;
+        }
+        if event.text == Key.End {
+            root.keyboard-used();
+            Analysis.cursor(NavStep.end);
+            return accept;
+        }
+        if event.text == Key.Return || event.text == " " {
+            root.keyboard-used();
+            Analysis.select-at-cursor();
+            return accept;
+        }
+        reject
+    }
+
+    FocusRing {
+        shown: root.ring;
+        x: -3px;
+        y: -3px;
+        width: root.width + 6px;
+        height: root.height + 6px;
+        radius: Tokens.radius-small;
+    }
+
+    VerticalLayout {
+        for line[l] in Analysis.byte-lines: HorizontalLayout {
+            height: root.line-height;
+            spacing: Tokens.space-2;
+
+            Text {
+                width: 64px;
+                text: line.offset;
+                color: Tokens.text-secondary;
+                font-size: Tokens.type-caption * 1rem;
+                font-family: "monospace";
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+
+            HorizontalLayout {
+                for cell[c] in line.cells: Rectangle {
+                    width: root.cell-width;
+                    background: Analysis.tint(cell.region);
+                    border-width: cell.cursor ? (root.has-focus ? 2px : 1px) : 0px;
+                    border-color: root.has-focus ? Tokens.focus-ring : Tokens.text-secondary;
+                    border-radius: 2px;
+
+                    Text {
+                        text: cell.text;
+                        color: Tokens.text;
+                        font-size: Tokens.type-caption * 1rem;
+                        font-family: "monospace";
+                        // Bytes of the selection are bold, so they do not rest on the tint.
+                        font-weight: cell.region != ByteRegion.outside ? Tokens.weight-bold : Tokens.weight-regular;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        accessible-role: none;
+                    }
+
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.focus();
+                            Analysis.byte-clicked(l * 16 + c);
+                        }
+                    }
+                }
+            }
+
+            Text {
+                text: line.ascii;
+                color: Tokens.text-secondary;
+                font-size: Tokens.type-caption * 1rem;
+                font-family: "monospace";
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+        }
+    }
+}
+
+// A quiet card for the empty, opening and failed states.
+component StateCard inherits Rectangle {
+    in property <string> heading;
+    in property <string> text;
+    in property <bool> problem;
+    in property <string> action;
+    in property <string> action-description;
+    in property <string> second;
+    callback act();
+    callback second-act();
+
+    border-radius: Tokens.radius-medium + 2px;
+    background: Tokens.track;
+    border-width: 1px;
+    border-color: Tokens.border-strong;
+    accessible-role: region;
+    accessible-label: root.heading;
+
+    VerticalLayout {
+        alignment: center;
+        spacing: Tokens.space-2;
+        padding: Tokens.space-6;
+
+        Text {
+            text: root.heading;
+            color: Tokens.text;
+            font-size: Tokens.type-title * 1rem;
+            font-weight: Tokens.weight-semibold;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+
+        Text {
+            text: root.text;
+            color: root.problem ? Tokens.error : Tokens.text-secondary;
+            font-size: Tokens.type-caption * 1rem;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+            accessible-live-region: polite;
+        }
+
+        HorizontalLayout {
+            alignment: center;
+            spacing: Tokens.space-3;
+            padding-top: Tokens.space-1;
+
+            if root.action != "": Button {
+                text: root.action;
+                accessible-description: root.action-description;
+                clicked => {
+                    root.act();
+                }
+            }
+
+            if root.second != "": Button {
+                text: root.second;
+                clicked => {
+                    root.second-act();
+                }
+            }
+        }
+    }
+}
+
+// The whole workspace.
+export component AnalyzeView inherits VerticalLayout {
+    in property <string> open-shortcut;
+    property <length> navigator-width: 360px;
+    property <length> detail-width: 520px;
+
+    spacing: Tokens.space-3;
+    accessible-role: main;
+    accessible-label: "Analyze";
+
+    // The window copies `text` to the clipboard.
+    callback copy(string);
+
+    // The documents and what reading the shown one found.
+    if Analysis.documents.length > 0: HorizontalLayout {
+        spacing: Tokens.space-2;
+        width: root.navigator-width + Tokens.space-4 + root.detail-width;
+
+        ComboBox {
+            width: root.navigator-width;
+            model: Analysis.documents;
+            current-index <=> Analysis.document-index;
+            accessible-label: "Document";
+            selected => {
+                Analysis.show(self.current-index);
+            }
+        }
+
+        Caption {
+            horizontal-stretch: 1;
+            text: Analysis.state == AnalysisState.open ? Analysis.summary-line : "";
+            vertical-alignment: center;
+            wrap: no-wrap;
+            overflow: elide;
+        }
+
+        LinkButton {
+            text: "Open…";
+            description: "Open an AV2 IVF or Annex B stream to analyze (" + root.open-shortcut + ")";
+            clicked => {
+                Analysis.open();
+            }
+        }
+
+        LinkButton {
+            text: "Close";
+            description: "Close the shown document; the file is not touched";
+            clicked => {
+                Analysis.close();
+            }
+        }
+    }
+
+    if Analysis.notice != "": Text {
+        text: Analysis.notice;
+        color: Tokens.warning;
+        font-size: Tokens.type-caption * 1rem;
+        font-weight: Tokens.weight-semibold;
+        wrap: word-wrap;
+        accessible-live-region: polite;
+    }
+
+    if Analysis.state == AnalysisState.empty: StateCard {
+        height: 220px;
+        heading: "Open an AV2 stream to analyze it";
+        text: Analysis.message;
+        action: "Open…";
+        action-description: "Choose an IVF or Annex B file (" + root.open-shortcut + ")";
+        act => {
+            Analysis.open();
+        }
+    }
+
+    if Analysis.state == AnalysisState.opening: StateCard {
+        height: 220px;
+        heading: "Reading the stream…";
+        text: Analysis.message;
+        action: "Cancel";
+        action-description: "Stop reading this file";
+        act => {
+            Analysis.cancel();
+        }
+    }
+
+    if Analysis.state == AnalysisState.failed: StateCard {
+        height: 220px;
+        heading: "This stream cannot be shown";
+        text: Analysis.message;
+        problem: true;
+        action: "Reopen";
+        action-description: "Read the file again";
+        second: "Close";
+        act => {
+            Analysis.reopen();
+        }
+        second-act => {
+            Analysis.close();
+        }
+    }
+
+    if Analysis.state == AnalysisState.open: VerticalLayout {
+        spacing: Tokens.space-3;
+
+        Text {
+            text: Analysis.outcome-line;
+            color: Analysis.outcome-problem ? Tokens.warning : Tokens.text-secondary;
+            font-size: Tokens.type-caption * 1rem;
+            font-weight: Analysis.outcome-problem ? Tokens.weight-semibold : Tokens.weight-regular;
+            wrap: word-wrap;
+        }
+
+        // History, filters and go to offset.
+        HorizontalLayout {
+            spacing: Tokens.space-2;
+
+            IconButton {
+                label: "Back";
+                description: "The previous selection";
+                enabled: Analysis.can-back;
+                icon: "M 10.5 2.5 L 4.5 8 L 10.5 13.5 L 11.8 12.2 L 7.2 8 L 11.8 3.8 Z";
+                clicked => {
+                    Analysis.back();
+                }
+            }
+
+            IconButton {
+                label: "Forward";
+                description: "The next selection";
+                enabled: Analysis.can-forward;
+                icon: "M 5.5 2.5 L 11.5 8 L 5.5 13.5 L 4.2 12.2 L 8.8 8 L 4.2 3.8 Z";
+                clicked => {
+                    Analysis.forward();
+                }
+            }
+
+            ComboBox {
+                width: 220px;
+                model: Analysis.type-labels;
+                current-index <=> Analysis.type-index;
+                accessible-label: "Type filter";
+                selected => {
+                    Analysis.type-filter(self.current-index);
+                }
+            }
+
+            ComboBox {
+                width: 180px;
+                model: Analysis.layer-labels;
+                current-index <=> Analysis.layer-index;
+                accessible-label: "Layer filter";
+                selected => {
+                    Analysis.layer-filter(self.current-index);
+                }
+            }
+
+            if Analysis.filtered: LinkButton {
+                text: "Clear";
+                description: "Show every element again";
+                clicked => {
+                    Analysis.clear-filters();
+                }
+            }
+
+            Rectangle {
+                horizontal-stretch: 1;
+            }
+
+            goto := LineEdit {
+                width: 150px;
+                placeholder-text: "Go to byte…";
+                accessible-label: "Go to byte offset";
+                accessible-description: "A decimal offset, or hexadecimal after 0x. Enter selects the element there.";
+                accepted(text) => {
+                    Analysis.go-to(text);
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: Tokens.space-4;
+            alignment: start;
+
+            VerticalLayout {
+                width: root.navigator-width;
+                spacing: Tokens.space-1;
+
+                SectionTitle {
+                    text: Analysis.rows-line;
+                }
+
+                if Analysis.hidden-note != "": Caption {
+                    text: Analysis.hidden-note;
+                    color: Tokens.text;
+                    accessible-live-region: polite;
+                }
+
+                Navigator { }
+            }
+
+            VerticalLayout {
+                width: root.detail-width;
+                spacing: Tokens.space-2;
+
+                HorizontalLayout {
+                    spacing: Tokens.space-2;
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: Analysis.inspector-title;
+                        color: Tokens.text;
+                        font-size: Tokens.type-body * 1rem;
+                        font-weight: Tokens.weight-semibold;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    LinkButton {
+                        min-height: 24px;
+                        text: "Copy Value";
+                        quiet: true;
+                        description: "Copy the chosen property's value";
+                        enabled: Analysis.properties.length > 0;
+                        clicked => {
+                            root.copy(Analysis.properties[min(inspector.current, Analysis.properties.length - 1)].value);
+                        }
+                    }
+
+                    LinkButton {
+                        min-height: 24px;
+                        text: "Copy Row";
+                        quiet: true;
+                        description: "Copy the selected element's row";
+                        enabled: Analysis.selected-line != "";
+                        clicked => {
+                            root.copy(Analysis.selected-line);
+                        }
+                    }
+
+                    LinkButton {
+                        min-height: 24px;
+                        text: "Copy Offset";
+                        quiet: true;
+                        description: "Copy the selected element's first byte offset";
+                        enabled: Analysis.selected-offset != "";
+                        clicked => {
+                            root.copy(Analysis.selected-offset);
+                        }
+                    }
+                }
+
+                inspector := Inspector {
+                    vertical-stretch: 1;
+                    min-height: 96px;
+                    copy(text) => {
+                        root.copy(text);
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: Tokens.space-2;
+
+                    LinkButton {
+                        min-height: 24px;
+                        text: Analysis.bytes-shown ? "Hide Bytes" : "Show Bytes";
+                        quiet: true;
+                        description: "The file's bytes around the selection";
+                        accessible-expandable: true;
+                        accessible-expanded: Analysis.bytes-shown;
+                        clicked => {
+                            Analysis.toggle-bytes();
+                        }
+                    }
+
+                    Caption {
+                        horizontal-stretch: 1;
+                        text: Analysis.bytes-title;
+                        vertical-alignment: center;
+                        wrap: no-wrap;
+                        overflow: elide;
+                    }
+                }
+
+                if Analysis.bytes-shown: ByteView { }
+
+                if Analysis.bytes-shown && Analysis.legend.length > 0: HorizontalLayout {
+                    spacing: Tokens.space-3;
+                    alignment: start;
+
+                    for item in Analysis.legend: HorizontalLayout {
+                        spacing: Tokens.space-1;
+
+                        Rectangle {
+                            width: 12px;
+                            height: 12px;
+                            y: (parent.height - self.height) / 2;
+                            border-radius: 2px;
+                            background: Analysis.tint(item.region);
+                            border-width: 1px;
+                            border-color: Tokens.border;
+                        }
+
+                        Caption {
+                            text: item.label;
+                            wrap: no-wrap;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

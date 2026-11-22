@@ -1414,18 +1414,37 @@ fn the_selected_row_falls_back_to_what_can_be_edited() {
 // The workspace shell.
 
 #[test]
-fn unavailable_workspaces_are_refused_without_touching_the_queue() {
+fn a_workspace_switch_never_touches_the_queue_and_compare_is_refused() {
     let mut app = App::new();
     app.add(&["/m/a.y4m", "/m/b.y4m"], ready);
     convert(&mut app);
     assert_eq!(app.state.workspace(), Workspace::Encode);
     let before = app.state.clone();
-    for workspace in [Workspace::Analyze, Workspace::Compare, Workspace::Encode] {
-        let update = app.apply(Intent::WorkspaceRequested(workspace));
-        assert_eq!(update.effects, [], "{workspace:?}");
-        assert_eq!(
-            app.state, before,
-            "{workspace:?} changed the queue, settings or workspace"
-        );
-    }
+    let update = app.apply(Intent::WorkspaceRequested(Workspace::Compare));
+    assert_eq!(update.effects, []);
+    assert_eq!(app.state, before, "Compare has no flow yet");
+
+    let update = app.apply(Intent::WorkspaceRequested(Workspace::Analyze));
+    assert_eq!(update.effects, []);
+    assert_eq!(app.state.workspace(), Workspace::Analyze);
+    // Only the workspace changed: the running file, queue and settings
+    // are the same values.
+    assert_eq!(app.state.items(), before.items());
+    assert_eq!(app.state.settings(), before.settings());
+    assert_eq!(
+        app.state.active().map(Item::id),
+        before.active().map(Item::id)
+    );
+    app.apply(Intent::WorkspaceRequested(Workspace::Encode));
+    assert_eq!(app.state, before);
+}
+
+/// Opening files to convert shows Encode, from any workspace.
+#[test]
+fn opening_to_convert_shows_encode() {
+    let mut app = App::new();
+    app.apply(Intent::WorkspaceRequested(Workspace::Analyze));
+    let update = app.apply(Intent::AddRequested);
+    assert_eq!(update.effects, [Effect::ShowOpenDialog]);
+    assert_eq!(app.state.workspace(), Workspace::Encode);
 }

@@ -32,6 +32,7 @@ use studio_domain::protocol::Capabilities;
 use studio_domain::settings::{Crf, EncoderSettings, OutputKind, SpeedPreset};
 
 use crate::activity::{self, Changed};
+use crate::analysis::ResultOf;
 use crate::queue::{Acknowledgement, Item, ItemId, ItemState, PartialFate};
 use crate::recovery::{Disk, Recovered};
 use crate::simple::{Priority, Quality};
@@ -65,7 +66,8 @@ pub const INITIAL_SETTINGS: EncoderSettings = EncoderSettings {
 /// Something the user asked for, or an answer from a worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Intent {
-    /// Open the native file dialog to add files (Open…, Add…).
+    /// Open the native file dialog to add files to convert (Open…, Add…);
+    /// shows Encode.
     AddRequested,
     /// Open the native file dialog to replace the one file (Change…).
     ReplaceRequested,
@@ -432,6 +434,8 @@ impl AppState {
             | Intent::ChooseDestinationRequested
                 if self.dialog.is_some() || modal => {}
             Intent::AddRequested => {
+                // Opening to convert shows where the files will be.
+                self.workspace = Workspace::Encode;
                 self.dialog = Some(Dialog::Add);
                 update.effects.push(Effect::ShowOpenDialog);
             }
@@ -655,6 +659,24 @@ impl AppState {
     #[must_use]
     pub const fn workspace(&self) -> Workspace {
         self.workspace
+    }
+
+    /// The shown file's converted result, as Analyze takes it over: the
+    /// selected file, once it converted and its result was verified.
+    #[must_use]
+    pub fn analyzable(&self) -> Option<ResultOf> {
+        let item = self
+            .selected()
+            .filter(|i| i.state == ItemState::Completed)?;
+        match item.ending() {
+            Some(crate::queue::Ending::Completed(report)) => Some(ResultOf {
+                item: item.id,
+                source: item.source().to_path_buf(),
+                output: item.destination().path.clone(),
+                bytes: report.bytes,
+            }),
+            _ => None,
+        }
     }
 
     /// The converting item, if any.
