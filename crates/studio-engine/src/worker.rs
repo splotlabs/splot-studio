@@ -17,7 +17,7 @@
 //! A cancel (the `Cancel` command, the end of input or a failed output) is
 //! cooperative: it sets the job's flag, which the job polls between frames
 //! and packets, and cancels the encoder's token, which stops a codec call in
-//! progress (one `receive_packet` codes a whole mini-GOP) at its next
+//! progress (one `receive_packet` codes several frames) at its next
 //! internal check. The job then cleans up and ends as `Cancelled`, and the
 //! worker keeps serving until the end of its input.
 //!

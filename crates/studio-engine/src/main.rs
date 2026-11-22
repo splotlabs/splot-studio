@@ -192,8 +192,12 @@ fn line(event: &Event, started: Instant) {
             Err(error) => format!("{at:8.3}s working ({error})"),
         },
         Event::Progress { progress } => format!(
-            "{at:8.3}s progress read={} encoded={} bytes={}",
-            progress.frames_read, progress.frames_encoded, progress.bytes_written
+            "{at:8.3}s progress read={} coded={}.{:03} encoded={} bytes={}",
+            progress.frames_read,
+            progress.frames_coded_milli / 1000,
+            progress.frames_coded_milli % 1000,
+            progress.frames_encoded,
+            progress.bytes_written
         ),
         Event::Completed { report } => {
             let mut text = format!(

@@ -97,6 +97,21 @@ fn multi_frame_10_bit_ivf_and_obu_decode_identically() -> TestResult {
         matches!(e, Event::Progress { progress } if progress.frames_encoded < progress.frames_read)
     });
     assert!(lagged, "the encoder never held frames back");
+    // The second mini-GOP's first packet needs seven coded frames.
+    let ahead = events.iter().any(|e| {
+        matches!(e, Event::Progress { progress }
+            if progress.frames_coded_milli > progress.frames_encoded * 1000)
+    });
+    assert!(ahead, "the coded count never ran ahead of the packets");
+    let coded: Vec<u64> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Progress { progress } => Some(progress.frames_coded_milli),
+            _ => None,
+        })
+        .collect();
+    assert!(coded.is_sorted(), "the coded count went back: {coded:?}");
+    assert_eq!(coded.last(), Some(&10_000));
     let (obu_dir, _) = encode_ok(&clip, OutputKind::Av2AnnexB)?;
     let ivf = decode(&ivf_dir.path().join("out.ivf"))?;
     let obu = decode(&obu_dir.path().join("out.obu"))?;

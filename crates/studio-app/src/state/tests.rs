@@ -985,6 +985,7 @@ fn the_publication_intent_is_recorded_before_completion() {
                 frames_read: 1,
                 frames_encoded: 1,
                 bytes_written: 1,
+                frames_coded_milli: 1000,
             },
         },
     );
