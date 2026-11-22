@@ -11,7 +11,7 @@
 import { Button, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 import { Tokens } from "tokens.slint";
 import { FocusRing, KeyboardFocus } from "focus.slint";
-import { Caption, LinkButton, SectionTitle } from "controls.slint";
+import { Caption, LinkButton } from "controls.slint";
 import { IconButton } from "stage.slint";
 
 // What the shown document is doing; `empty` when none is open.
@@ -417,8 +417,12 @@ component ByteView inherits KeyboardFocus {
     in property <length> cell-width: 20px;
     in property <length> line-height: 18px;
 
-    accessible-role: text;
-    accessible-label: "Bytes. " + Analysis.cursor-line;
+    // A read-only text field with a caret is the closest role that takes
+    // keyboard focus; the value is the byte under the cursor, in words.
+    accessible-role: text-input;
+    accessible-read-only: true;
+    accessible-label: "Bytes";
+    accessible-value: Analysis.cursor-line;
     accessible-description: "Arrow keys move the cursor; Enter selects the element at the cursor.";
     key-pressed(event) => {
         if event.text == Key.Return || event.text == " " {
@@ -696,6 +700,9 @@ export component AnalyzeView inherits VerticalLayout {
                 font-size: Tokens.type-caption * 1rem;
                 font-weight: Analysis.outcome-problem ? Tokens.weight-semibold : Tokens.weight-regular;
                 wrap: word-wrap;
+                // Read out when a document is shown, as where reading stopped
+                // matters before anything in it is chosen.
+                accessible-live-region: polite;
             }
 
             if Analysis.can-read-again: LinkButton {
@@ -786,8 +793,16 @@ export component AnalyzeView inherits VerticalLayout {
                 width: root.navigator-width;
                 spacing: Tokens.space-1;
 
-                SectionTitle {
+                // The list's description says this already. `accessible-role:
+                // none` hides only a plain `Text`: on an instance of a text
+                // component (`SectionTitle`, `Caption`) Slint 1.19 keeps the
+                // element and gives it an unknown role.
+                Text {
                     text: Analysis.rows-line;
+                    color: Tokens.text-secondary;
+                    font-size: Tokens.type-caption * 1rem;
+                    font-weight: Tokens.weight-semibold;
+                    accessible-role: none;
                 }
 
                 if Analysis.hidden-note != "": Caption {
@@ -918,9 +933,13 @@ export component AnalyzeView inherits VerticalLayout {
                         }
                     }
 
-                    Caption {
+                    // The byte view's value says this already (see the
+                    // element count above for why a plain `Text`).
+                    Text {
                         text: Analysis.cursor-line;
                         color: Tokens.text;
+                        font-size: Tokens.type-caption * 1rem;
+                        wrap: word-wrap;
                         accessible-role: none;
                     }
                 }

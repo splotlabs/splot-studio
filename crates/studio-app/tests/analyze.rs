@@ -397,6 +397,25 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
     });
     rig.idle("the last row");
     assert_eq!(rig.selected(), Some((7, Position::Row(7))));
+    // A new selection changes the rows in place: the window keeps its row
+    // items, so assistive technology is told only of the two rows whose
+    // selection changed, not of every visible row.
+    let rows = rig.global().get_rows();
+    let before: Vec<_> = rows.iter().collect();
+    rig.press(Key::UpArrow);
+    rig.idle("the row above");
+    assert!(
+        rig.global().get_rows() == rows,
+        "the rows model was replaced"
+    );
+    let after: Vec<_> = rows.iter().collect();
+    let changed: Vec<usize> = (0..before.len())
+        .filter(|&i| before[i] != after[i])
+        .collect();
+    assert_eq!(changed, [6, 7]);
+    rig.press(Key::DownArrow);
+    rig.idle("the last row again");
+    assert_eq!(rig.selected(), Some((7, Position::Row(7))));
     assert_eq!(
         rig.global().get_inspector_title(),
         "OBU 3 · OBU_REGULAR_TILE_GROUP"
