@@ -1047,6 +1047,7 @@ export component AppWindow inherits Window {
             title: "View";
             for label[i] in root.workspace-labels: MenuItem {
                 title: label;
+                checkable: true;
                 checked: i == root.workspace-index;
                 enabled: !root.sheet-open;
                 activated => {
