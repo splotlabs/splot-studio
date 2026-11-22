@@ -202,7 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Opening::Owner(prepared) = studio_app::prepare(Ok(scratch.join("data"))) else {
         return Err("the scratch data folder is taken".into());
     };
-    let studio = studio_app::build(prepared, vec![clip])?;
+    let studio = studio_app::build(*prepared, vec![clip])?;
     let out = Rc::new(RefCell::new(vec![format!(
         "clip {w}x{h}, {frames} frames 8-bit; scale factor {}; picture area {}x{} px",
         studio.window().window().scale_factor(),
@@ -370,7 +370,7 @@ fn concurrent(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let Opening::Owner(prepared) = studio_app::prepare(Ok(scratch.join("data"))) else {
         return Err("the scratch data folder is taken".into());
     };
-    let studio = studio_app::build(prepared, vec![clip])?;
+    let studio = studio_app::build(*prepared, vec![clip])?;
     let out = Rc::new(RefCell::new(vec![format!(
         "clip {w}x{h}, {frames} frames 8-bit; stream of {obus} OBUs ({} bytes); scale factor {}",
         obus * 2,

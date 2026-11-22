@@ -60,7 +60,7 @@ fn main() -> ExitCode {
     };
     let dir = instance::data_dir(std::env::var_os(DATA_DIR_VAR));
     let prepared = match studio_app::prepare(dir) {
-        Opening::Owner(prepared) => prepared,
+        Opening::Owner(prepared) => *prepared,
         Opening::AlreadyOpen(dir) => {
             eprintln!(
                 "{APP_NAME}: Splot Studio is already open (it owns {}); not opening another",

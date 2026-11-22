@@ -193,7 +193,7 @@ impl Rig {
         };
         let Prepared {
             journal, startup, ..
-        } = prepared;
+        } = *prepared;
         let saved = self.saved_tx.clone();
         let writer = journal.map(|path| {
             journal::Writer::spawn(path, move |result| {

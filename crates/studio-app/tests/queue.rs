@@ -445,12 +445,18 @@ fn open_in_analyze_reads_the_result_and_leaves_the_queue_alone() {
         doc.origin()
     );
     assert!(doc.notice().is_none(), "{:?}", doc.notice());
-    // Nothing in the queue moved, and the journal was not rewritten.
+    // Nothing in the queue moved: the journal changed only its view, which
+    // now records Analyze and the document.
     assert_eq!(h.state().items(), items.as_slice());
-    assert_eq!(
-        fs::read_to_string(scratch.journal()).unwrap_or_default(),
-        journal
-    );
+    let saved = Harness::wait_for_journal(&scratch, r#""workspace": "analyze""#);
+    let value = |text: &str| -> serde_json::Value {
+        serde_json::from_str(text).unwrap_or_else(|e| unreachable!("{e}"))
+    };
+    let (before, after) = (value(&journal), value(&saved));
+    for key in ["version", "next_id", "settings", "items"] {
+        assert_eq!(before[key], after[key], "{key}");
+    }
+    assert_eq!(after["view"]["documents"][0]["origin"]["kind"], "result");
     // The next conversion runs as before, Analyze still open.
     h.dispatch(Intent::ConvertRequested);
     h.pump_until("b converted", JOB_TIMEOUT, |s| !s.running());
@@ -566,7 +572,7 @@ fn crash_helper() {
     };
     let data = PathBuf::from(data);
     let prepared = match studio_app::prepare(Ok(data.clone())) {
-        Opening::Owner(prepared) => prepared,
+        Opening::Owner(prepared) => *prepared,
         Opening::AlreadyOpen(_) => unreachable!("locked"),
     };
     let mut h = Harness::with(prepared);

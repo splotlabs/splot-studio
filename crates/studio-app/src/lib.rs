@@ -128,7 +128,8 @@ pub fn version_text() -> String {
 #[derive(Debug)]
 pub enum Opening {
     /// This process owns the data folder (or has none and saves nothing).
-    Owner(Prepared),
+    /// Boxed: it carries the whole restored journal.
+    Owner(Box<Prepared>),
     /// Another running Splot Studio owns this data folder.
     AlreadyOpen(PathBuf),
 }
@@ -150,14 +151,14 @@ pub struct Prepared {
 #[must_use]
 pub fn prepare(dir: Result<PathBuf, String>) -> Opening {
     let unsaved = |why: String| {
-        Opening::Owner(Prepared {
+        Opening::Owner(Box::new(Prepared {
             instance: None,
             journal: None,
             startup: Startup {
                 recovered: None,
                 problem: Some(JournalProblem::NoFolder(why)),
             },
-        })
+        }))
     };
     let dir = match dir {
         Ok(dir) => dir,
@@ -182,11 +183,11 @@ pub fn prepare(dir: Result<PathBuf, String>) -> Opening {
         Loaded::MovedAside { to, .. } => (None, Some(JournalProblem::MovedAside(to))),
         Loaded::Unreadable { error } => (None, Some(JournalProblem::Unreadable { path, error })),
     };
-    Opening::Owner(Prepared {
+    Opening::Owner(Box::new(Prepared {
         instance: Some(instance),
         journal: save,
         startup: Startup { recovered, problem },
-    })
+    }))
 }
 
 /// The window and everything it drives. Dropping it (or [`Studio::run`]
