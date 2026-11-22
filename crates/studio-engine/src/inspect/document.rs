@@ -104,15 +104,20 @@ impl Document {
         let path = source
             .to_path_buf()
             .map_err(|e| Refusal::new(AnalysisFailure::InvalidRequest, e.to_string()))?;
-        let file = File::open(&path).map_err(|e| io("cannot open the file", e))?;
+        let not_a_file = || Refusal::new(AnalysisFailure::Unsupported, "not a regular file");
+        let file = File::open(&path).map_err(|e| {
+            // Windows refuses to open a directory as a file.
+            if std::fs::metadata(&path).is_ok_and(|m| !m.is_file()) {
+                not_a_file()
+            } else {
+                io("cannot open the file", e)
+            }
+        })?;
         let metadata = file
             .metadata()
             .map_err(|e| io("cannot inspect the file", e))?;
         if !metadata.is_file() {
-            return Err(Refusal::new(
-                AnalysisFailure::Unsupported,
-                "not a regular file",
-            ));
+            return Err(not_a_file());
         }
         let fingerprint = source::fingerprint(&metadata);
         let id = FileId::of_file(&file, &path).map_err(|e| io("cannot identify the file", e))?;
