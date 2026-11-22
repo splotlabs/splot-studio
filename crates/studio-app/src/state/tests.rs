@@ -1191,7 +1191,12 @@ fn a_restored_queue_waits_for_continue() {
             partial: WirePath::from_path(&abs("/m/.a.ivf.R4nd0m.partial")),
         },
     );
-    let saved = journal::snapshot(app.state.next_id(), app.state.settings(), app.state.items());
+    let saved = journal::snapshot(
+        app.state.next_id(),
+        app.state.settings(),
+        app.state.items(),
+        journal::JournalView::default(),
+    );
     // The app stops; at the next start, the temporary file is still there.
     let mut disk = Files::default();
     disk.0.push(abs("/m/.a.ivf.R4nd0m.partial"));
@@ -1260,7 +1265,12 @@ fn the_journal_round_trips_every_settled_state() {
     let (c, _) = only_start(&app.fail(b, FailureCode::Output).effects);
     app.apply(Intent::CancelRequested);
     app.event(c, Event::Cancelled);
-    let saved = journal::snapshot(app.state.next_id(), app.state.settings(), app.state.items());
+    let saved = journal::snapshot(
+        app.state.next_id(),
+        app.state.settings(),
+        app.state.items(),
+        journal::JournalView::default(),
+    );
     let bytes = journal::encode(&saved).unwrap_or_default();
     let parsed: journal::Journal =
         serde_json::from_slice(&bytes).unwrap_or_else(|e| unreachable!("{e}"));
@@ -1447,4 +1457,77 @@ fn opening_to_convert_shows_encode() {
     let update = app.apply(Intent::AddRequested);
     assert_eq!(update.effects, [Effect::ShowOpenDialog]);
     assert_eq!(app.state.workspace(), Workspace::Encode);
+}
+
+/// Jobs shows every conversion of the queue with its own state: the
+/// converting file, the files queued behind it in the run, and how each
+/// earlier attempt ended. A file that only waits has no job.
+#[test]
+fn jobs_list_each_conversion_with_its_own_state() {
+    use crate::analysis::Analysis;
+    use crate::jobs::{self, State, Work};
+    let list = |app: &App| -> Vec<(PathBuf, State)> {
+        jobs::list(&app.state, &Analysis::new())
+            .iter()
+            .map(|job| match job.work {
+                Work::Convert(item) => (item.source().to_path_buf(), job.state),
+                Work::Inspect(..) => unreachable!("no documents"),
+            })
+            .collect()
+    };
+    let mut app = App::new();
+    app.add(&["/m/a.y4m", "/m/b.y4m", "/m/c.y4m"], ready);
+    assert_eq!(list(&app), []);
+    let (a, _) = convert(&mut app);
+    assert_eq!(
+        list(&app),
+        [
+            (abs("/m/a.y4m"), State::Running),
+            (abs("/m/b.y4m"), State::Queued),
+            (abs("/m/c.y4m"), State::Queued),
+        ]
+    );
+    // The bar shows only once the engine counts frames.
+    let none = Analysis::new();
+    let job = jobs::list(&app.state, &none)[0];
+    assert_eq!(crate::present::jobs::line(&job).fraction, None);
+    app.event(
+        a,
+        Event::Progress {
+            progress: studio_domain::job::Progress {
+                frames_read: 45,
+                frames_encoded: 45,
+                bytes_written: 9,
+                frames_coded_milli: 45_000,
+            },
+        },
+    );
+    let job = jobs::list(&app.state, &none)[0];
+    assert_eq!(crate::present::jobs::line(&job).fraction, Some(0.5));
+    let (b, _) = only_start(&app.complete(a).effects);
+    app.fail(b, FailureCode::Output);
+    let c = app.state.items()[2]
+        .attempt()
+        .map_or(0, |attempt| attempt.request);
+    // Cancel: cancelling, and the run stops after it.
+    app.apply(Intent::CancelRequested);
+    assert_eq!(list(&app)[2], (abs("/m/c.y4m"), State::Cancelling));
+    app.event(c, Event::Cancelled);
+    assert_eq!(
+        list(&app),
+        [
+            (abs("/m/a.y4m"), State::Completed),
+            (abs("/m/b.y4m"), State::Failed),
+            (abs("/m/c.y4m"), State::Cancelled),
+        ]
+    );
+    let (label, _) = crate::present::jobs::entry(&jobs::list(&app.state, &Analysis::new()));
+    assert_eq!(label, "Jobs");
+    // Closing while one converts: interrupted, never resumed.
+    let retry = app.apply(Intent::RowAction(2));
+    app.answer(retry, ready);
+    let (d, _) = convert(&mut app);
+    assert!(d > c);
+    app.state.interrupt_for_shutdown();
+    assert_eq!(list(&app)[2], (abs("/m/c.y4m"), State::Interrupted));
 }

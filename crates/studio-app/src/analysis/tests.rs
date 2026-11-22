@@ -64,7 +64,7 @@ fn summary(elements: u64) -> DocumentSummary {
     DocumentSummary {
         fingerprint: SourceFingerprint {
             len: elements * 9,
-            modified: None,
+            modified: Some((1_800_000_000, 0)),
         },
         framing: Framing::AnnexB,
         ivf_header: None,
@@ -582,7 +582,7 @@ fn a_dead_process_fails_its_documents_until_reopened() {
     analysis.process_ended("signal: 9");
     assert!(matches!(
         doc(&analysis).phase(),
-        Phase::Failed { message } if message.contains("signal: 9")
+        Phase::Failed { message, .. } if message.contains("signal: 9")
     ));
     assert_eq!(engine.answer(&mut analysis, pending).len(), 0);
     let effects = analysis.input(Input::Reopen);
@@ -620,7 +620,7 @@ fn a_changed_source_fails_the_document_and_other_failures_are_notices() {
     );
     assert!(matches!(
         doc(&analysis).phase(),
-        Phase::Failed { message } if message.contains("changed or was replaced")
+        Phase::Failed { message, .. } if message.contains("changed or was replaced")
     ));
 }
 
@@ -814,7 +814,7 @@ fn a_refused_command_fails_its_request() {
     analysis.event(open[0].request_id, refusal("bad frame"));
     assert!(matches!(
         doc(&analysis).phase(),
-        Phase::Failed { message } if message == "bad frame"
+        Phase::Failed { message, .. } if message == "bad frame"
     ));
 
     let (mut analysis, engine) = opened(200);
@@ -1072,3 +1072,5 @@ fn a_key_press_restarts_paging_that_failed() {
     engine.settle(&mut analysis, effects);
     assert!(selected(&analysis).is_some());
 }
+
+mod lifecycle;

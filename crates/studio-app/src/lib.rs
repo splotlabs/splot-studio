@@ -13,10 +13,15 @@
 //! at a time, run by the [`session::Session`]; their events reach the Slint
 //! thread through [`slint::invoke_from_event_loop`].
 //!
+//! [`jobs`] lists the operations of both workspaces (conversions and
+//! stream reads) for the toolbar's Jobs.
+//!
 //! The queue survives the app: it is journalled ([`journal`]) in the per-user
 //! data folder ([`instance`]), which one running app owns at a time, and is
-//! reconciled on the next launch ([`recovery`]). Encoding never continues
-//! without the window; after a restart nothing starts by itself.
+//! reconciled on the next launch ([`recovery`]). So are the workspace and the
+//! Analyze documents, as where to read them again; their files are checked
+//! before anything about them is shown. Encoding never continues without the
+//! window; after a restart nothing starts by itself.
 //!
 //! Licensed under `PolyForm` Noncommercial 1.0.0; commercial use requires a
 //! separate written license from Bartosz Tomczyk.
@@ -27,6 +32,7 @@ mod controller;
 pub mod cpu;
 pub mod engine;
 pub mod instance;
+pub mod jobs;
 pub mod journal;
 pub mod present;
 pub mod preview;
@@ -56,10 +62,10 @@ use crate::session::Session;
 use crate::simple::{Priority, Quality};
 use crate::state::{AppState, JournalProblem, Startup};
 
-pub use render::{render, render_analysis, render_counters, render_preview};
+pub use render::{render, render_analysis, render_counters, render_jobs, render_preview};
 pub use ui::{
-    Analysis, AnalysisState, AppWindow, ByteRegion, CheckRow, Fact, JobView, NavStep, Notice,
-    NoticeWindow, Palette, QueueRow, RowState, SourceView, StageState, Tone, ViewMode,
+    Analysis, AnalysisState, AppWindow, ByteRegion, CheckRow, Fact, JobRow, JobView, NavStep,
+    Notice, NoticeWindow, Palette, QueueRow, RowState, SourceView, StageState, Tone, ViewMode,
     WorkspaceView,
 };
 
@@ -307,6 +313,7 @@ pub fn bind_analysis(window: &AppWindow, send: impl Fn(analysis::Input) + Clone 
     global.on_close(on(Input::Close));
     global.on_reopen(on(Input::Reopen));
     global.on_cancel(on(Input::Cancel));
+    global.on_resolve(on(Input::Resolve));
     global.on_select_at_cursor(on(Input::SelectAtCursor));
     global.on_toggle_bytes(on(Input::ToggleBytes));
     global.on_back(on(Input::Back));

@@ -3,8 +3,8 @@
 
 // The main window: one centred card, a thin workspace shell around the Encode
 // and Analyze views (analyze.slint). The shell's toolbar switches the
-// workspace and holds the reserved Jobs entry; Rust owns which workspace is
-// shown. In Encode, Source, Quality,
+// workspace and opens Jobs, a popup over both that lists every conversion
+// and stream read; Rust owns which workspace is shown and every job row. In Encode, Source, Quality,
 // Priority and Convert are on the left; Advanced opens to the right. Values
 // come from Rust; every callback is an intent that Rust validates and answers
 // by setting properties back. Nothing here touches files, processes or the
@@ -66,6 +66,22 @@ export struct Notice {
 export struct Fact {
     label: string,
     value: string,
+}
+
+// One job of the Jobs list: a conversion or a stream read. `state` says it
+// in words; the tone only repeats it. The bar shows only when the share is
+// known (`progress-known`); an operation without progress shows none.
+export struct JobRow {
+    kind: string,
+    name: string,
+    state: string,
+    tone: Tone,
+    detail: string,
+    progress-known: bool,
+    progress: float,
+    can-cancel: bool,
+    // Kind, name, state and detail for screen readers.
+    accessible: string,
 }
 
 // One verification check of a finished job. `outcome` is the word
@@ -348,6 +364,87 @@ component Bar inherits Rectangle {
             easing: ease-in-out;
             iteration-count: -1;
             direction: alternate;
+        }
+    }
+}
+
+// The Jobs list: one row per job, newest operations last, each with Show
+// and, while it can be stopped, Cancel.
+component JobList inherits VerticalLayout {
+    in property <[JobRow]> jobs;
+    callback show(int);
+    callback cancel(int);
+
+    spacing: Tokens.space-3;
+    // Room for the scroll bar beside the state words.
+    padding-right: Tokens.space-4;
+    accessible-role: list;
+    accessible-label: "Jobs";
+
+    for job[i] in root.jobs: VerticalLayout {
+        spacing: Tokens.space-1;
+        accessible-role: list-item;
+        accessible-label: job.accessible;
+        accessible-item-index: i;
+        accessible-item-count: root.jobs.length;
+
+        HorizontalLayout {
+            spacing: Tokens.space-2;
+
+            Text {
+                horizontal-stretch: 1;
+                text: job.kind + " · " + job.name;
+                color: Tokens.text;
+                font-size: Tokens.type-body * 1rem;
+                font-weight: Tokens.weight-semibold;
+                overflow: elide;
+                accessible-role: none;
+            }
+
+            Text {
+                text: job.state;
+                color: job.tone == Tone.neutral ? Tokens.text-secondary : Tones.color(job.tone);
+                font-size: Tokens.type-caption * 1rem;
+                font-weight: Tokens.weight-semibold;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+        }
+
+        Caption {
+            text: job.detail;
+            accessible-role: none;
+        }
+
+        if job.progress-known: Bar {
+            known: true;
+            fraction: job.progress;
+            value-text: job.detail;
+        }
+
+        HorizontalLayout {
+            alignment: start;
+            spacing: Tokens.space-4;
+
+            LinkButton {
+                min-height: 0;
+                text: "Show";
+                quiet: true;
+                description: "Show " + job.name + " in its workspace";
+                clicked => {
+                    root.show(i);
+                }
+            }
+
+            if job.can-cancel: LinkButton {
+                min-height: 0;
+                text: "Cancel";
+                quiet: true;
+                description: "Stop " + job.kind + " · " + job.name;
+                clicked => {
+                    root.cancel(i);
+                }
+            }
         }
     }
 }
@@ -751,6 +848,10 @@ export component AppWindow inherits Window {
     in property <int> workspace-index;
     // The shown file has a converted result Analyze can open.
     in property <bool> can-analyze-result;
+    // The Jobs entry's label ("Jobs", "Jobs · 2") and what it says in words.
+    in property <string> jobs-label: "Jobs";
+    in property <string> jobs-description;
+    in property <[JobRow]> jobs;
 
     // Source. Paths are display strings; Rust keeps the real paths.
     in property <SourceView> source-view;
@@ -913,6 +1014,8 @@ export component AppWindow inherits Window {
     callback analyze-open-requested();
     callback analyze-result-requested();
     callback workspace-chosen(int);
+    callback job-show(int);
+    callback job-cancel(int);
     callback change-requested();
     callback row-selected(int);
     callback row-action(int);
@@ -950,6 +1053,11 @@ export component AppWindow inherits Window {
     // Also used by the renderer-snapshot example to capture the dialog.
     public function show-about() {
         about.show();
+    }
+
+    // Also used by the renderer snapshots and UI tests.
+    public function show-jobs() {
+        jobs-popup.show();
     }
 
     public function show-sheet() {
@@ -1092,8 +1200,7 @@ export component AppWindow inherits Window {
                     spacing: Tokens.space-1;
 
                     // The shell's toolbar: the workspace switch and the shared Jobs
-                    // entry. Jobs is reserved until it lists real work from every
-                    // workspace, so it is present but unavailable, and no Tab stop.
+                    // entry, which opens the Jobs popup over either workspace.
                     // Caption-sized: it takes no control height from the card.
                     HorizontalLayout {
                         spacing: Tokens.space-3;
@@ -1112,10 +1219,13 @@ export component AppWindow inherits Window {
 
                         LinkButton {
                             min-height: 0;
-                            text: "Jobs";
+                            text: root.jobs-label;
                             quiet: true;
-                            enabled: false;
-                            description: "Not available yet. The files to convert are listed in Encode.";
+                            description: root.jobs-description;
+                            enabled: !root.sheet-open;
+                            clicked => {
+                                root.show-jobs();
+                            }
                         }
                     }
 
@@ -2254,6 +2364,91 @@ export component AppWindow inherits Window {
                                 clicked => {
                                     root.omissions-confirmed();
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    jobs-popup := PopupWindow {
+        close-policy: close-on-click-outside;
+        width: min(420px, root.width - 2 * Tokens.space-3);
+        x: root.width - self.width - Tokens.space-3;
+        y: Tokens.space-6;
+
+        Rectangle {
+            background: Tokens.raised;
+            border-color: Tokens.border;
+            border-width: 1px;
+            border-radius: Tokens.radius-large;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #0000004d;
+            drop-shadow-offset-y: 8px;
+            accessible-role: groupbox;
+            accessible-label: "Jobs";
+
+            // Escape bubbling up from the controls closes the list; never a
+            // Tab stop.
+            FocusScope {
+                focus-on-tab-navigation: false;
+                focus-on-click: false;
+                key-pressed(event) => {
+                    if event.text == Key.Escape {
+                        jobs-popup.close();
+                        return accept;
+                    }
+                    reject
+                }
+
+                VerticalLayout {
+                    padding: Tokens.space-4;
+                    spacing: Tokens.space-3;
+
+                    Text {
+                        text: "Jobs";
+                        color: Tokens.text;
+                        font-size: Tokens.type-title * 1rem;
+                        font-weight: Tokens.weight-semibold;
+                    }
+
+                    Caption {
+                        text: root.jobs.length == 0
+                            ? "Nothing has run in this session. Conversions and stream reads are listed here."
+                            : "Conversions and stream reads of both workspaces. They run only while the window is open.";
+                    }
+
+                    if root.jobs.length > 0: ScrollView {
+                        height: min(job-list.preferred-height, root.height - 6 * Tokens.space-6);
+                        content-height: job-list.preferred-height;
+                        horizontal-scrollbar-policy: always-off;
+
+                        job-list := JobList {
+                            width: parent.visible-width;
+                            height: self.preferred-height;
+                            jobs: root.jobs;
+                            // Closing first would drop this handler before it asks.
+                            show(i) => {
+                                root.job-show(i);
+                                jobs-popup.close();
+                            }
+                            cancel(i) => {
+                                root.job-cancel(i);
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        alignment: end;
+
+                        Button {
+                            text: "Close";
+                            init => {
+                                self.focus();
+                            }
+                            clicked => {
+                                jobs-popup.close();
                             }
                         }
                     }

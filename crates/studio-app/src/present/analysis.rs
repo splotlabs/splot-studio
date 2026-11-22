@@ -6,6 +6,8 @@
 //! reported is shown; a value it did not report is said to be unknown,
 //! never shown as zero.
 
+use std::path::Path;
+
 use studio_domain::analysis::{
     DocumentSummary, Element, Framing, IvfHeaderFact, KindFilter, LayerFilter, LayerId, ObuFact,
     PacketFact, ProblemKind, Provenance, Row, RowFilter, ScanOutcome, Span,
@@ -151,6 +153,34 @@ fn sentence(text: &str) -> String {
     } else {
         format!("{text}.")
     }
+}
+
+/// Why a document read again waits: its file is not the one it was.
+#[must_use]
+pub fn changed(name: &str, path: &Path, was: Option<u64>, now: u64) -> String {
+    let sizes = match was {
+        Some(was) if was != now => format!(
+            "It was {} then and is {} now.",
+            byte_count(was),
+            byte_count(now)
+        ),
+        _ => "Its modification time is not the one it had then.".to_owned(),
+    };
+    format!(
+        "{name} at {} is not the file it was when last read. {sizes} The earlier selection and \
+         filters are not applied to it.",
+        path.display()
+    )
+}
+
+/// Why a restored document waits: nothing is at its path.
+#[must_use]
+pub fn missing(name: &str, path: &Path) -> String {
+    format!(
+        "Nothing is at {} now; {name} was moved, renamed or deleted. Locate it to read it \
+         again; it is checked before the earlier selection is applied.",
+        path.display()
+    )
 }
 
 /// A problem's kind, in words.

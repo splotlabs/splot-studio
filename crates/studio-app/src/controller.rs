@@ -20,7 +20,7 @@ use studio_domain::settings::OutputKind;
 use crate::activity::{self, Changed};
 use crate::engine::{Delivery, EngineStatus};
 use crate::preview::{Dirty, Input};
-use crate::render::{render, render_analysis, render_counters, render_preview};
+use crate::render::{render, render_analysis, render_counters, render_jobs, render_preview};
 use crate::session::{Outcome, Post, Route, Session, UiEffect};
 use crate::state::Intent;
 use crate::ui::AppWindow;
@@ -141,6 +141,8 @@ impl Controller {
         });
         CONTROLLER.with(|c| *c.borrow_mut() = Rc::downgrade(&ctl));
         render(window, ctl.session.borrow().state(), Instant::now());
+        render_analysis(window, ctl.session.borrow().analysis());
+        render_jobs(window, &ctl.session.borrow().jobs());
         let all = Dirty {
             picture: true,
             view: true,
@@ -255,6 +257,21 @@ impl Controller {
             .global::<crate::ui::Analysis>()
             .on_open(session(Session::analyze_open_requested));
         window.on_analyze_result_requested(session(Session::analyze_result));
+        let job = |act: fn(&mut Session, usize, Instant) -> Outcome| {
+            let ctl = Rc::downgrade(self);
+            move |index: i32| {
+                let Ok(index) = usize::try_from(index) else {
+                    return;
+                };
+                with(&ctl, |ctl| {
+                    ctl.check_visible();
+                    let outcome = act(&mut ctl.session.borrow_mut(), index, Instant::now());
+                    ctl.handle(outcome);
+                });
+            }
+        };
+        window.on_job_show(job(Session::show_job));
+        window.on_job_cancel(job(Session::cancel_job));
         window.on_workspace_chosen({
             let ctl = Rc::downgrade(self);
             move |index| {
@@ -347,6 +364,7 @@ impl Controller {
             match effect {
                 UiEffect::ShowOpenDialog => self.show_open_dialog(&window),
                 UiEffect::ShowAnalyzeDialog => self.show_analyze_dialog(&window),
+                UiEffect::ShowLocateDialog => self.show_locate_dialog(&window),
                 UiEffect::ShowSaveDialog {
                     directory,
                     file_name,
@@ -396,6 +414,9 @@ impl Controller {
         }
         if outcome.analysis {
             render_analysis(&window, session.analysis());
+        }
+        if outcome.analysis || outcome.changed != Changed::Nothing {
+            render_jobs(&window, &session.jobs());
         }
     }
 
@@ -488,6 +509,26 @@ impl Controller {
         });
         if spawned.is_err() {
             let outcome = self.session.borrow_mut().analyze_picked(Vec::new());
+            self.handle(outcome);
+        }
+    }
+
+    /// Asks where the shown missing document is now: one file, any name.
+    fn show_locate_dialog(self: &Rc<Self>, window: &AppWindow) {
+        let picked = rfd::AsyncFileDialog::new()
+            .set_title("Locate the Stream")
+            .set_parent(&window.window().window_handle())
+            .pick_file();
+        let weak = Rc::downgrade(self);
+        let spawned = slint::spawn_local(async move {
+            let path = picked.await.map(|file| file.path().to_path_buf());
+            with(&weak, |ctl| {
+                let outcome = ctl.session.borrow_mut().locate_picked(path);
+                ctl.handle(outcome);
+            });
+        });
+        if spawned.is_err() {
+            let outcome = self.session.borrow_mut().locate_picked(None);
             self.handle(outcome);
         }
     }

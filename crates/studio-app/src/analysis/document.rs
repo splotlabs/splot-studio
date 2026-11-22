@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use studio_domain::analysis::{DocumentSummary, Element, Row, RowFilter, Span};
+use studio_domain::job::SourceFingerprint;
 
 use super::{LINE_BYTES, WINDOW_BYTES};
 use crate::queue::ItemId;
@@ -35,20 +36,77 @@ pub enum Origin {
     Result(ResultOf),
 }
 
-/// How far a document got.
+/// How far a document got. A document outlives every read of it: a read
+/// that fails or stops leaves the document, and what the read kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
+    /// Restored from the last session and not read yet: nothing about the
+    /// file is shown until it is read again.
+    Unread,
     /// The engine is reading it.
     Opening,
     /// Cancel was asked for; the engine has not answered yet.
     Cancelling,
     /// It is open.
     Open(Box<DocumentSummary>),
-    /// It has no facts: why, for the user, and the engine's reason if any.
+    /// It was read again and is not the file the restored view was made
+    /// on. The new facts wait until the user reads it as a new file.
+    Changed(Box<DocumentSummary>),
+    /// Restored, and nothing is at its path now.
+    Missing,
+    /// It has no facts: why, for the user.
     Failed {
         /// The explanation.
         message: String,
+        /// What ended the read.
+        by: ReadEnd,
     },
+}
+
+/// What ended a read that left no facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadEnd {
+    /// The engine refused or could not read the file, or broke the
+    /// protocol.
+    Failure,
+    /// The user cancelled it before anything was read.
+    Cancel,
+    /// The inspection engine stopped while it held the document.
+    EngineStopped,
+}
+
+/// The view on a read of a document, to restore on the next read of the
+/// same file: kept across a failed read, saved in the journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Restore {
+    /// The file as it was read. The view applies only to a file that
+    /// matches it.
+    pub fingerprint: SourceFingerprint,
+    /// The selected element, by index.
+    pub selected: Option<u64>,
+    /// The filter.
+    pub filter: RowFilter,
+    /// The byte view was shown.
+    pub bytes_shown: bool,
+}
+
+/// A document as the journal keeps it: no facts, only where to read them
+/// and the view to restore.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Saved {
+    /// The file.
+    pub path: PathBuf,
+    /// Where it came from.
+    pub origin: Origin,
+    /// The view on its last good read; `None` when it was never read.
+    pub restore: Option<Restore>,
+}
+
+/// Whether two readings are of the same file. A file system that reports
+/// no modification time cannot tell, so that is never the same.
+#[must_use]
+pub fn same_file(a: SourceFingerprint, b: SourceFingerprint) -> bool {
+    a.len == b.len && a.modified.is_some() && a.modified == b.modified
 }
 
 /// The selected element.
@@ -144,9 +202,87 @@ pub struct Document {
     /// What stays true of the file for as long as it is open, such as a
     /// converted file whose size changed since it was verified.
     pub(super) caution: Option<String>,
+    /// The view to restore when the file is read again.
+    pub(super) restore: Option<Restore>,
 }
 
 impl Document {
+    /// A document of `path` that is not read yet.
+    pub(super) fn new(path: PathBuf, origin: Origin, restore: Option<Restore>) -> Self {
+        Self {
+            id: 0,
+            path,
+            origin,
+            phase: Phase::Unread,
+            filter: RowFilter::default(),
+            filter_generation: 0,
+            total: None,
+            rows: BTreeMap::new(),
+            asked: Vec::new(),
+            top: 0,
+            wanted: None,
+            selected: None,
+            history: Vec::new(),
+            at: 0,
+            bytes: Bytes {
+                offset: 0,
+                data: None,
+                cursor: 0,
+                shown: true,
+                asked: None,
+            },
+            locating: None,
+            notice: None,
+            caution: None,
+            restore,
+        }
+    }
+
+    /// The view on the current read, or the one kept for the next.
+    #[must_use]
+    pub fn restore(&self) -> Option<Restore> {
+        match &self.phase {
+            Phase::Open(summary) => Some(Restore {
+                fingerprint: summary.fingerprint,
+                selected: self.selected.as_ref().map(|s| s.row.index),
+                filter: self.filter,
+                bytes_shown: self.bytes.shown,
+            }),
+            _ => self.restore,
+        }
+    }
+
+    /// The document as the journal keeps it.
+    #[must_use]
+    pub fn saved(&self) -> Saved {
+        Saved {
+            path: self.path.clone(),
+            origin: self.origin.clone(),
+            restore: self.restore(),
+        }
+    }
+
+    /// The engine holds this document: it is being read or is open there.
+    #[must_use]
+    pub const fn in_engine(&self) -> bool {
+        matches!(
+            self.phase,
+            Phase::Opening | Phase::Cancelling | Phase::Open(_) | Phase::Changed(_)
+        )
+    }
+
+    /// The read ended without facts: keeps the view for the next read.
+    pub(super) fn fail(&mut self, message: String, by: ReadEnd) {
+        self.restore = self.restore();
+        self.phase = Phase::Failed { message, by };
+    }
+
+    /// The engine's id of the current read; `0` before the first.
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
     /// The file.
     #[must_use]
     pub fn path(&self) -> &Path {

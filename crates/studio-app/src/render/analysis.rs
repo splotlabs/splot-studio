@@ -5,7 +5,7 @@
 //! the visible rows and the one byte window, as display strings.
 
 use slint::{ComponentHandle, ModelRc, SharedString};
-use studio_domain::analysis::{Element, Span};
+use studio_domain::analysis::{DocumentSummary, Element, Span};
 
 use super::model;
 use crate::analysis::{
@@ -43,28 +43,8 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
         clear(&global);
         return;
     };
-    let name = file_name(doc.path());
-    let summary = match doc.phase() {
-        Phase::Opening => {
-            global.set_state(AnalysisState::Opening);
-            global.set_message(format!("Reading {name}. Nothing is decoded.").into());
-            None
-        }
-        Phase::Cancelling => {
-            global.set_state(AnalysisState::Opening);
-            global.set_message(format!("Stopping the read of {name}…").into());
-            None
-        }
-        Phase::Failed { message, .. } => {
-            global.set_state(AnalysisState::Failed);
-            global.set_message(format!("{name}: {message}").into());
-            None
-        }
-        Phase::Open(summary) => {
-            global.set_state(AnalysisState::Open);
-            Some(summary)
-        }
-    };
+    global.set_can_read_again(analysis.can_read_again());
+    let summary = render_phase(&global, doc);
     let Some(summary) = summary else {
         clear(&global);
         return;
@@ -115,6 +95,60 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
             .into(),
     );
     render_bytes(&global, doc.bytes(), summary.fingerprint.len, selected);
+}
+
+/// Sets the state card for the shown document's phase; the summary when
+/// it is open.
+fn render_phase<'a>(global: &Global<'_>, doc: &'a Document) -> Option<&'a DocumentSummary> {
+    let name = file_name(doc.path());
+    match doc.phase() {
+        Phase::Unread => {
+            global.set_state(AnalysisState::Opening);
+            global.set_message(format!("{name} is not read yet.").into());
+            None
+        }
+        Phase::Opening => {
+            global.set_state(AnalysisState::Opening);
+            global.set_message(format!("Reading {name}. Nothing is decoded.").into());
+            None
+        }
+        Phase::Changed(summary) => {
+            let was = doc.restore().map(|r| r.fingerprint.len);
+            global.set_state(AnalysisState::Attention);
+            global.set_heading("This file changed".into());
+            global
+                .set_message(text::changed(&name, doc.path(), was, summary.fingerprint.len).into());
+            global.set_action("Read as New".into());
+            global.set_action_description(
+                "Read the file as it is now; the earlier selection and filters are dropped".into(),
+            );
+            None
+        }
+        Phase::Missing => {
+            global.set_state(AnalysisState::Attention);
+            global.set_heading("This file is missing".into());
+            global.set_message(text::missing(&name, doc.path()).into());
+            global.set_action("Locate…".into());
+            global.set_action_description(
+                "Choose where the file is now; it is checked before anything is shown".into(),
+            );
+            None
+        }
+        Phase::Cancelling => {
+            global.set_state(AnalysisState::Opening);
+            global.set_message(format!("Stopping the read of {name}…").into());
+            None
+        }
+        Phase::Failed { message, .. } => {
+            global.set_state(AnalysisState::Failed);
+            global.set_message(format!("{name}: {message}").into());
+            None
+        }
+        Phase::Open(summary) => {
+            global.set_state(AnalysisState::Open);
+            Some(summary)
+        }
+    }
 }
 
 /// Empties what only an open document has.

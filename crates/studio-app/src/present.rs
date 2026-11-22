@@ -5,6 +5,7 @@
 //! a secondary hint next to the exact one, never a replacement.
 
 pub mod analysis;
+pub mod jobs;
 pub mod preview;
 pub mod queue;
 

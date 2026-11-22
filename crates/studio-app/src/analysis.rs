@@ -29,12 +29,23 @@
 //!   never reach a newer one.
 //! - A process that ends takes its documents with it: they fail and say
 //!   so, and Reopen reads them again with a new id.
+//!
+//! Lifecycle rules:
+//! - A document is not its read. A read that fails, stops or is cancelled
+//!   leaves the document, with what the read kept, and keeps its view (the
+//!   selection, filter and byte view) as a [`Restore`] for the next read.
+//! - A restored document ([`Analysis::restored`]) shows nothing about its
+//!   file until it is read again. Its view applies only when the new read
+//!   is of the same file ([`same_file`]); otherwise the document waits as
+//!   [`Phase::Changed`] until the user reads it as a new file. A path with
+//!   nothing at it is [`Phase::Missing`] until the user locates the file.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use studio_domain::analysis::{
-    AnalysisFailure, KindFilter, LayerFilter, LocateTarget, Row, RowFilter,
+    AnalysisFailure, DocumentSummary, KindFilter, LayerFilter, LocateTarget, ProblemKind, Row,
+    RowFilter, ScanOutcome,
 };
 use studio_domain::job::WirePath;
 use studio_domain::protocol::{Command, Event};
@@ -45,9 +56,12 @@ mod document;
 mod tests;
 
 pub use document::{
-    Bytes, Document, Origin, Phase, Position, ResultOf, Selected, extent, parse_offset,
+    Bytes, Document, Origin, Phase, Position, ReadEnd, Restore, ResultOf, Saved, Selected, extent,
+    parse_offset, same_file,
 };
 use document::{Place, in_window, line_of};
+
+use crate::recovery::{Disk, Kind};
 
 /// Documents open at once: the inspect process keeps at most four.
 pub const MAX_DOCUMENTS: usize = 4;
@@ -116,10 +130,20 @@ pub enum Input {
     Show(i32),
     /// Close the shown document.
     Close,
-    /// Read the shown document again, after it failed.
+    /// Read the shown document again, after it failed or its read was
+    /// cancelled.
     Reopen,
     /// Stop reading the shown document.
     Cancel,
+    /// Stop reading the document at this index of [`Analysis::documents`].
+    CancelDocument(i32),
+    /// The shown document's way out of [`Phase::Changed`] or
+    /// [`Phase::Missing`]: a changed file is read as a new one; for a
+    /// missing one, the caller asks where it is now and sends
+    /// [`Input::Relink`].
+    Resolve,
+    /// Read the shown missing document from this file instead.
+    Relink(PathBuf),
     /// A visible navigator row, by its slot from the top.
     RowClicked(i32),
     /// Move the navigator selection.
@@ -181,6 +205,8 @@ pub struct Analysis {
     /// Requests not answered: request id to engine document id and purpose.
     pending: HashMap<u64, (u64, Asked)>,
     notice: Option<String>,
+    /// Why the documents cannot be saved, while that is so.
+    storage: Option<String>,
     dirty: bool,
 }
 
@@ -189,6 +215,90 @@ impl Analysis {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The documents of the last session, not read yet, with the one at
+    /// `shown` shown. At most [`MAX_DOCUMENTS`] are kept, each file and
+    /// origin once; `dropped` more could not be restored and the notice
+    /// says so.
+    #[must_use]
+    pub fn restored(saved: Vec<Saved>, shown: usize, dropped: usize) -> Self {
+        let mut documents: Vec<Document> = Vec::new();
+        for saved in saved {
+            let twin = documents
+                .iter()
+                .any(|d| d.path == saved.path && d.origin == saved.origin);
+            if !twin && documents.len() < MAX_DOCUMENTS {
+                documents.push(Document::new(saved.path, saved.origin, saved.restore));
+            }
+        }
+        let notice = match dropped {
+            0 => None,
+            1 => Some(
+                "1 document of the last session could not be restored: its path was written on \
+                 another kind of system."
+                    .to_owned(),
+            ),
+            n => Some(format!(
+                "{n} documents of the last session could not be restored: their paths were \
+                 written on another kind of system."
+            )),
+        };
+        Self {
+            shown: shown.min(documents.len().saturating_sub(1)),
+            documents,
+            notice,
+            dirty: true,
+            ..Self::default()
+        }
+    }
+
+    /// Every document as the journal keeps it, and the shown one's index.
+    #[must_use]
+    pub fn saved(&self) -> (Vec<Saved>, usize) {
+        (
+            self.documents.iter().map(Document::saved).collect(),
+            self.shown,
+        )
+    }
+
+    /// Reads every restored document that is not read yet; one with
+    /// nothing at its path on `disk` becomes [`Phase::Missing`] instead.
+    pub fn read_unread(&mut self, disk: &dyn Disk) -> Vec<Effect> {
+        let mut out = Vec::new();
+        for at in 0..self.documents.len() {
+            if self.documents[at].phase == Phase::Unread {
+                self.dirty = true;
+                if disk.kind(&self.documents[at].path) == Kind::Missing {
+                    self.documents[at].phase = Phase::Missing;
+                } else {
+                    self.read(at, &mut out);
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether any document needs the inspect process: one is being read,
+    /// or is open there.
+    #[must_use]
+    pub fn needs_engine(&self) -> bool {
+        self.documents.iter().any(Document::in_engine)
+    }
+
+    /// The inspect process was let go while no document needed it: what
+    /// was asked of it has nobody to answer.
+    pub fn engine_released(&mut self) {
+        self.pending.clear();
+    }
+
+    /// Whether the shown document can be read again: its read was cancelled
+    /// and kept only the start of the file.
+    #[must_use]
+    pub fn can_read_again(&self) -> bool {
+        self.shown().and_then(Document::summary).is_some_and(|s| {
+            matches!(&s.outcome, ScanOutcome::Stopped { problem } if problem.kind == ProblemKind::Cancelled)
+        })
     }
 
     /// Every document, in the order they were opened.
@@ -216,14 +326,23 @@ impl Analysis {
     }
 
     /// The one notice the workspace shows: the shown document's request
-    /// problem, then a problem about no single document, then what stays
-    /// true of the shown file.
+    /// problem, then a problem about no single document, then why the
+    /// documents are not saved, then what stays true of the shown file.
     #[must_use]
     pub fn notice_line(&self) -> Option<&str> {
         let doc = self.shown();
         doc.and_then(Document::notice)
             .or(self.notice.as_deref())
+            .or(self.storage.as_deref())
             .or_else(|| doc.and_then(Document::caution))
+    }
+
+    /// Records why the documents cannot be saved (`None` once they can).
+    pub fn set_storage_problem(&mut self, problem: Option<String>) {
+        if self.storage != problem {
+            self.storage = problem;
+            self.dirty = true;
+        }
     }
 
     /// Whether a request to the inspect process is not answered yet.
@@ -243,32 +362,14 @@ impl Analysis {
     /// unparsed regions when there are any, then each OBU type present.
     #[must_use]
     pub fn type_choices(&self) -> Vec<KindFilter> {
-        let mut choices = vec![KindFilter::All];
-        if let Some(summary) = self.shown().and_then(Document::summary) {
-            if summary.unparsed > 0 {
-                choices.push(KindFilter::Unparsed);
-            }
-            choices.extend(summary.obu_types.iter().map(|t| KindFilter::Obu {
-                obu_type: t.obu_type,
-            }));
-        }
-        choices
+        kind_choices(self.shown().and_then(Document::summary))
     }
 
     /// The layer filter's choices for the shown document: every layer, then
     /// each layer pair present.
     #[must_use]
     pub fn layer_choices(&self) -> Vec<Option<LayerFilter>> {
-        let mut choices = vec![None];
-        if let Some(summary) = self.shown().and_then(Document::summary) {
-            choices.extend(summary.layers.iter().map(|l| {
-                Some(LayerFilter {
-                    temporal: l.temporal,
-                    embedded: l.embedded,
-                })
-            }));
-        }
-        choices
+        layer_choices(self.shown().and_then(Document::summary))
     }
 
     /// The user did something.
@@ -295,23 +396,47 @@ impl Analysis {
             }
             Input::Close => self.close(&mut out),
             Input::Reopen => {
-                if let Some(doc) = self.documents.get_mut(self.shown)
-                    && matches!(doc.phase, Phase::Failed { .. })
-                {
-                    let (path, origin) = (doc.path.clone(), doc.origin.clone());
-                    self.documents.remove(self.shown);
-                    self.insert_at(self.shown, path, origin, &mut out);
+                let at = self.shown;
+                if self.can_read_again() {
+                    // The engine still holds the part that was read.
+                    self.restore_from_live(at);
+                    let document = self.documents[at].id;
+                    self.pending.retain(|_, (d, _)| *d != document);
+                    self.send(document, Asked::Close, &mut out, |document| {
+                        Command::AnalysisClose { document }
+                    });
+                    self.read(at, &mut out);
+                } else if matches!(
+                    self.documents.get(at).map(Document::phase),
+                    Some(Phase::Failed { .. })
+                ) {
+                    self.read(at, &mut out);
                 }
             }
-            Input::Cancel => {
-                if let Some(doc) = self.documents.get_mut(self.shown)
-                    && doc.phase == Phase::Opening
+            Input::Cancel => self.cancel(self.shown, &mut out),
+            Input::CancelDocument(index) => {
+                if let Ok(at) = usize::try_from(index) {
+                    self.cancel(at, &mut out);
+                }
+            }
+            Input::Resolve => {
+                let at = self.shown;
+                if let Some(doc) = self.documents.get_mut(at)
+                    && let Phase::Changed(summary) = &doc.phase
                 {
-                    doc.phase = Phase::Cancelling;
-                    let document = doc.id;
-                    self.send(document, Asked::Cancel, &mut out, |document| {
-                        Command::AnalysisCancel { document }
-                    });
+                    doc.phase = Phase::Open(summary.clone());
+                    doc.restore = None;
+                    self.fill(at, &mut out);
+                    self.fetch_bytes(at, &mut out);
+                }
+            }
+            Input::Relink(path) => {
+                let at = self.shown;
+                if let Some(doc) = self.documents.get_mut(at)
+                    && doc.phase == Phase::Missing
+                {
+                    doc.path = path;
+                    self.read(at, &mut out);
                 }
             }
             other => {
@@ -412,7 +537,10 @@ impl Analysis {
             | Input::Show(_)
             | Input::Close
             | Input::Reopen
-            | Input::Cancel => {}
+            | Input::Cancel
+            | Input::CancelDocument(_)
+            | Input::Resolve
+            | Input::Relink(_) => {}
         }
     }
 
@@ -445,7 +573,9 @@ impl Analysis {
     /// Opens `path`, or shows it when it is already open or opening.
     fn open(&mut self, path: PathBuf, origin: Origin, out: &mut Vec<Effect>) {
         if let Some(at) = self.documents.iter().position(|d| {
-            d.path == path && !matches!(d.phase, Phase::Failed { .. }) && d.origin == origin
+            d.path == path
+                && !matches!(d.phase, Phase::Failed { .. } | Phase::Missing)
+                && d.origin == origin
         }) {
             self.shown = at;
             return;
@@ -458,48 +588,46 @@ impl Analysis {
             return;
         }
         self.notice = None;
-        let at = self.documents.len();
-        self.insert_at(at, path, origin, out);
+        self.documents.push(Document::new(path, origin, None));
+        self.shown = self.documents.len() - 1;
+        self.read(self.shown, out);
     }
 
-    /// Starts reading `path` as a new document at index `at`, and shows it.
-    fn insert_at(&mut self, at: usize, path: PathBuf, origin: Origin, out: &mut Vec<Effect>) {
+    /// Starts a new read of document `at` with a new engine id. Everything
+    /// the last read showed is dropped; its view stays in `restore`.
+    fn read(&mut self, at: usize, out: &mut Vec<Effect>) {
         self.next_document += 1;
         let id = self.next_document;
+        let old = &self.documents[at];
+        let (path, origin, restore) = (old.path.clone(), old.origin.clone(), old.restore);
         let source = WirePath::from_path(&path);
-        self.documents.insert(
-            at,
-            Document {
-                id,
-                path,
-                origin,
-                phase: Phase::Opening,
-                filter: RowFilter::default(),
-                filter_generation: 0,
-                total: None,
-                rows: BTreeMap::new(),
-                asked: Vec::new(),
-                top: 0,
-                wanted: None,
-                selected: None,
-                history: Vec::new(),
-                at: 0,
-                bytes: Bytes {
-                    offset: 0,
-                    data: None,
-                    cursor: 0,
-                    shown: true,
-                    asked: None,
-                },
-                locating: None,
-                notice: None,
-                caution: None,
-            },
-        );
-        self.shown = at;
+        let mut doc = Document::new(path, origin, restore);
+        doc.id = id;
+        doc.phase = Phase::Opening;
+        self.documents[at] = doc;
         self.send(id, Asked::Open, out, move |document| {
             Command::AnalysisOpen { document, source }
         });
+    }
+
+    /// Keeps the view on document `at`'s current read for its next one.
+    fn restore_from_live(&mut self, at: usize) {
+        let doc = &mut self.documents[at];
+        doc.restore = doc.restore();
+    }
+
+    /// Stops reading document `at`.
+    fn cancel(&mut self, at: usize, out: &mut Vec<Effect>) {
+        if let Some(doc) = self.documents.get_mut(at)
+            && doc.phase == Phase::Opening
+        {
+            self.dirty = true;
+            doc.phase = Phase::Cancelling;
+            let document = doc.id;
+            self.send(document, Asked::Cancel, out, |document| {
+                Command::AnalysisCancel { document }
+            });
+        }
     }
 
     fn close(&mut self, out: &mut Vec<Effect>) {
@@ -517,13 +645,13 @@ impl Analysis {
                     Command::AnalysisCancel { document }
                 });
             }
-            Phase::Open(_) => {
+            Phase::Open(_) | Phase::Changed(_) => {
                 self.send(doc.id, Asked::Close, out, |document| {
                     Command::AnalysisClose { document }
                 });
             }
-            // Cancel is on its way; a failed document is not open.
-            Phase::Cancelling | Phase::Failed { .. } => {}
+            // Cancel is on its way; the others are not in the engine.
+            Phase::Cancelling | Phase::Failed { .. } | Phase::Unread | Phase::Missing => {}
         }
         self.shown = self.shown.min(self.documents.len().saturating_sub(1));
         self.notice = None;
@@ -590,9 +718,21 @@ impl Analysis {
                         summary.fingerprint.len, result.bytes
                     ));
                 }
-                doc.phase = Phase::Open(Box::new(summary));
-                self.fill(at, &mut out);
-                self.fetch_bytes(at, &mut out);
+                match doc.restore.take() {
+                    Some(restore) if !same_file(restore.fingerprint, summary.fingerprint) => {
+                        // Never trust the path alone: the view waits.
+                        doc.restore = Some(restore);
+                        doc.phase = Phase::Changed(Box::new(summary));
+                    }
+                    restore => {
+                        doc.phase = Phase::Open(Box::new(summary));
+                        if let Some(restore) = restore {
+                            self.apply(at, restore, &mut out);
+                        }
+                        self.fill(at, &mut out);
+                        self.fetch_bytes(at, &mut out);
+                    }
+                }
             }
             (
                 Asked::Page { generation, first },
@@ -732,14 +872,13 @@ impl Analysis {
     ) {
         let doc = &mut self.documents[at];
         match asked {
-            Asked::Open => {
-                doc.phase = Phase::Failed {
-                    message: match code {
-                        Some(AnalysisFailure::Cancelled) => "Reading was cancelled.".to_owned(),
-                        _ => message,
-                    },
-                };
-            }
+            Asked::Open => match code {
+                Some(AnalysisFailure::Cancelled) => doc.fail(
+                    "Reading was cancelled before anything was read.".to_owned(),
+                    ReadEnd::Cancel,
+                ),
+                _ => doc.fail(message, ReadEnd::Failure),
+            },
             Asked::Page { generation, first } => {
                 doc.asked.retain(|a| *a != (generation, first));
                 fail_or_notice(doc, code, &message);
@@ -765,9 +904,10 @@ impl Analysis {
     /// says about it is trusted, and its engine slot is given back.
     fn broken(&mut self, at: usize, what: &str, out: &mut Vec<Effect>) {
         let doc = &mut self.documents[at];
-        doc.phase = Phase::Failed {
-            message: format!("The engine sent {what}. Reopen the file to read it again."),
-        };
+        doc.fail(
+            format!("The engine sent {what}. Reopen the file to read it again."),
+            ReadEnd::Failure,
+        );
         let document = doc.id;
         self.pending.retain(|_, (d, _)| *d != document);
         self.send(document, Asked::Close, out, |document| {
@@ -779,15 +919,36 @@ impl Analysis {
     pub fn process_ended(&mut self, detail: &str) {
         self.pending.clear();
         for doc in &mut self.documents {
-            if !matches!(doc.phase, Phase::Failed { .. }) {
-                doc.phase = Phase::Failed {
-                    message: format!(
+            if doc.in_engine() {
+                doc.fail(
+                    format!(
                         "The inspection engine stopped ({detail}). Reopen the file to read it \
                          again."
                     ),
-                };
+                    ReadEnd::EngineStopped,
+                );
                 self.dirty = true;
             }
+        }
+    }
+
+    /// Puts back the view `restore` on document `at`, just read from the
+    /// same file. A filter the document offers no choice for, and an
+    /// element past its end, are not restored.
+    fn apply(&mut self, at: usize, restore: Restore, out: &mut Vec<Effect>) {
+        let doc = &mut self.documents[at];
+        doc.bytes.shown = restore.bytes_shown;
+        let summary = doc.summary();
+        let filter = restore.filter;
+        let offered = kind_choices(summary).contains(&filter.kind)
+            && layer_choices(summary).contains(&filter.layer);
+        let elements = summary.map_or(0, |s| s.elements);
+        if offered {
+            doc.filter = filter;
+        }
+        if let Some(index) = restore.selected.filter(|i| *i < elements) {
+            let purpose = Purpose::Select { from_list: true };
+            self.locate(at, LocateTarget::Element { index }, purpose, out);
         }
     }
 
@@ -1037,22 +1198,47 @@ impl Analysis {
 /// A failure of a request on an open document.
 fn fail_or_notice(doc: &mut Document, code: Option<AnalysisFailure>, message: &str) {
     match code {
-        Some(AnalysisFailure::SourceChanged) => {
-            doc.phase = Phase::Failed {
-                message: "The file changed or was replaced since it was opened. Reopen it to \
-                          read it again."
-                    .to_owned(),
-            };
-        }
-        Some(AnalysisFailure::UnknownDocument) => {
-            doc.phase = Phase::Failed {
-                message: "The engine no longer has this document open. Reopen it to read it \
-                          again."
-                    .to_owned(),
-            };
-        }
+        Some(AnalysisFailure::SourceChanged) => doc.fail(
+            "The file changed or was replaced since it was opened. Reopen it to read it again."
+                .to_owned(),
+            ReadEnd::Failure,
+        ),
+        Some(AnalysisFailure::UnknownDocument) => doc.fail(
+            "The engine no longer has this document open. Reopen it to read it again.".to_owned(),
+            ReadEnd::Failure,
+        ),
         _ => doc.notice = Some(format!("The engine could not answer: {message}")),
     }
+}
+
+/// The type filter's choices for `summary`: every element, unparsed
+/// regions when there are any, then each OBU type present.
+fn kind_choices(summary: Option<&DocumentSummary>) -> Vec<KindFilter> {
+    let mut choices = vec![KindFilter::All];
+    if let Some(summary) = summary {
+        if summary.unparsed > 0 {
+            choices.push(KindFilter::Unparsed);
+        }
+        choices.extend(summary.obu_types.iter().map(|t| KindFilter::Obu {
+            obu_type: t.obu_type,
+        }));
+    }
+    choices
+}
+
+/// The layer filter's choices for `summary`: every layer, then each layer
+/// pair present.
+fn layer_choices(summary: Option<&DocumentSummary>) -> Vec<Option<LayerFilter>> {
+    let mut choices = vec![None];
+    if let Some(summary) = summary {
+        choices.extend(summary.layers.iter().map(|l| {
+            Some(LayerFilter {
+                temporal: l.temporal,
+                embedded: l.embedded,
+            })
+        }));
+    }
+    choices
 }
 
 /// Whether a page of `len` rows from `first` fits `total` rows: no more
