@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::platform::{Key, Platform, WindowAdapter, WindowEvent};
 use slint::{ComponentHandle, Model, PhysicalSize, PlatformError, Rgb8Pixel, SharedString};
-use studio_app::analysis::{Input, Phase, Position, ReadEnd};
+use studio_app::analysis::{Input, Phase, ReadEnd};
 use studio_app::engine::{Delivery, ENGINE_NAME};
 use studio_app::jobs::State;
 use studio_app::journal;
@@ -532,7 +532,7 @@ fn worker_death(rig: &mut Rig) {
         s.analysis()
             .shown()
             .and_then(|d| d.selected())
-            .is_some_and(|s| s.position == Position::Row(2))
+            .is_some_and(|s| s.position == studio_app::analysis::Position::Row(2))
             && !s.analysis().waiting()
     });
     assert!(rig.session().inspecting());
