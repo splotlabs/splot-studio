@@ -188,12 +188,22 @@ pub struct RestoredView {
 /// The model's values of a journalled view.
 #[must_use]
 pub fn view(dto: &JournalView) -> RestoredView {
-    let documents: Vec<Saved> = dto.documents.iter().filter_map(journal::saved).collect();
+    let kept: Vec<(usize, Saved)> = dto
+        .documents
+        .iter()
+        .enumerate()
+        .filter_map(|(at, d)| journal::saved(d).map(|saved| (at, saved)))
+        .collect();
+    // The shown one, counted among those kept.
+    let shown = kept
+        .iter()
+        .position(|(at, _)| *at == dto.shown_document)
+        .unwrap_or(0);
     RestoredView {
         workspace: journal::workspace(dto.workspace),
-        dropped: dto.documents.len() - documents.len(),
-        documents,
-        shown: dto.shown_document,
+        dropped: dto.documents.len() - kept.len(),
+        documents: kept.into_iter().map(|(_, saved)| saved).collect(),
+        shown,
     }
 }
 
@@ -749,7 +759,8 @@ mod tests {
         };
         j.view = JournalView {
             workspace: JournalWorkspace::Analyze,
-            shown_document: 1,
+            // The last one, the second kept.
+            shown_document: 3,
             documents: vec![
                 document(WirePath::from_path(&abs("/in/a.obu")), JournalOrigin::File),
                 document(foreign.clone(), JournalOrigin::File),

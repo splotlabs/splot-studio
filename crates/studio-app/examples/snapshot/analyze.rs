@@ -99,6 +99,40 @@ impl Scenario {
     }
 }
 
+/// A state restored from a last session that had `path` open in Analyze,
+/// as a file of 4096 bytes with its seventh element selected.
+fn restored(path: PathBuf) -> AppState {
+    let saved = Saved {
+        path,
+        origin: Origin::File,
+        restore: Some(Restore {
+            fingerprint: SourceFingerprint {
+                len: 4096,
+                modified: Some((1_795_000_000, 0)),
+            },
+            selected: Some(7),
+            filter: RowFilter::default(),
+            bytes_shown: true,
+        }),
+    };
+    AppState::new(Startup {
+        recovered: Some(Recovered {
+            items: Vec::new(),
+            next_id: 1,
+            settings: INITIAL_SETTINGS,
+            cleanups: Vec::new(),
+            dropped: 0,
+            view: RestoredView {
+                workspace: Workspace::Analyze,
+                documents: vec![saved],
+                shown: 0,
+                dropped: 0,
+            },
+        }),
+        problem: None,
+    })
+}
+
 /// The Analyze state of `name`, `Ok(None)` when it is no Analyze scenario.
 pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
     if !name.starts_with("analyze-") {
@@ -117,39 +151,7 @@ pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
     let post = Arc::new(move |route, delivery| {
         let _ = tx.send((route, delivery));
     });
-    // The last session's documents: the file at each path was replaced
-    // or moved away since.
-    let restored = |path: PathBuf| {
-        let saved = Saved {
-            path,
-            origin: Origin::File,
-            restore: Some(Restore {
-                fingerprint: SourceFingerprint {
-                    len: 4096,
-                    modified: Some((1_795_000_000, 0)),
-                },
-                selected: Some(7),
-                filter: RowFilter::default(),
-                bytes_shown: true,
-            }),
-        };
-        AppState::new(Startup {
-            recovered: Some(Recovered {
-                items: Vec::new(),
-                next_id: 1,
-                settings: INITIAL_SETTINGS,
-                cleanups: Vec::new(),
-                dropped: 0,
-                view: RestoredView {
-                    workspace: Workspace::Analyze,
-                    documents: vec![saved],
-                    shown: 0,
-                    dropped: 0,
-                },
-            }),
-            problem: None,
-        })
-    };
+    // The file at each path was replaced or moved away since.
     let state = match name {
         "analyze-changed" => {
             std::fs::write(folder.join("park walk.ivf"), ivf()).map_err(|e| e.to_string())?;

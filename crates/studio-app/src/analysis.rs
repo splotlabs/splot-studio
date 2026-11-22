@@ -142,8 +142,13 @@ pub enum Input {
     /// missing one, the caller asks where it is now and sends
     /// [`Input::Relink`].
     Resolve,
-    /// Read the shown missing document from this file instead.
-    Relink(PathBuf),
+    /// Read the missing document of path `missing` from file `to` instead.
+    Relink {
+        /// Where it was.
+        missing: PathBuf,
+        /// Where it is now, as the user located it.
+        to: PathBuf,
+    },
     /// A visible navigator row, by its slot from the top.
     RowClicked(i32),
     /// Move the navigator selection.
@@ -223,6 +228,7 @@ impl Analysis {
     /// says so.
     #[must_use]
     pub fn restored(saved: Vec<Saved>, shown: usize, dropped: usize) -> Self {
+        let wanted = saved.get(shown).map(|s| (s.path.clone(), s.origin.clone()));
         let mut documents: Vec<Document> = Vec::new();
         for saved in saved {
             let twin = documents
@@ -244,8 +250,16 @@ impl Analysis {
                  written on another kind of system."
             )),
         };
+        // The shown one, wherever it is in the list kept.
+        let shown = wanted
+            .and_then(|(path, origin)| {
+                documents
+                    .iter()
+                    .position(|d| d.path == path && d.origin == origin)
+            })
+            .unwrap_or(0);
         Self {
-            shown: shown.min(documents.len().saturating_sub(1)),
+            shown,
             documents,
             notice,
             dirty: true,
@@ -430,12 +444,18 @@ impl Analysis {
                     self.fetch_bytes(at, &mut out);
                 }
             }
-            Input::Relink(path) => {
-                let at = self.shown;
-                if let Some(doc) = self.documents.get_mut(at)
-                    && doc.phase == Phase::Missing
-                {
-                    doc.path = path;
+            Input::Relink { missing, to } => {
+                let at = self
+                    .documents
+                    .iter()
+                    .position(|d| d.phase == Phase::Missing && d.path == missing);
+                if let Some(at) = at {
+                    let doc = &mut self.documents[at];
+                    if let Origin::Result(result) = &mut doc.origin {
+                        result.output.clone_from(&to);
+                    }
+                    doc.path = to;
+                    self.shown = at;
                     self.read(at, &mut out);
                 }
             }
@@ -540,7 +560,7 @@ impl Analysis {
             | Input::Cancel
             | Input::CancelDocument(_)
             | Input::Resolve
-            | Input::Relink(_) => {}
+            | Input::Relink { .. } => {}
         }
     }
 
@@ -635,23 +655,20 @@ impl Analysis {
             return;
         }
         let doc = self.documents.remove(self.shown);
-        // Its answers have nobody to go to now, except an open's: one that
-        // still succeeds is closed when it answers.
-        self.pending
-            .retain(|_, (document, asked)| *document != doc.id || *asked == Asked::Open);
-        match doc.phase {
-            Phase::Opening => {
-                self.send(doc.id, Asked::Cancel, out, |document| {
-                    Command::AnalysisCancel { document }
-                });
-            }
-            Phase::Open(_) | Phase::Changed(_) => {
-                self.send(doc.id, Asked::Close, out, |document| {
-                    Command::AnalysisClose { document }
-                });
-            }
-            // Cancel is on its way; the others are not in the engine.
-            Phase::Cancelling | Phase::Failed { .. } | Phase::Unread | Phase::Missing => {}
+        // Its answers have nobody to go to now.
+        self.pending.retain(|_, (document, _)| *document != doc.id);
+        if doc.phase == Phase::Opening {
+            self.send(doc.id, Asked::Cancel, out, |document| {
+                Command::AnalysisCancel { document }
+            });
+        }
+        // A cancelled read keeps what it read, so the engine holds it until
+        // it is closed. The close waits behind the open in the engine's
+        // queue, so the slot is free before any later open.
+        if doc.in_engine() {
+            self.send(doc.id, Asked::Close, out, |document| {
+                Command::AnalysisClose { document }
+            });
         }
         self.shown = self.shown.min(self.documents.len().saturating_sub(1));
         self.notice = None;
@@ -697,12 +714,6 @@ impl Analysis {
             return out;
         }
         let Some(at) = self.index_of(document) else {
-            // A document closed while it was being opened: close it there too.
-            if asked == Asked::Open && matches!(event, Event::AnalysisOpened { .. }) {
-                self.send(document, Asked::Close, &mut out, |document| {
-                    Command::AnalysisClose { document }
-                });
-            }
             return out;
         };
         self.dirty = true;

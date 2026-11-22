@@ -154,7 +154,10 @@ fn a_missing_file_waits_for_its_new_place_and_is_checked_there() {
     assert_eq!(*doc(&analysis).phase(), Phase::Missing);
     assert!(!analysis.needs_engine());
     // Opening the same path again does not reuse the missing document.
-    let effects = analysis.input(Input::Relink(PathBuf::from("/moved/clip.obu")));
+    let effects = analysis.input(Input::Relink {
+        missing: PathBuf::from(PATH),
+        to: PathBuf::from("/moved/clip.obu"),
+    });
     assert_eq!(opens(&effects), [1]);
     engine.settle(&mut analysis, effects);
     assert_eq!(
@@ -317,7 +320,11 @@ fn at_most_four_documents_are_restored_each_once() {
     );
     let paths: Vec<_> = analysis.documents().iter().map(Document::path).collect();
     assert_eq!(paths, ["/a", "/b", "/c", "/d"].map(std::path::Path::new));
-    assert_eq!(analysis.shown_index(), 3);
+    // Past the end: the first.
+    assert_eq!(analysis.shown_index(), 0);
+    // The shown one stays shown when a twin before it is dropped.
+    let twins = Analysis::restored(vec![at("/a"), at("/a"), at("/b")], 2, 0);
+    assert_eq!(doc(&twins).path(), std::path::Path::new("/b"));
     assert!(
         analysis
             .notice_line()

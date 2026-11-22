@@ -659,16 +659,21 @@ fn an_encoded_result_keeps_its_identity() {
 }
 
 #[test]
-fn closing_while_opening_cancels_and_a_late_open_is_closed() {
+fn closing_while_opening_cancels_and_closes_and_drops_the_late_open() {
     let mut analysis = Analysis::new();
     let open = analysis.input(Input::Open(vec![PathBuf::from("/media/a.obu")]));
     let close = analysis.input(Input::Close);
+    // The close follows the open in the engine's queue: whatever the read
+    // kept is let go before any later open.
     assert!(matches!(
         commands(&close)[..],
-        [Command::AnalysisCancel { document: 1 }]
+        [
+            Command::AnalysisCancel { document: 1 },
+            Command::AnalysisClose { document: 1 }
+        ]
     ));
     assert_eq!(analysis.documents().len(), 0);
-    // The open finished before the cancel arrived.
+    // The open finished before the cancel arrived: nobody hears it.
     let late = analysis.event(
         open[0].request_id,
         Event::AnalysisOpened {
@@ -676,10 +681,7 @@ fn closing_while_opening_cancels_and_a_late_open_is_closed() {
             summary: summary(3),
         },
     );
-    assert!(matches!(
-        commands(&late)[..],
-        [Command::AnalysisClose { document: 1 }]
-    ));
+    assert_eq!(late.len(), 0);
     assert_eq!(analysis.documents().len(), 0);
 }
 

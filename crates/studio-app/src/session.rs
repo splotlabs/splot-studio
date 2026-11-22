@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use studio_domain::analysis::RowFilter;
 use studio_domain::job::WirePath;
 use studio_domain::protocol::{BuildIdentity, Command, Envelope, Event, ProtocolError};
 use studio_domain::settings::OutputKind;
@@ -145,6 +146,8 @@ pub struct Session {
     inspectors_started: u64,
     /// The Analyze Open dialog is showing.
     analyze_dialog: bool,
+    /// The Locate dialog is showing for the missing document of this path.
+    locating: Option<PathBuf>,
     /// The window is not minimized; the picture area also needs Encode shown.
     window_visible: bool,
     journal: Option<Writer>,
@@ -181,6 +184,7 @@ impl Session {
             inspector: None,
             inspectors_started: 0,
             analyze_dialog: false,
+            locating: None,
             window_visible: true,
             journal,
             saved: None,
@@ -365,13 +369,14 @@ impl Session {
         if self.shut_down {
             return outcome;
         }
-        let locate = input == analysis::Input::Resolve
-            && matches!(
-                self.analysis.shown().map(analysis::Document::phase),
-                Some(analysis::Phase::Missing)
-            );
-        if locate {
-            outcome.ui.push(UiEffect::ShowLocateDialog);
+        if input == analysis::Input::Resolve
+            && let Some(doc) = self.analysis.shown()
+            && *doc.phase() == analysis::Phase::Missing
+        {
+            // The answer goes to this document, whichever is shown then.
+            if self.locating.replace(doc.path().to_path_buf()).is_none() {
+                outcome.ui.push(UiEffect::ShowLocateDialog);
+            }
             return outcome;
         }
         let effects = self.analysis.input(input);
@@ -383,9 +388,11 @@ impl Session {
 
     /// The Locate dialog closed; `None` means it was cancelled.
     pub fn locate_picked(&mut self, path: Option<PathBuf>) -> Outcome {
-        match path {
-            Some(path) => self.analysis_input(analysis::Input::Relink(path)),
-            None => Outcome::nothing(),
+        match (self.locating.take(), path) {
+            (Some(missing), Some(to)) => {
+                self.analysis_input(analysis::Input::Relink { missing, to })
+            }
+            _ => Outcome::nothing(),
         }
     }
 
@@ -795,10 +802,27 @@ impl Session {
         journal::view(self.state.workspace(), &saved, shown)
     }
 
-    /// Submits the journal when the view record changed; Analyze input
-    /// mostly moves what is not saved.
+    /// Submits the journal when the documents or the workspace changed.
+    /// A selection, filter or byte view alone waits for the next save (any
+    /// change of the queue, or quit), so moving through rows costs no
+    /// write each.
     fn persist_view(&mut self) {
-        if self.journal.is_some() && self.saved_view.as_ref() != Some(&self.view()) {
+        let outline = |view: &JournalView| {
+            let mut view = view.clone();
+            for doc in &mut view.documents {
+                if let Some(read) = &mut doc.read {
+                    read.selected_element = None;
+                    read.filter = RowFilter::default();
+                    read.bytes_shown = true;
+                }
+            }
+            view
+        };
+        let changed = self
+            .saved_view
+            .as_ref()
+            .is_none_or(|saved| outline(saved) != outline(&self.view()));
+        if self.journal.is_some() && changed {
             self.persist();
         }
     }

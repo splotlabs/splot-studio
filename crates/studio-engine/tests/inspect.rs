@@ -701,3 +701,44 @@ fn a_cancel_does_not_hide_why_an_open_failed() -> TestResult {
     assert!(consistent, "{answers:?}");
     Ok(())
 }
+
+/// A document closed while it is read gives its slot back before a later
+/// open, whether the cancel stopped the read or came too late: the close
+/// waits behind the open in the queue.
+#[test]
+fn a_document_closed_while_read_frees_its_slot() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let small = dir.path().join("td.obu");
+    fs::write(&small, [0x01, 0x08])?;
+    let long = dir.path().join("long.obu");
+    long_stream(&long)?;
+    let mut inspect = Inspect::spawn()?;
+    for document in 1..=3 {
+        inspect.open(document, &small)?;
+    }
+    let ids = inspect.send(vec![
+        Command::AnalysisOpen {
+            document: 4,
+            source: WirePath::from_path(&long),
+        },
+        Command::AnalysisCancel { document: 4 },
+        Command::AnalysisClose { document: 4 },
+        Command::AnalysisOpen {
+            document: 5,
+            source: WirePath::from_path(&small),
+        },
+    ])?;
+    let mut answers = std::collections::HashMap::new();
+    for _ in 0..4 {
+        let answer = inspect.next()?;
+        answers.insert(answer.request_id, answer.body);
+    }
+    assert!(
+        matches!(
+            answers.get(&ids[3]),
+            Some(Event::AnalysisOpened { document: 5, .. })
+        ),
+        "{answers:?}"
+    );
+    Ok(())
+}
