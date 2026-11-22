@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
-// The main window: one centred card. Source, Quality, Priority and Convert on
-// the left; Advanced opens to the right. Values come from Rust; every callback
-// is an intent that Rust validates and answers by setting properties back.
-// Nothing here touches files, processes or the codec. The only state kept here
-// is view state: whether Advanced is open.
+// The main window: one centred card, a thin workspace shell around the Encode
+// view. The shell's toolbar names the workspace and holds the reserved Jobs
+// entry; Rust owns which workspace is shown. In Encode, Source, Quality,
+// Priority and Convert are on the left; Advanced opens to the right. Values
+// come from Rust; every callback is an intent that Rust validates and answers
+// by setting properties back. Nothing here touches files, processes or the
+// codec. The only state kept here is view state: whether Advanced is open.
 
 import { AboutSlint, Button, ComboBox, Palette, ScrollView, SpinBox } from "std-widgets.slint";
 import { Tokens } from "tokens.slint";
@@ -24,6 +26,10 @@ export enum SourceView { none, probing, ready, unreadable }
 
 // Where the current or last job is. `none` shows the Convert button.
 export enum JobView { none, running, cancelling, completed, cancelled, failed, lost, interrupted }
+
+// Which workspace the shell shows. Only `encode` has a view; Analyze and
+// Compare are not built, and Rust never sets them.
+export enum WorkspaceView { encode, analyze, compare }
 
 // How the queue is shown: the empty state, the one-file card, or a list.
 export enum ViewMode { empty, single, list }
@@ -814,6 +820,10 @@ export component AppWindow inherits Window {
     // Identity
     in property <string> app-version;
 
+    // The workspace shell: what is shown, and its name in the toolbar.
+    in property <WorkspaceView> workspace;
+    in property <string> workspace-title: "Encode";
+
     // Source. Paths are display strings; Rust keeps the real paths.
     in property <SourceView> source-view;
     in property <string> source-name;
@@ -1116,953 +1126,985 @@ export component AppWindow inherits Window {
             content-height: content.preferred-height;
             horizontal-scrollbar-policy: always-off;
 
-                content := HorizontalLayout {
+                content := VerticalLayout {
                     width: self.preferred-width;
                     height: self.preferred-height;
                     padding-left: root.card-padding;
                     padding-right: root.card-padding;
                     padding-top: root.card-padding - Tokens.space-1;
                     padding-bottom: root.card-padding - Tokens.space-1;
-                    alignment: start;
+                    spacing: Tokens.space-4;
 
-                    // Simple column
-                    VerticalLayout {
-                        width: root.main-width;
-                        spacing: Tokens.space-4;
+                    // The shell's toolbar: the workspace shown and the shared Jobs
+                    // entry. Jobs is reserved until it lists real work from every
+                    // workspace, so it is present but unavailable, and no Tab stop.
+                    HorizontalLayout {
+                        spacing: Tokens.space-3;
+                        accessible-role: navigation;
+                        accessible-label: "Workspaces";
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: root.workspace-title;
+                            color: Tokens.text;
+                            font-size: Tokens.type-body * 1rem;
+                            font-weight: Tokens.weight-semibold;
+                            vertical-alignment: center;
+                            accessible-label: "Workspace: " + root.workspace-title;
+                        }
+
+                        LinkButton {
+                            text: "Jobs";
+                            enabled: false;
+                            description: "Not available yet. The files to convert are listed in Encode.";
+                        }
+                    }
+
+                    // The workspace shown. Only Encode exists; Rust never sets another.
+                    if root.workspace == WorkspaceView.encode: HorizontalLayout {
                         alignment: start;
+                        accessible-role: main;
+                        accessible-label: root.workspace-title;
 
-                        // The brand greets an empty window; once a file is open
-                        // the picture leads and the title bar names the app.
-                        if !root.has-source: HorizontalLayout {
+                        // Simple column
+                        VerticalLayout {
+                            width: root.main-width;
+                            spacing: Tokens.space-4;
                             alignment: start;
 
-                            Wordmark { }
-                        }
+                            // The brand greets an empty window; once a file is open
+                            // the picture leads and the title bar names the app.
+                            if !root.has-source: HorizontalLayout {
+                                alignment: start;
 
-                        if root.notices.length > 0: VerticalLayout {
-                            spacing: Tokens.space-1;
-
-                            for notice in root.notices: Text {
-                                text: notice.text;
-                                color: notice.tone == Tone.neutral ? Tokens.text-secondary : Tones.color(notice.tone);
-                                font-size: Tokens.type-caption * 1rem;
-                                font-weight: notice.tone == Tone.neutral ? Tokens.weight-regular : Tokens.weight-semibold;
-                                wrap: word-wrap;
-                                accessible-live-region: polite;
-                            }
-                        }
-
-                        // The picture area, on top of the card once a file is open.
-                        if root.has-source && root.stage-state != StageState.none: VerticalLayout {
-                            spacing: Tokens.space-1;
-
-                            Stage {
-                                height: root.stage-state == StageState.unavailable ? 4 * Tokens.space-6 : root.main-width * 9 / 16;
-                                state: root.stage-state;
-                                picture: root.stage-image;
-                                native: root.stage-native;
-                                badge: root.stage-badge;
-                                hint: root.stage-hint;
-                                message: root.stage-message;
-                                can-compare: root.stage-can-compare;
-                                comparing: root.stage-comparing;
-                                navigable: root.stage-navigable;
-                                accessible-text: root.stage-accessible;
-                                compare(on) => {
-                                    root.stage-compare(on);
-                                }
-                                step(delta) => {
-                                    root.stage-step(delta);
-                                }
-                                seek-start => {
-                                    root.stage-seek(0);
-                                }
-                                seek-end => {
-                                    root.stage-end();
-                                }
-                                play-pause => {
-                                    root.stage-play-pause();
-                                }
-                                pan(dx, dy) => {
-                                    root.stage-pan(dx, dy);
-                                }
+                                Wordmark { }
                             }
 
-                            // Frame stepping, the scrubber, play and actual pixels.
-                            // The step buttons are no Tab stops: the picture's
-                            // own Left and Right keys do the same.
-                            if root.stage-transport: HorizontalLayout {
+                            if root.notices.length > 0: VerticalLayout {
                                 spacing: Tokens.space-1;
 
-                                IconButton {
-                                    label: "Previous frame";
-                                    description: "Left arrow on the picture";
-                                    enabled: root.stage-navigable;
-                                    tab-stop: false;
-                                    icon: "M 3 3 L 4.8 3 L 4.8 13 L 3 13 Z M 13 3 L 13 13 L 6.2 8 Z";
-                                    clicked => {
-                                        root.stage-step(-1);
-                                    }
+                                for notice in root.notices: Text {
+                                    text: notice.text;
+                                    color: notice.tone == Tone.neutral ? Tokens.text-secondary : Tones.color(notice.tone);
+                                    font-size: Tokens.type-caption * 1rem;
+                                    font-weight: notice.tone == Tone.neutral ? Tokens.weight-regular : Tokens.weight-semibold;
+                                    wrap: word-wrap;
+                                    accessible-live-region: polite;
                                 }
+                            }
 
-                                IconButton {
-                                    label: root.stage-playing ? "Pause" : "Play";
-                                    description: root.stage-play-note != "" ? root.stage-play-note : "Plays the video only, without sound (Space on the picture)";
-                                    enabled: root.stage-can-play || root.stage-playing;
-                                    icon: root.stage-playing ? "M 3.5 2.5 L 6.6 2.5 L 6.6 13.5 L 3.5 13.5 Z M 9.4 2.5 L 12.5 2.5 L 12.5 13.5 L 9.4 13.5 Z" : "M 4.2 2.4 L 13.6 8 L 4.2 13.6 Z";
-                                    clicked => {
+                            // The picture area, on top of the card once a file is open.
+                            if root.has-source && root.stage-state != StageState.none: VerticalLayout {
+                                spacing: Tokens.space-1;
+
+                                Stage {
+                                    height: root.stage-state == StageState.unavailable ? 4 * Tokens.space-6 : root.main-width * 9 / 16;
+                                    state: root.stage-state;
+                                    picture: root.stage-image;
+                                    native: root.stage-native;
+                                    badge: root.stage-badge;
+                                    hint: root.stage-hint;
+                                    message: root.stage-message;
+                                    can-compare: root.stage-can-compare;
+                                    comparing: root.stage-comparing;
+                                    navigable: root.stage-navigable;
+                                    accessible-text: root.stage-accessible;
+                                    compare(on) => {
+                                        root.stage-compare(on);
+                                    }
+                                    step(delta) => {
+                                        root.stage-step(delta);
+                                    }
+                                    seek-start => {
+                                        root.stage-seek(0);
+                                    }
+                                    seek-end => {
+                                        root.stage-end();
+                                    }
+                                    play-pause => {
                                         root.stage-play-pause();
                                     }
-                                }
-
-                                IconButton {
-                                    label: "Next frame";
-                                    description: "Right arrow on the picture";
-                                    enabled: root.stage-navigable;
-                                    tab-stop: false;
-                                    icon: "M 11.2 3 L 13 3 L 13 13 L 11.2 13 Z M 3 3 L 9.8 8 L 3 13 Z";
-                                    clicked => {
-                                        root.stage-step(1);
+                                    pan(dx, dy) => {
+                                        root.stage-pan(dx, dy);
                                     }
                                 }
 
-                                if root.stage-frames > 1: Scrubber {
-                                    count: root.stage-frames;
-                                    value: root.stage-position;
-                                    value-text: root.stage-frame-text;
-                                    enabled: root.stage-navigable;
-                                    seek(frame) => {
-                                        root.stage-seek(frame);
-                                    }
-                                }
+                                // Frame stepping, the scrubber, play and actual pixels.
+                                // The step buttons are no Tab stops: the picture's
+                                // own Left and Right keys do the same.
+                                if root.stage-transport: HorizontalLayout {
+                                    spacing: Tokens.space-1;
 
-                                if root.stage-frames <= 1: Rectangle {
-                                    horizontal-stretch: 1;
-                                }
-
-                                Text {
-                                    horizontal-stretch: 0;
-                                    min-width: self.preferred-width;
-                                    text: root.stage-frame-text + (root.stage-time-text != "" ? "  ·  " + root.stage-time-text : "");
-                                    color: Tokens.text-secondary;
-                                    font-size: Tokens.type-caption * 1rem;
-                                    vertical-alignment: center;
-                                    accessible-role: none;
-                                }
-
-                                Rectangle {
-                                    width: Tokens.space-1;
-                                }
-
-                                ToggleChip {
-                                    text: "1:1";
-                                    label: "Actual pixels";
-                                    description: "Shows the frame's own pixels, one to one, from the centre. Scroll on the picture to move.";
-                                    checked: root.stage-native-on;
-                                    enabled: root.stage-can-native;
-                                    y: (parent.height - self.height) / 2;
-                                    toggled => {
-                                        root.stage-toggle-native();
-                                    }
-                                }
-                            }
-
-                            if root.stage-transport && root.stage-play-note != "": Caption {
-                                text: root.stage-play-note;
-                            }
-                        }
-
-                        // Source zone: an intentional empty state or the file card.
-                        if !root.has-source: Rectangle {
-                            height: 176px;
-                            border-radius: Tokens.radius-medium + 2px;
-                            background: Tokens.track;
-                            border-width: 1px;
-                            border-color: zone.has-hover && root.can-add ? Tokens.accent : Tokens.border-strong;
-                            animate border-color { duration: Tokens.motion-short; }
-
-                            zone := TouchArea {
-                                enabled: root.can-add;
-                                mouse-cursor: pointer;
-                                clicked => {
-                                    root.open-requested();
-                                }
-                            }
-
-                            VerticalLayout {
-                                alignment: center;
-                                spacing: Tokens.space-2;
-                                padding: Tokens.space-6;
-
-                                Text {
-                                    text: "Open a video to begin";
-                                    color: Tokens.text;
-                                    font-size: Tokens.type-title * 1rem;
-                                    font-weight: Tokens.weight-semibold;
-                                    horizontal-alignment: center;
-                                }
-
-                                Caption {
-                                    text: root.empty-caption;
-                                    horizontal-alignment: center;
-                                }
-
-                                HorizontalLayout {
-                                    alignment: center;
-                                    padding-top: Tokens.space-2;
-
-                                    open-button := Button {
-                                        text: "Open…";
-                                        enabled: root.can-add;
-                                        accessible-description: "Choose a video file (" + root.open-keys.to-string() + ")";
+                                    IconButton {
+                                        label: "Previous frame";
+                                        description: "Left arrow on the picture";
+                                        enabled: root.stage-navigable;
+                                        tab-stop: false;
+                                        icon: "M 3 3 L 4.8 3 L 4.8 13 L 3 13 Z M 13 3 L 13 13 L 6.2 8 Z";
                                         clicked => {
-                                            root.open-requested();
+                                            root.stage-step(-1);
+                                        }
+                                    }
+
+                                    IconButton {
+                                        label: root.stage-playing ? "Pause" : "Play";
+                                        description: root.stage-play-note != "" ? root.stage-play-note : "Plays the video only, without sound (Space on the picture)";
+                                        enabled: root.stage-can-play || root.stage-playing;
+                                        icon: root.stage-playing ? "M 3.5 2.5 L 6.6 2.5 L 6.6 13.5 L 3.5 13.5 Z M 9.4 2.5 L 12.5 2.5 L 12.5 13.5 L 9.4 13.5 Z" : "M 4.2 2.4 L 13.6 8 L 4.2 13.6 Z";
+                                        clicked => {
+                                            root.stage-play-pause();
+                                        }
+                                    }
+
+                                    IconButton {
+                                        label: "Next frame";
+                                        description: "Right arrow on the picture";
+                                        enabled: root.stage-navigable;
+                                        tab-stop: false;
+                                        icon: "M 11.2 3 L 13 3 L 13 13 L 11.2 13 Z M 3 3 L 9.8 8 L 3 13 Z";
+                                        clicked => {
+                                            root.stage-step(1);
+                                        }
+                                    }
+
+                                    if root.stage-frames > 1: Scrubber {
+                                        count: root.stage-frames;
+                                        value: root.stage-position;
+                                        value-text: root.stage-frame-text;
+                                        enabled: root.stage-navigable;
+                                        seek(frame) => {
+                                            root.stage-seek(frame);
+                                        }
+                                    }
+
+                                    if root.stage-frames <= 1: Rectangle {
+                                        horizontal-stretch: 1;
+                                    }
+
+                                    Text {
+                                        horizontal-stretch: 0;
+                                        min-width: self.preferred-width;
+                                        text: root.stage-frame-text + (root.stage-time-text != "" ? "  ·  " + root.stage-time-text : "");
+                                        color: Tokens.text-secondary;
+                                        font-size: Tokens.type-caption * 1rem;
+                                        vertical-alignment: center;
+                                        accessible-role: none;
+                                    }
+
+                                    Rectangle {
+                                        width: Tokens.space-1;
+                                    }
+
+                                    ToggleChip {
+                                        text: "1:1";
+                                        label: "Actual pixels";
+                                        description: "Shows the frame's own pixels, one to one, from the centre. Scroll on the picture to move.";
+                                        checked: root.stage-native-on;
+                                        enabled: root.stage-can-native;
+                                        y: (parent.height - self.height) / 2;
+                                        toggled => {
+                                            root.stage-toggle-native();
                                         }
                                     }
                                 }
+
+                                if root.stage-transport && root.stage-play-note != "": Caption {
+                                    text: root.stage-play-note;
+                                }
                             }
-                        }
 
-                        if root.view-mode == ViewMode.list: VerticalLayout {
-                            spacing: Tokens.space-2;
-
-                            Rectangle {
+                            // Source zone: an intentional empty state or the file card.
+                            if !root.has-source: Rectangle {
+                                height: 176px;
                                 border-radius: Tokens.radius-medium + 2px;
                                 background: Tokens.track;
                                 border-width: 1px;
-                                border-color: Tokens.border;
-                                clip: true;
+                                border-color: zone.has-hover && root.can-add ? Tokens.accent : Tokens.border-strong;
+                                animate border-color { duration: Tokens.motion-short; }
+
+                                zone := TouchArea {
+                                    enabled: root.can-add;
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.open-requested();
+                                    }
+                                }
 
                                 VerticalLayout {
+                                    alignment: center;
+                                    spacing: Tokens.space-2;
+                                    padding: Tokens.space-6;
+
+                                    Text {
+                                        text: "Open a video to begin";
+                                        color: Tokens.text;
+                                        font-size: Tokens.type-title * 1rem;
+                                        font-weight: Tokens.weight-semibold;
+                                        horizontal-alignment: center;
+                                    }
+
+                                    Caption {
+                                        text: root.empty-caption;
+                                        horizontal-alignment: center;
+                                    }
+
                                     HorizontalLayout {
-                                        padding-left: Tokens.space-3;
-                                        padding-right: Tokens.space-2;
-                                        padding-top: Tokens.space-1;
-                                        padding-bottom: Tokens.space-1;
-                                        spacing: Tokens.space-3;
+                                        alignment: center;
+                                        padding-top: Tokens.space-2;
 
-                                        Text {
-                                            horizontal-stretch: 1;
-                                            text: root.list-title;
-                                            color: Tokens.text-secondary;
-                                            font-size: Tokens.type-caption * 1rem;
-                                            font-weight: Tokens.weight-semibold;
-                                            vertical-alignment: center;
-                                            accessible-role: none;
-                                        }
-
-                                        LinkButton {
-                                            text: "Add…";
+                                        open-button := Button {
+                                            text: "Open…";
                                             enabled: root.can-add;
-                                            description: "Add videos to the list (" + root.open-keys.to-string() + ")";
+                                            accessible-description: "Choose a video file (" + root.open-keys.to-string() + ")";
                                             clicked => {
                                                 root.open-requested();
                                             }
                                         }
                                     }
-
-                                    Rectangle {
-                                        height: 1px;
-                                        background: Tokens.border;
-                                    }
-
-                                    FileList {
-                                        rows: root.rows;
-                                        thumbs: root.row-thumbs;
-                                        // The picture above takes the room of two rows.
-                                        visible-rows: 3;
-                                        selected: root.selected-row;
-                                        actions-enabled: !root.sheet-open;
-                                        row-selected(i) => {
-                                            root.row-selected(i);
-                                        }
-                                        row-action(i) => {
-                                            root.row-action(i);
-                                        }
-                                        remove-requested(i) => {
-                                            root.remove-requested(i);
-                                        }
-                                    }
                                 }
                             }
 
-                            if root.omission-summary != "" && root.source-view != SourceView.unreadable: Caption {
-                                text: root.omission-summary;
-                                color: Tokens.text;
-                            }
-                        }
-
-                        if root.view-mode == ViewMode.single: VerticalLayout {
+                            if root.view-mode == ViewMode.list: VerticalLayout {
                                 spacing: Tokens.space-2;
 
-                            // The file under its picture: name, facts, Change….
-                            VerticalLayout {
-                                VerticalLayout {
-                                    spacing: Tokens.space-1;
+                                Rectangle {
+                                    border-radius: Tokens.radius-medium + 2px;
+                                    background: Tokens.track;
+                                    border-width: 1px;
+                                    border-color: Tokens.border;
+                                    clip: true;
 
-                                    HorizontalLayout {
-                                        spacing: Tokens.space-3;
-
+                                    VerticalLayout {
                                         HorizontalLayout {
-                                            horizontal-stretch: 1;
-                                            spacing: Tokens.space-2;
-                                            accessible-role: text;
-                                            accessible-label: "Source: " + root.source-name + (root.source-line != "" ? ", " + root.source-line : "") + ". Full path: " + root.source-path;
+                                            padding-left: Tokens.space-3;
+                                            padding-right: Tokens.space-2;
+                                            padding-top: Tokens.space-1;
+                                            padding-bottom: Tokens.space-1;
+                                            spacing: Tokens.space-3;
 
                                             Text {
                                                 horizontal-stretch: 1;
-                                                max-width: self.preferred-width;
-                                                min-width: 48px;
-                                                text: root.source-name;
-                                                color: Tokens.text;
-                                                font-size: Tokens.type-body * 1rem;
+                                                text: root.list-title;
+                                                color: Tokens.text-secondary;
+                                                font-size: Tokens.type-caption * 1rem;
                                                 font-weight: Tokens.weight-semibold;
                                                 vertical-alignment: center;
-                                                overflow: elide;
                                                 accessible-role: none;
                                             }
 
-                                            Text {
-                                                horizontal-stretch: 0;
-                                                min-width: self.preferred-width;
-                                                text: root.source-line != "" ? "•  " + root.source-line : "";
-                                                color: Tokens.text-secondary;
-                                                font-size: Tokens.type-body * 1rem;
-                                                vertical-alignment: center;
-                                                accessible-role: none;
-                                            }
-
-                                            Rectangle {
-                                                horizontal-stretch: 1;
-                                            }
-                                        }
-
-                                        LinkButton {
-                                            text: root.card-replaces ? "Change…" : "Add…";
-                                            enabled: root.can-add;
-                                            description: root.card-replaces ? "Choose another video" : "Add videos to convert after this one (" + root.open-keys.to-string() + ")";
-                                            clicked => {
-                                                if root.card-replaces {
-                                                    root.change-requested();
-                                                } else {
+                                            LinkButton {
+                                                text: "Add…";
+                                                enabled: root.can-add;
+                                                description: "Add videos to the list (" + root.open-keys.to-string() + ")";
+                                                clicked => {
                                                     root.open-requested();
                                                 }
                                             }
                                         }
-                                    }
 
-                                    if root.source-view == SourceView.probing: Caption {
-                                        text: "Reading the file header…";
-                                    }
+                                        Rectangle {
+                                            height: 1px;
+                                            background: Tokens.border;
+                                        }
 
-                                    if root.source-view == SourceView.unreadable: Text {
-                                        text: root.source-problem;
-                                        color: Tones.color(root.source-problem-tone);
-                                        font-size: Tokens.type-caption * 1rem;
-                                        wrap: word-wrap;
-                                        accessible-label: "Cannot be converted: " + root.source-problem;
-                                    }
-                                }
-                            }
-
-                            // Always visible, in words: what a video-only output leaves out.
-                            if root.omission-summary != "" && root.source-view != SourceView.unreadable: Caption {
-                                text: root.omission-summary;
-                                color: Tokens.text;
-                            }
-                        }
-
-                        if root.settings-note != "": Caption {
-                            text: root.settings-note;
-                        }
-
-                        // Quality and Priority, labels beside their controls as in
-                        // a native form, so the card stays short under the picture.
-                        // A converted single file has no use for them until
-                        // another is chosen; Convert Another brings them back.
-                        if root.show-settings: HorizontalLayout {
-                            spacing: Tokens.space-3;
-
-                            Label {
-                                width: root.form-label-width;
-                                height: Tokens.control-height + 4px;
-                                text: "Quality";
-                                vertical-alignment: center;
-                                accessible-role: none;
-                            }
-
-                            VerticalLayout {
-                                spacing: Tokens.space-1;
-
-                                Segmented {
-                                    options: root.quality-labels;
-                                    selected: root.quality-index;
-                                    enabled: !root.locked;
-                                    label: root.quality-index < 0 ? "Quality: custom, rate factor " + root.crf : "Quality";
-                                    chosen(i) => {
-                                        root.quality-selected(i);
+                                        FileList {
+                                            rows: root.rows;
+                                            thumbs: root.row-thumbs;
+                                            // The picture above takes the room of two rows.
+                                            visible-rows: 3;
+                                            selected: root.selected-row;
+                                            actions-enabled: !root.sheet-open;
+                                            row-selected(i) => {
+                                                root.row-selected(i);
+                                            }
+                                            row-action(i) => {
+                                                root.row-action(i);
+                                            }
+                                            remove-requested(i) => {
+                                                root.remove-requested(i);
+                                            }
+                                        }
                                     }
                                 }
 
-                                if root.quality-index < 0: Caption {
-                                    text: "Custom · rate factor " + root.crf + " (set in Advanced)";
-                                    wrap: no-wrap;
-                                }
-
-                                if root.quality-index >= 0: HorizontalLayout {
-                                    Caption {
-                                        text: "Smaller file";
-                                        horizontal-stretch: 1;
-                                        wrap: no-wrap;
-                                    }
-
-                                    Caption {
-                                        text: "Closer to the source";
-                                        horizontal-alignment: right;
-                                        wrap: no-wrap;
-                                    }
+                                if root.omission-summary != "" && root.source-view != SourceView.unreadable: Caption {
+                                    text: root.omission-summary;
+                                    color: Tokens.text;
                                 }
                             }
-                        }
 
-                        if root.show-settings: HorizontalLayout {
-                            spacing: Tokens.space-3;
+                            if root.view-mode == ViewMode.single: VerticalLayout {
+                                    spacing: Tokens.space-2;
 
-                            Label {
-                                width: root.form-label-width;
-                                height: Tokens.control-height + 4px;
-                                text: "Priority";
-                                vertical-alignment: center;
-                                accessible-role: none;
-                            }
-
-                            VerticalLayout {
-                                spacing: Tokens.space-1;
-
-                                Segmented {
-                                    options: root.priority-labels;
-                                    selected: root.priority-index;
-                                    enabled: !root.locked;
-                                    label: root.priority-index < 0 ? "Priority: custom, speed preset " + root.preset : "Priority";
-                                    accessible-description: root.priority-caption;
-                                    chosen(i) => {
-                                        root.priority-selected(i);
-                                    }
-                                }
-
-                                Caption {
-                                    text: root.priority-index < 0 ? "Custom · speed preset " + root.preset + ". " + root.priority-caption : root.priority-caption;
-                                }
-                            }
-                        }
-
-                        // Action area: Convert, then progress, then the result.
-                        VerticalLayout {
-                            spacing: Tokens.space-2;
-
-                            if root.job-view == JobView.cancelled || root.job-view == JobView.failed || root.job-view == JobView.lost || root.job-view == JobView.interrupted: Rectangle {
-                                border-radius: Tokens.radius-medium;
-                                background: Tokens.track;
-                                border-width: 1px;
-                                border-color: root.job-view == JobView.cancelled ? Tokens.border : root.job-view == JobView.interrupted ? Tokens.warning : Tokens.error;
-
+                                // The file under its picture: name, facts, Change….
                                 VerticalLayout {
-                                    padding: Tokens.space-3;
-                                    spacing: Tokens.space-1;
+                                    VerticalLayout {
+                                        spacing: Tokens.space-1;
 
-                                    HorizontalLayout {
-                                        spacing: Tokens.space-2;
+                                        HorizontalLayout {
+                                            spacing: Tokens.space-3;
 
-                                        StatusDot {
-                                            tone: root.job-tone;
-                                            y: (parent.height - self.height) / 2;
+                                            HorizontalLayout {
+                                                horizontal-stretch: 1;
+                                                spacing: Tokens.space-2;
+                                                accessible-role: text;
+                                                accessible-label: "Source: " + root.source-name + (root.source-line != "" ? ", " + root.source-line : "") + ". Full path: " + root.source-path;
+
+                                                Text {
+                                                    horizontal-stretch: 1;
+                                                    max-width: self.preferred-width;
+                                                    min-width: 48px;
+                                                    text: root.source-name;
+                                                    color: Tokens.text;
+                                                    font-size: Tokens.type-body * 1rem;
+                                                    font-weight: Tokens.weight-semibold;
+                                                    vertical-alignment: center;
+                                                    overflow: elide;
+                                                    accessible-role: none;
+                                                }
+
+                                                Text {
+                                                    horizontal-stretch: 0;
+                                                    min-width: self.preferred-width;
+                                                    text: root.source-line != "" ? "•  " + root.source-line : "";
+                                                    color: Tokens.text-secondary;
+                                                    font-size: Tokens.type-body * 1rem;
+                                                    vertical-alignment: center;
+                                                    accessible-role: none;
+                                                }
+
+                                                Rectangle {
+                                                    horizontal-stretch: 1;
+                                                }
+                                            }
+
+                                            LinkButton {
+                                                text: root.card-replaces ? "Change…" : "Add…";
+                                                enabled: root.can-add;
+                                                description: root.card-replaces ? "Choose another video" : "Add videos to convert after this one (" + root.open-keys.to-string() + ")";
+                                                clicked => {
+                                                    if root.card-replaces {
+                                                        root.change-requested();
+                                                    } else {
+                                                        root.open-requested();
+                                                    }
+                                                }
+                                            }
                                         }
 
-                                        Text {
-                                            horizontal-stretch: 1;
-                                            text: root.job-headline;
-                                            color: Tokens.text;
-                                            font-size: Tokens.type-body * 1rem;
-                                            font-weight: Tokens.weight-semibold;
-                                            overflow: elide;
-                                            accessible-live-region: polite;
-                                        }
-                                    }
-
-                                    Text {
-                                        text: root.job-detail;
-                                        color: Tokens.text;
-                                        font-size: Tokens.type-caption * 1rem;
-                                        wrap: word-wrap;
-                                    }
-                                }
-                            }
-
-                            if !root.job-active && root.job-view != JobView.completed: VerticalLayout {
-                                spacing: Tokens.space-2;
-
-                                if root.summary-text != "": HorizontalLayout {
-                                    spacing: Tokens.space-3;
-
-                                    Text {
-                                        horizontal-stretch: 1;
-                                        text: root.summary-text;
-                                        color: Tokens.text;
-                                        font-size: Tokens.type-body * 1rem;
-                                        font-weight: Tokens.weight-semibold;
-                                        vertical-alignment: center;
-                                        overflow: elide;
-                                        accessible-live-region: polite;
-                                    }
-
-                                    if root.can-clear-finished: LinkButton {
-                                        text: "Clear Finished";
-                                        enabled: !root.sheet-open;
-                                        description: "Remove the converted files from the list. The files themselves stay.";
-                                        clicked => {
-                                            root.clear-finished();
-                                        }
-                                    }
-                                }
-
-                                if root.destination-line != "": Caption {
-                                    text: root.destination-line;
-                                    wrap: no-wrap;
-                                    overflow: elide;
-                                }
-
-                                if root.show-primary: PrimaryButton {
-                                    text: root.primary-text;
-                                    enabled: root.can-encode;
-                                    description: root.encode-status;
-                                    clicked => {
-                                        root.encode-requested();
-                                    }
-                                }
-
-                                if !root.can-encode && root.encode-status != "": Caption {
-                                    text: root.encode-status;
-                                    color: root.encode-status-tone == Tone.neutral ? Tokens.text-secondary : Tones.color(root.encode-status-tone);
-                                    font-weight: root.encode-status-tone == Tone.error ? Tokens.weight-semibold : Tokens.weight-regular;
-                                    horizontal-alignment: center;
-                                    accessible-live-region: polite;
-                                }
-                            }
-
-                            if root.job-active: VerticalLayout {
-                                spacing: Tokens.space-2;
-
-                                HorizontalLayout {
-                                    spacing: Tokens.space-3;
-
-                                    Text {
-                                        horizontal-stretch: 1;
-                                        text: root.job-headline;
-                                        color: Tokens.text;
-                                        font-size: Tokens.type-body * 1rem;
-                                        font-weight: Tokens.weight-semibold;
-                                        overflow: elide;
-                                        accessible-live-region: polite;
-                                    }
-
-                                    if root.run-position != "": Text {
-                                        text: root.run-position;
-                                        color: Tokens.text-secondary;
-                                        font-size: Tokens.type-body * 1rem;
-                                        accessible-label: "File " + root.run-position;
-                                    }
-
-                                    Text {
-                                        text: root.elapsed-text;
-                                        color: Tokens.text-secondary;
-                                        font-size: Tokens.type-body * 1rem;
-                                        accessible-label: "Elapsed " + root.elapsed-text;
-                                    }
-                                }
-
-                                Bar {
-                                    known: root.progress-known;
-                                    fraction: root.progress-fraction;
-                                    value-text: root.progress-text;
-                                }
-
-                                Caption {
-                                    text: root.progress-line;
-                                    wrap: no-wrap;
-                                    overflow: elide;
-                                }
-
-                                HorizontalLayout {
-                                    spacing: Tokens.space-3;
-                                    padding-top: Tokens.space-1;
-
-                                    Caption {
-                                        horizontal-stretch: 1;
-                                        text: root.job-detail;
-                                        vertical-alignment: center;
-                                    }
-
-                                    Button {
-                                        text: root.job-view == JobView.cancelling ? "Cancelling…" : "Cancel";
-                                        enabled: root.job-view == JobView.running;
-                                        accessible-description: "Stop converting. Nothing is published.";
-                                        clicked => {
-                                            root.cancel-requested();
-                                        }
-                                    }
-                                }
-                            }
-
-                            if root.job-view == JobView.completed: VerticalLayout {
-                                spacing: Tokens.space-3;
-
-                                VerticalLayout {
-                                    spacing: Tokens.space-1;
-
-                                    HorizontalLayout {
-                                        spacing: Tokens.space-2;
-
-                                        StatusDot {
-                                            tone: root.job-tone;
-                                            y: (parent.height - self.height) / 2;
+                                        if root.source-view == SourceView.probing: Caption {
+                                            text: "Reading the file header…";
                                         }
 
-                                        Text {
-                                            horizontal-stretch: 1;
-                                            text: root.job-headline;
-                                            color: Tokens.text;
-                                            font-size: Tokens.type-body * 1rem;
-                                            font-weight: Tokens.weight-semibold;
-                                            overflow: elide;
-                                            accessible-live-region: polite;
-                                        }
-                                    }
-
-                                    Caption {
-                                        text: root.job-detail;
-                                    }
-                                }
-
-                                VerticalLayout {
-                                    spacing: Tokens.space-1;
-
-                                    for check in root.job-checks: HorizontalLayout {
-                                        spacing: Tokens.space-2;
-                                        accessible-role: text;
-                                        accessible-label: check.name + ": " + check.outcome + (check.detail != "" ? ". " + check.detail : "");
-
-                                        Text {
-                                            width: 56px;
-                                            text: check.outcome;
-                                            color: Tones.color(check.tone);
-                                            font-size: Tokens.type-caption * 1rem;
-                                            font-weight: Tokens.weight-bold;
-                                            accessible-role: none;
-                                        }
-
-                                        Text {
-                                            horizontal-stretch: 1;
-                                            text: check.name + (check.detail != "" ? " — " + check.detail : "");
-                                            color: Tokens.text-secondary;
+                                        if root.source-view == SourceView.unreadable: Text {
+                                            text: root.source-problem;
+                                            color: Tones.color(root.source-problem-tone);
                                             font-size: Tokens.type-caption * 1rem;
                                             wrap: word-wrap;
-                                            accessible-role: none;
+                                            accessible-label: "Cannot be converted: " + root.source-problem;
                                         }
                                     }
                                 }
 
-                                HorizontalLayout {
-                                    spacing: Tokens.space-3;
-
-                                    PrimaryButton {
-                                        text: "Show in Folder";
-                                        description: "Show the converted file in the file manager";
-                                        clicked => {
-                                            root.reveal-requested();
-                                        }
-                                    }
-
-                                    Button {
-                                        text: "Convert Another";
-                                        accessible-description: "Clear this result and choose another video";
-                                        clicked => {
-                                            root.reset-requested();
-                                        }
-                                    }
-                                }
-
-                                if root.reveal-error != "": Text {
-                                    text: root.reveal-error;
-                                    color: Tokens.error;
-                                    font-size: Tokens.type-caption * 1rem;
-                                    wrap: word-wrap;
-                                    accessible-live-region: polite;
+                                // Always visible, in words: what a video-only output leaves out.
+                                if root.omission-summary != "" && root.source-view != SourceView.unreadable: Caption {
+                                    text: root.omission-summary;
+                                    color: Tokens.text;
                                 }
                             }
-                        }
 
-                        HorizontalLayout {
-                            alignment: start;
-
-                            LinkButton {
-                                text: root.advanced-open ? "Hide Advanced  ‹" : "Advanced  ›";
-                                description: "Output format, raw rate factor and speed preset, destination, source details";
-                                accessible-expandable: true;
-                                accessible-expanded: root.advanced-open;
-                                clicked => {
-                                    root.advanced-open = !root.advanced-open;
-                                }
-                            }
-                        }
-                    }
-
-                    // Advanced column: opens to the right of the simple one.
-                    if root.advanced-open: HorizontalLayout {
-                            spacing: root.card-padding;
-                            padding-left: root.card-padding;
-
-                            Rectangle {
-                                width: 1px;
-                                background: Tokens.border;
+                            if root.settings-note != "": Caption {
+                                text: root.settings-note;
                             }
 
-                            VerticalLayout {
-                                width: root.advanced-width;
+                            // Quality and Priority, labels beside their controls as in
+                            // a native form, so the card stays short under the picture.
+                            // A converted single file has no use for them until
+                            // another is chosen; Convert Another brings them back.
+                            if root.show-settings: HorizontalLayout {
                                 spacing: Tokens.space-3;
-                                alignment: start;
-                                accessible-role: groupbox;
-                                accessible-label: "Advanced";
+
+                                Label {
+                                    width: root.form-label-width;
+                                    height: Tokens.control-height + 4px;
+                                    text: "Quality";
+                                    vertical-alignment: center;
+                                    accessible-role: none;
+                                }
 
                                 VerticalLayout {
                                     spacing: Tokens.space-1;
 
-                                    Label {
-                                        text: "Output format";
+                                    Segmented {
+                                        options: root.quality-labels;
+                                        selected: root.quality-index;
+                                        enabled: !root.locked;
+                                        label: root.quality-index < 0 ? "Quality: custom, rate factor " + root.crf : "Quality";
+                                        chosen(i) => {
+                                            root.quality-selected(i);
+                                        }
                                     }
 
-                                    ComboBox {
-                                        model: root.output-labels;
-                                        current-index <=> root.output-index;
-                                        enabled: !root.locked && root.advanced-open;
-                                        accessible-label: "Output format";
-                                        selected => {
-                                            root.output-selected(self.current-index);
+                                    if root.quality-index < 0: Caption {
+                                        text: "Custom · rate factor " + root.crf + " (set in Advanced)";
+                                        wrap: no-wrap;
+                                    }
+
+                                    if root.quality-index >= 0: HorizontalLayout {
+                                        Caption {
+                                            text: "Smaller file";
+                                            horizontal-stretch: 1;
+                                            wrap: no-wrap;
+                                        }
+
+                                        Caption {
+                                            text: "Closer to the source";
+                                            horizontal-alignment: right;
+                                            wrap: no-wrap;
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.show-settings: HorizontalLayout {
+                                spacing: Tokens.space-3;
+
+                                Label {
+                                    width: root.form-label-width;
+                                    height: Tokens.control-height + 4px;
+                                    text: "Priority";
+                                    vertical-alignment: center;
+                                    accessible-role: none;
+                                }
+
+                                VerticalLayout {
+                                    spacing: Tokens.space-1;
+
+                                    Segmented {
+                                        options: root.priority-labels;
+                                        selected: root.priority-index;
+                                        enabled: !root.locked;
+                                        label: root.priority-index < 0 ? "Priority: custom, speed preset " + root.preset : "Priority";
+                                        accessible-description: root.priority-caption;
+                                        chosen(i) => {
+                                            root.priority-selected(i);
                                         }
                                     }
 
                                     Caption {
-                                        text: "Video only; audio and subtitles are not written.";
+                                        text: root.priority-index < 0 ? "Custom · speed preset " + root.preset + ". " + root.priority-caption : root.priority-caption;
                                     }
                                 }
+                            }
 
-                                HorizontalLayout {
-                                    spacing: Tokens.space-4;
+                            // Action area: Convert, then progress, then the result.
+                            VerticalLayout {
+                                spacing: Tokens.space-2;
+
+                                if root.job-view == JobView.cancelled || root.job-view == JobView.failed || root.job-view == JobView.lost || root.job-view == JobView.interrupted: Rectangle {
+                                    border-radius: Tokens.radius-medium;
+                                    background: Tokens.track;
+                                    border-width: 1px;
+                                    border-color: root.job-view == JobView.cancelled ? Tokens.border : root.job-view == JobView.interrupted ? Tokens.warning : Tokens.error;
 
                                     VerticalLayout {
+                                        padding: Tokens.space-3;
                                         spacing: Tokens.space-1;
 
-                                        Label {
-                                            text: "Rate factor";
-                                        }
+                                        HorizontalLayout {
+                                            spacing: Tokens.space-2;
 
-                                        SpinBox {
-                                            minimum: root.crf-min;
-                                            maximum: root.crf-max;
-                                            value <=> root.crf;
-                                            enabled: !root.locked && root.advanced-open;
-                                            accessible-label: "Rate factor";
-                                            accessible-description: root.crf-min + " to " + root.crf-max + ". Higher means fewer bits.";
-                                            edited(value) => {
-                                                root.crf-edited(value);
+                                            StatusDot {
+                                                tone: root.job-tone;
+                                                y: (parent.height - self.height) / 2;
+                                            }
+
+                                            Text {
+                                                horizontal-stretch: 1;
+                                                text: root.job-headline;
+                                                color: Tokens.text;
+                                                font-size: Tokens.type-body * 1rem;
+                                                font-weight: Tokens.weight-semibold;
+                                                overflow: elide;
+                                                accessible-live-region: polite;
                                             }
                                         }
 
-                                        Caption {
-                                            text: root.crf-min + "–" + root.crf-max + ", higher is smaller";
-                                        }
-                                    }
-
-                                    VerticalLayout {
-                                        spacing: Tokens.space-1;
-
-                                        Label {
-                                            text: "Speed preset";
-                                        }
-
-                                        SpinBox {
-                                            minimum: root.preset-min;
-                                            maximum: root.preset-max;
-                                            value <=> root.preset;
-                                            enabled: !root.locked && root.advanced-open;
-                                            accessible-label: "Speed preset";
-                                            accessible-description: root.preset-min + " to " + root.preset-max + ". Higher is faster.";
-                                            edited(value) => {
-                                                root.preset-edited(value);
-                                            }
-                                        }
-
-                                        Caption {
-                                            text: root.preset-min + "–" + root.preset-max + ", higher is faster";
+                                        Text {
+                                            text: root.job-detail;
+                                            color: Tokens.text;
+                                            font-size: Tokens.type-caption * 1rem;
+                                            wrap: word-wrap;
                                         }
                                     }
                                 }
 
-                                VerticalLayout {
-                                    spacing: Tokens.space-1;
+                                if !root.job-active && root.job-view != JobView.completed: VerticalLayout {
+                                    spacing: Tokens.space-2;
+
+                                    if root.summary-text != "": HorizontalLayout {
+                                        spacing: Tokens.space-3;
+
+                                        Text {
+                                            horizontal-stretch: 1;
+                                            text: root.summary-text;
+                                            color: Tokens.text;
+                                            font-size: Tokens.type-body * 1rem;
+                                            font-weight: Tokens.weight-semibold;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                            accessible-live-region: polite;
+                                        }
+
+                                        if root.can-clear-finished: LinkButton {
+                                            text: "Clear Finished";
+                                            enabled: !root.sheet-open;
+                                            description: "Remove the converted files from the list. The files themselves stay.";
+                                            clicked => {
+                                                root.clear-finished();
+                                            }
+                                        }
+                                    }
+
+                                    if root.destination-line != "": Caption {
+                                        text: root.destination-line;
+                                        wrap: no-wrap;
+                                        overflow: elide;
+                                    }
+
+                                    if root.show-primary: PrimaryButton {
+                                        text: root.primary-text;
+                                        enabled: root.can-encode;
+                                        description: root.encode-status;
+                                        clicked => {
+                                            root.encode-requested();
+                                        }
+                                    }
+
+                                    if !root.can-encode && root.encode-status != "": Caption {
+                                        text: root.encode-status;
+                                        color: root.encode-status-tone == Tone.neutral ? Tokens.text-secondary : Tones.color(root.encode-status-tone);
+                                        font-weight: root.encode-status-tone == Tone.error ? Tokens.weight-semibold : Tokens.weight-regular;
+                                        horizontal-alignment: center;
+                                        accessible-live-region: polite;
+                                    }
+                                }
+
+                                if root.job-active: VerticalLayout {
+                                    spacing: Tokens.space-2;
 
                                     HorizontalLayout {
-                                        Label {
-                                            text: "Output file";
+                                        spacing: Tokens.space-3;
+
+                                        Text {
                                             horizontal-stretch: 1;
+                                            text: root.job-headline;
+                                            color: Tokens.text;
+                                            font-size: Tokens.type-body * 1rem;
+                                            font-weight: Tokens.weight-semibold;
+                                            overflow: elide;
+                                            accessible-live-region: polite;
+                                        }
+
+                                        if root.run-position != "": Text {
+                                            text: root.run-position;
+                                            color: Tokens.text-secondary;
+                                            font-size: Tokens.type-body * 1rem;
+                                            accessible-label: "File " + root.run-position;
+                                        }
+
+                                        Text {
+                                            text: root.elapsed-text;
+                                            color: Tokens.text-secondary;
+                                            font-size: Tokens.type-body * 1rem;
+                                            accessible-label: "Elapsed " + root.elapsed-text;
+                                        }
+                                    }
+
+                                    Bar {
+                                        known: root.progress-known;
+                                        fraction: root.progress-fraction;
+                                        value-text: root.progress-text;
+                                    }
+
+                                    Caption {
+                                        text: root.progress-line;
+                                        wrap: no-wrap;
+                                        overflow: elide;
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: Tokens.space-3;
+                                        padding-top: Tokens.space-1;
+
+                                        Caption {
+                                            horizontal-stretch: 1;
+                                            text: root.job-detail;
                                             vertical-alignment: center;
                                         }
 
-                                        LinkButton {
-                                            text: "Choose…";
-                                            enabled: root.has-destination && root.destination-editable && root.advanced-open && !root.sheet-open;
-                                            description: "Choose where to save the converted file";
+                                        Button {
+                                            text: root.job-view == JobView.cancelling ? "Cancelling…" : "Cancel";
+                                            enabled: root.job-view == JobView.running;
+                                            accessible-description: "Stop converting. Nothing is published.";
                                             clicked => {
-                                                root.choose-destination-requested();
+                                                root.cancel-requested();
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if root.job-view == JobView.completed: VerticalLayout {
+                                    spacing: Tokens.space-3;
+
+                                    VerticalLayout {
+                                        spacing: Tokens.space-1;
+
+                                        HorizontalLayout {
+                                            spacing: Tokens.space-2;
+
+                                            StatusDot {
+                                                tone: root.job-tone;
+                                                y: (parent.height - self.height) / 2;
+                                            }
+
+                                            Text {
+                                                horizontal-stretch: 1;
+                                                text: root.job-headline;
+                                                color: Tokens.text;
+                                                font-size: Tokens.type-body * 1rem;
+                                                font-weight: Tokens.weight-semibold;
+                                                overflow: elide;
+                                                accessible-live-region: polite;
+                                            }
+                                        }
+
+                                        Caption {
+                                            text: root.job-detail;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        spacing: Tokens.space-1;
+
+                                        for check in root.job-checks: HorizontalLayout {
+                                            spacing: Tokens.space-2;
+                                            accessible-role: text;
+                                            accessible-label: check.name + ": " + check.outcome + (check.detail != "" ? ". " + check.detail : "");
+
+                                            Text {
+                                                width: 56px;
+                                                text: check.outcome;
+                                                color: Tones.color(check.tone);
+                                                font-size: Tokens.type-caption * 1rem;
+                                                font-weight: Tokens.weight-bold;
+                                                accessible-role: none;
+                                            }
+
+                                            Text {
+                                                horizontal-stretch: 1;
+                                                text: check.name + (check.detail != "" ? " — " + check.detail : "");
+                                                color: Tokens.text-secondary;
+                                                font-size: Tokens.type-caption * 1rem;
+                                                wrap: word-wrap;
+                                                accessible-role: none;
                                             }
                                         }
                                     }
 
-                                    Text {
-                                        text: root.has-destination ? root.destination-path : "Open a video first.";
-                                        color: root.has-destination ? Tokens.text : Tokens.text-secondary;
-                                        font-size: Tokens.type-caption * 1rem;
-                                        wrap: char-wrap;
-                                        accessible-label: root.has-destination ? "Output file: " + root.destination-path : "No output file yet";
-                                    }
-
-                                    if root.destination-warning != "": Text {
-                                        text: root.destination-warning;
-                                        color: Tokens.warning;
-                                        font-size: Tokens.type-caption * 1rem;
-                                        wrap: word-wrap;
-                                    }
-
-                                    Caption {
-                                        text: root.destination-help;
-                                    }
-                                }
-
-                                if root.detail-headline != "": VerticalLayout {
-                                    spacing: Tokens.space-1;
-
-                                    SectionTitle {
-                                        text: "RESULT";
-                                    }
-
                                     HorizontalLayout {
-                                        spacing: Tokens.space-2;
+                                        spacing: Tokens.space-3;
 
-                                        StatusDot {
-                                            tone: root.detail-tone;
-                                            y: (parent.height - self.height) / 2;
+                                        PrimaryButton {
+                                            text: "Show in Folder";
+                                            description: "Show the converted file in the file manager";
+                                            clicked => {
+                                                root.reveal-requested();
+                                            }
                                         }
 
-                                        Text {
-                                            horizontal-stretch: 1;
-                                            text: root.detail-headline;
-                                            color: Tokens.text;
-                                            font-size: Tokens.type-caption * 1rem;
-                                            font-weight: Tokens.weight-semibold;
-                                            wrap: word-wrap;
+                                        Button {
+                                            text: "Convert Another";
+                                            accessible-description: "Clear this result and choose another video";
+                                            clicked => {
+                                                root.reset-requested();
+                                            }
                                         }
                                     }
 
-                                    if root.detail-text != "": Text {
-                                        text: root.detail-text;
-                                        color: Tokens.text;
+                                    if root.reveal-error != "": Text {
+                                        text: root.reveal-error;
+                                        color: Tokens.error;
                                         font-size: Tokens.type-caption * 1rem;
                                         wrap: word-wrap;
-                                    }
-
-                                    for check in root.detail-checks: HorizontalLayout {
-                                        spacing: Tokens.space-2;
-                                        accessible-role: text;
-                                        accessible-label: check.name + ": " + check.outcome + (check.detail != "" ? ". " + check.detail : "");
-
-                                        Text {
-                                            width: 56px;
-                                            text: check.outcome;
-                                            color: Tones.color(check.tone);
-                                            font-size: Tokens.type-caption * 1rem;
-                                            font-weight: Tokens.weight-bold;
-                                            accessible-role: none;
-                                        }
-
-                                        Text {
-                                            horizontal-stretch: 1;
-                                            text: check.name + (check.detail != "" ? " — " + check.detail : "");
-                                            color: Tokens.text-secondary;
-                                            font-size: Tokens.type-caption * 1rem;
-                                            wrap: word-wrap;
-                                            accessible-role: none;
-                                        }
-                                    }
-                                }
-
-                                if root.has-track-picker: VerticalLayout {
-                                    spacing: Tokens.space-1;
-
-                                    Label {
-                                        text: "Video track";
-                                    }
-
-                                    ComboBox {
-                                        model: root.track-labels;
-                                        current-index <=> root.track-index;
-                                        enabled: root.destination-editable && root.advanced-open && root.source-view != SourceView.probing;
-                                        accessible-label: "Video track";
-                                        accessible-description: "The one video track that is converted";
-                                        selected => {
-                                            root.track-selected(self.current-index);
-                                        }
-                                    }
-
-                                    if root.track-note != "": Caption {
-                                        text: root.track-note;
-                                    }
-                                }
-
-                                if root.has-source-facts: VerticalLayout {
-                                    spacing: Tokens.space-1;
-
-                                    SectionTitle {
-                                        text: "SOURCE";
-                                    }
-
-                                    for fact in root.source-facts: FactRow {
-                                        label: fact.label;
-                                        value: fact.value;
-                                    }
-
-                                    for disclosure in root.source-disclosures: Text {
-                                        text: disclosure;
-                                        color: Tokens.text;
-                                        font-size: Tokens.type-caption * 1rem;
-                                        wrap: word-wrap;
-                                    }
-                                }
-
-                                VerticalLayout {
-                                    spacing: Tokens.space-1;
-
-                                    if root.preview-note != "": Caption {
-                                        text: root.preview-note;
-                                    }
-
-                                    Caption {
-                                        text: "Engine: " + root.engine-identity;
-                                    }
-
-                                    Caption {
-                                        text: root.media-tool-line;
+                                        accessible-live-region: polite;
                                     }
                                 }
                             }
+
+                            HorizontalLayout {
+                                alignment: start;
+
+                                LinkButton {
+                                    text: root.advanced-open ? "Hide Advanced  ‹" : "Advanced  ›";
+                                    description: "Output format, raw rate factor and speed preset, destination, source details";
+                                    accessible-expandable: true;
+                                    accessible-expanded: root.advanced-open;
+                                    clicked => {
+                                        root.advanced-open = !root.advanced-open;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Advanced column: opens to the right of the simple one.
+                        if root.advanced-open: HorizontalLayout {
+                                spacing: root.card-padding;
+                                padding-left: root.card-padding;
+
+                                Rectangle {
+                                    width: 1px;
+                                    background: Tokens.border;
+                                }
+
+                                VerticalLayout {
+                                    width: root.advanced-width;
+                                    spacing: Tokens.space-3;
+                                    alignment: start;
+                                    accessible-role: groupbox;
+                                    accessible-label: "Advanced";
+
+                                    VerticalLayout {
+                                        spacing: Tokens.space-1;
+
+                                        Label {
+                                            text: "Output format";
+                                        }
+
+                                        ComboBox {
+                                            model: root.output-labels;
+                                            current-index <=> root.output-index;
+                                            enabled: !root.locked && root.advanced-open;
+                                            accessible-label: "Output format";
+                                            selected => {
+                                                root.output-selected(self.current-index);
+                                            }
+                                        }
+
+                                        Caption {
+                                            text: "Video only; audio and subtitles are not written.";
+                                        }
+                                    }
+
+                                    HorizontalLayout {
+                                        spacing: Tokens.space-4;
+
+                                        VerticalLayout {
+                                            spacing: Tokens.space-1;
+
+                                            Label {
+                                                text: "Rate factor";
+                                            }
+
+                                            SpinBox {
+                                                minimum: root.crf-min;
+                                                maximum: root.crf-max;
+                                                value <=> root.crf;
+                                                enabled: !root.locked && root.advanced-open;
+                                                accessible-label: "Rate factor";
+                                                accessible-description: root.crf-min + " to " + root.crf-max + ". Higher means fewer bits.";
+                                                edited(value) => {
+                                                    root.crf-edited(value);
+                                                }
+                                            }
+
+                                            Caption {
+                                                text: root.crf-min + "–" + root.crf-max + ", higher is smaller";
+                                            }
+                                        }
+
+                                        VerticalLayout {
+                                            spacing: Tokens.space-1;
+
+                                            Label {
+                                                text: "Speed preset";
+                                            }
+
+                                            SpinBox {
+                                                minimum: root.preset-min;
+                                                maximum: root.preset-max;
+                                                value <=> root.preset;
+                                                enabled: !root.locked && root.advanced-open;
+                                                accessible-label: "Speed preset";
+                                                accessible-description: root.preset-min + " to " + root.preset-max + ". Higher is faster.";
+                                                edited(value) => {
+                                                    root.preset-edited(value);
+                                                }
+                                            }
+
+                                            Caption {
+                                                text: root.preset-min + "–" + root.preset-max + ", higher is faster";
+                                            }
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        spacing: Tokens.space-1;
+
+                                        HorizontalLayout {
+                                            Label {
+                                                text: "Output file";
+                                                horizontal-stretch: 1;
+                                                vertical-alignment: center;
+                                            }
+
+                                            LinkButton {
+                                                text: "Choose…";
+                                                enabled: root.has-destination && root.destination-editable && root.advanced-open && !root.sheet-open;
+                                                description: "Choose where to save the converted file";
+                                                clicked => {
+                                                    root.choose-destination-requested();
+                                                }
+                                            }
+                                        }
+
+                                        Text {
+                                            text: root.has-destination ? root.destination-path : "Open a video first.";
+                                            color: root.has-destination ? Tokens.text : Tokens.text-secondary;
+                                            font-size: Tokens.type-caption * 1rem;
+                                            wrap: char-wrap;
+                                            accessible-label: root.has-destination ? "Output file: " + root.destination-path : "No output file yet";
+                                        }
+
+                                        if root.destination-warning != "": Text {
+                                            text: root.destination-warning;
+                                            color: Tokens.warning;
+                                            font-size: Tokens.type-caption * 1rem;
+                                            wrap: word-wrap;
+                                        }
+
+                                        Caption {
+                                            text: root.destination-help;
+                                        }
+                                    }
+
+                                    if root.detail-headline != "": VerticalLayout {
+                                        spacing: Tokens.space-1;
+
+                                        SectionTitle {
+                                            text: "RESULT";
+                                        }
+
+                                        HorizontalLayout {
+                                            spacing: Tokens.space-2;
+
+                                            StatusDot {
+                                                tone: root.detail-tone;
+                                                y: (parent.height - self.height) / 2;
+                                            }
+
+                                            Text {
+                                                horizontal-stretch: 1;
+                                                text: root.detail-headline;
+                                                color: Tokens.text;
+                                                font-size: Tokens.type-caption * 1rem;
+                                                font-weight: Tokens.weight-semibold;
+                                                wrap: word-wrap;
+                                            }
+                                        }
+
+                                        if root.detail-text != "": Text {
+                                            text: root.detail-text;
+                                            color: Tokens.text;
+                                            font-size: Tokens.type-caption * 1rem;
+                                            wrap: word-wrap;
+                                        }
+
+                                        for check in root.detail-checks: HorizontalLayout {
+                                            spacing: Tokens.space-2;
+                                            accessible-role: text;
+                                            accessible-label: check.name + ": " + check.outcome + (check.detail != "" ? ". " + check.detail : "");
+
+                                            Text {
+                                                width: 56px;
+                                                text: check.outcome;
+                                                color: Tones.color(check.tone);
+                                                font-size: Tokens.type-caption * 1rem;
+                                                font-weight: Tokens.weight-bold;
+                                                accessible-role: none;
+                                            }
+
+                                            Text {
+                                                horizontal-stretch: 1;
+                                                text: check.name + (check.detail != "" ? " — " + check.detail : "");
+                                                color: Tokens.text-secondary;
+                                                font-size: Tokens.type-caption * 1rem;
+                                                wrap: word-wrap;
+                                                accessible-role: none;
+                                            }
+                                        }
+                                    }
+
+                                    if root.has-track-picker: VerticalLayout {
+                                        spacing: Tokens.space-1;
+
+                                        Label {
+                                            text: "Video track";
+                                        }
+
+                                        ComboBox {
+                                            model: root.track-labels;
+                                            current-index <=> root.track-index;
+                                            enabled: root.destination-editable && root.advanced-open && root.source-view != SourceView.probing;
+                                            accessible-label: "Video track";
+                                            accessible-description: "The one video track that is converted";
+                                            selected => {
+                                                root.track-selected(self.current-index);
+                                            }
+                                        }
+
+                                        if root.track-note != "": Caption {
+                                            text: root.track-note;
+                                        }
+                                    }
+
+                                    if root.has-source-facts: VerticalLayout {
+                                        spacing: Tokens.space-1;
+
+                                        SectionTitle {
+                                            text: "SOURCE";
+                                        }
+
+                                        for fact in root.source-facts: FactRow {
+                                            label: fact.label;
+                                            value: fact.value;
+                                        }
+
+                                        for disclosure in root.source-disclosures: Text {
+                                            text: disclosure;
+                                            color: Tokens.text;
+                                            font-size: Tokens.type-caption * 1rem;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+
+                                    VerticalLayout {
+                                        spacing: Tokens.space-1;
+
+                                        if root.preview-note != "": Caption {
+                                            text: root.preview-note;
+                                        }
+
+                                        Caption {
+                                            text: "Engine: " + root.engine-identity;
+                                        }
+
+                                        Caption {
+                                            text: root.media-tool-line;
+                                        }
+                                    }
+                                }
+                        }
                     }
                 }
         }

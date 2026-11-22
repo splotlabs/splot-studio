@@ -1408,3 +1408,22 @@ fn the_selected_row_falls_back_to_what_can_be_edited() {
     app.apply(Intent::RemoveRequested(0));
     assert_eq!(app.state.selected_index(), Some(0));
 }
+
+// The workspace shell.
+
+#[test]
+fn unavailable_workspaces_are_refused_without_touching_the_queue() {
+    let mut app = App::new();
+    app.add(&["/m/a.y4m", "/m/b.y4m"], ready);
+    convert(&mut app);
+    assert_eq!(app.state.workspace(), Workspace::Encode);
+    let before = app.state.clone();
+    for workspace in [Workspace::Analyze, Workspace::Compare, Workspace::Encode] {
+        let update = app.apply(Intent::WorkspaceRequested(workspace));
+        assert_eq!(update.effects, [], "{workspace:?}");
+        assert_eq!(
+            app.state, before,
+            "{workspace:?} changed the queue, settings or workspace"
+        );
+    }
+}

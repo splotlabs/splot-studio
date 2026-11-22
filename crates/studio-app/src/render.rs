@@ -21,8 +21,9 @@ use crate::simple::{self, Priority, Quality};
 use crate::state::{AppState, Mode, Severity};
 use crate::ui::{
     AppWindow, CheckRow, Fact, JobView, Notice, QueueRow, RowState, SourceView, StageState, Tone,
-    ViewMode,
+    ViewMode, WorkspaceView,
 };
+use crate::workspace::Workspace;
 
 /// How many files the confirmation names before "and N more files".
 const SHEET_FILES: usize = 5;
@@ -31,6 +32,13 @@ const SHEET_FILES: usize = 5;
 ///
 /// Public so renderer snapshots can show a state without running workers.
 pub fn render(window: &AppWindow, state: &AppState, now: Instant) {
+    let workspace = state.workspace();
+    window.set_workspace(match workspace {
+        Workspace::Encode => WorkspaceView::Encode,
+        Workspace::Analyze => WorkspaceView::Analyze,
+        Workspace::Compare => WorkspaceView::Compare,
+    });
+    window.set_workspace_title(workspace.label().into());
     let mode = state.mode();
     window.set_view_mode(match mode {
         Mode::Empty => ViewMode::Empty,
