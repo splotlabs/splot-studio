@@ -124,6 +124,35 @@ pub struct SourceFingerprint {
     pub modified: Option<(i64, u32)>,
 }
 
+impl SourceFingerprint {
+    /// The size and modification time in `metadata`. The app and the engine
+    /// both use this, so their readings of one file compare equal.
+    #[must_use]
+    pub fn of(metadata: &std::fs::Metadata) -> Self {
+        let modified = metadata.modified().ok().map(|time| {
+            match time.duration_since(std::time::UNIX_EPOCH) {
+                Ok(after) => (
+                    i64::try_from(after.as_secs()).unwrap_or(i64::MAX),
+                    after.subsec_nanos(),
+                ),
+                // Before the epoch: whole seconds rounded down, nanoseconds up.
+                Err(before) => {
+                    let before = before.duration();
+                    let secs = i64::try_from(before.as_secs()).unwrap_or(i64::MAX);
+                    match before.subsec_nanos() {
+                        0 => (-secs, 0),
+                        nanos => (-secs - 1, 1_000_000_000 - nanos),
+                    }
+                }
+            }
+        });
+        Self {
+            len: metadata.len(),
+            modified,
+        }
+    }
+}
+
 /// One video stream of a source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoTrack {

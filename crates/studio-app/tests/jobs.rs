@@ -617,9 +617,11 @@ fn inspect_children() -> Option<Vec<u32>> {
 }
 
 /// Quits with documents open in Analyze and starts again, three times:
-/// unchanged files come back with their view; a replaced file waits until
-/// it is read as new; a moved one waits until it is located, and is checked
-/// there. A read under way at a crash is read again from the start.
+/// unchanged files come back with their view; only the shown document is
+/// read, and another one is read when it is shown; a replaced file waits,
+/// without a read, until it is read as new; a moved one waits until it is
+/// located, and is checked there. A read under way at a crash is read
+/// again from the start.
 fn restart(rig: &mut Rig, scratch: &Scratch) {
     let small = scratch.media("small.ivf");
     let large = scratch.media("large.ivf");
@@ -640,16 +642,18 @@ fn restart(rig: &mut Rig, scratch: &Scratch) {
     };
     let chosen = selected(rig.session());
 
-    // Unchanged: Analyze is shown again and each file is read before its
-    // view comes back.
+    // Unchanged: Analyze is shown again and the shown file is read before
+    // its view comes back. The other one waits until it is shown.
     rig.start(scratch);
     assert_eq!(rig.session().state().workspace(), Workspace::Analyze);
-    rig.settle("the documents read again", |s| {
+    assert_eq!(phase(rig.session(), 0), Some(&Phase::Unread));
+    rig.settle("the shown document read again", |s| {
         !reading(s) && selected(s).is_some()
     });
     let analysis = rig.session().analysis();
     assert_eq!(analysis.documents().len(), 2);
     assert_eq!(analysis.shown_index(), 1);
+    assert_eq!(phase(rig.session(), 0), Some(&Phase::Unread));
     assert_eq!(selected(rig.session()), chosen);
     assert!(
         !rig.session()
@@ -664,27 +668,10 @@ fn restart(rig: &mut Rig, scratch: &Scratch) {
     let moved = scratch.media("moved.ivf");
     fs::rename(&small, &moved).unwrap_or_else(|e| unreachable!("{e}"));
     rig.start(scratch);
-    rig.settle("the files checked", |s| !reading(s));
     let session = rig.session();
-    assert!(matches!(phase(session, 0), Some(Phase::Changed(_))));
     assert_eq!(phase(session, 1), Some(&Phase::Missing));
-    // Jobs says nothing about the changed file's new facts either.
-    let read = session
-        .jobs()
-        .into_iter()
-        .find(|j| matches!(j.work, studio_app::jobs::Work::Inspect(0, _)))
-        .map_or_else(String::new, |j| studio_app::present::jobs::line(&j).detail);
-    assert!(
-        read.contains("changed") && !read.contains("elements"),
-        "{read}"
-    );
-    assert!(
-        session
-            .analysis()
-            .documents()
-            .iter()
-            .all(|d| d.summary().is_none())
-    );
+    assert_eq!(phase(session, 0), Some(&Phase::Unread));
+    assert!(!session.inspecting());
     assert_eq!(
         rig.window.global::<studio_app::Analysis>().get_state(),
         AnalysisState::Attention
@@ -697,8 +684,23 @@ fn restart(rig: &mut Rig, scratch: &Scratch) {
         !reading(s) && selected(s).is_some()
     });
     assert_eq!(selected(rig.session()), chosen);
-    // The replaced one is read as new only on request, with no old view.
+    // The replaced one, once shown: its size differs, so it waits as
+    // changed with no read, and Jobs has no read of it.
     rig.input(Input::Show(0));
+    let session = rig.session();
+    assert!(matches!(
+        phase(session, 0),
+        Some(Phase::Changed { read: None, .. })
+    ));
+    assert!(!reading(session));
+    assert!(
+        !session
+            .jobs()
+            .iter()
+            .any(|j| matches!(j.work, studio_app::jobs::Work::Inspect(0, _)))
+    );
+    assert!(session.analysis().documents()[0].summary().is_none());
+    // It is read as new only on request, with no old view.
     rig.input(Input::Resolve);
     rig.settle("read as new", |s| !reading(s));
     assert!(matches!(phase(rig.session(), 0), Some(Phase::Open(_))));

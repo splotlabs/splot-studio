@@ -18,7 +18,7 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use studio_domain::job::{JobSpec, WirePath};
+use studio_domain::job::{JobSpec, SourceFingerprint, WirePath};
 use studio_domain::settings::EncoderSettings;
 
 use crate::analysis::Saved;
@@ -42,7 +42,7 @@ pub enum Kind {
     Other,
 }
 
-/// The two questions recovery asks the file system.
+/// The questions recovery asks the file system.
 pub trait Disk {
     /// What is at `path`.
     fn kind(&self, path: &Path) -> Kind;
@@ -50,6 +50,12 @@ pub trait Disk {
     /// Whether anything is at `path`, a dangling symlink included.
     fn exists(&self, path: &Path) -> bool {
         self.kind(path) != Kind::Missing
+    }
+
+    /// The size and modification time of the file at `path`, following a
+    /// symlink as the engine does; `None` when that cannot be told.
+    fn fingerprint(&self, _path: &Path) -> Option<SourceFingerprint> {
+        None
     }
 }
 
@@ -66,6 +72,13 @@ impl Disk for RealDisk {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Kind::Missing,
             Ok(_) | Err(_) => Kind::Other,
         }
+    }
+
+    fn fingerprint(&self, path: &Path) -> Option<SourceFingerprint> {
+        fs::metadata(path)
+            .ok()
+            .filter(fs::Metadata::is_file)
+            .map(|m| SourceFingerprint::of(&m))
     }
 }
 

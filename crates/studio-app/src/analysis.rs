@@ -35,10 +35,13 @@
 //!   leaves the document, with what the read kept, and keeps its view (the
 //!   selection, filter and byte view) as a [`Restore`] for the next read.
 //! - A restored document ([`Analysis::restored`]) shows nothing about its
-//!   file until it is read again. Its view applies only when the new read
+//!   file until it is read again, and it is read only once it is shown
+//!   ([`Analysis::read_shown`]). Its view applies only when the new read
 //!   is of the same file ([`same_file`]); otherwise the document waits as
-//!   [`Phase::Changed`] until the user reads it as a new file. A path with
-//!   nothing at it is [`Phase::Missing`] until the user locates the file.
+//!   [`Phase::Changed`] until the user reads it as a new file. A size or
+//!   modification time that already differs is a change found without a
+//!   read. A path with nothing at it is [`Phase::Missing`] until the user
+//!   locates the file.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -143,6 +146,7 @@ pub enum Input {
     /// [`Input::Relink`].
     Resolve,
     /// Read the missing document of path `missing` from file `to` instead.
+    /// It is shown, and checked and read by [`Analysis::read_shown`].
     Relink {
         /// Where it was.
         missing: PathBuf,
@@ -293,19 +297,29 @@ impl Analysis {
         )
     }
 
-    /// Reads every restored document that is not read yet; one with
-    /// nothing at its path on `disk` becomes [`Phase::Missing`] instead.
-    pub fn read_unread(&mut self, disk: &dyn Disk) -> Vec<Effect> {
+    /// Reads the shown document when it is not read yet; the others wait
+    /// until they are shown, so none of them delays it. With nothing at its
+    /// path on `disk` it becomes [`Phase::Missing`]. When its size or
+    /// modification time on `disk` already differ from its restored view's,
+    /// it becomes [`Phase::Changed`] without a read.
+    pub fn read_shown(&mut self, disk: &dyn Disk) -> Vec<Effect> {
         let mut out = Vec::new();
-        for at in 0..self.documents.len() {
-            if self.documents[at].phase == Phase::Unread {
-                self.dirty = true;
-                if disk.kind(&self.documents[at].path) == Kind::Missing {
-                    self.documents[at].phase = Phase::Missing;
-                } else {
-                    self.read(at, &mut out);
-                }
-            }
+        let at = self.shown;
+        let Some(doc) = self.documents.get_mut(at) else {
+            return out;
+        };
+        if doc.phase != Phase::Unread {
+            return out;
+        }
+        self.dirty = true;
+        if disk.kind(&doc.path) == Kind::Missing {
+            doc.phase = Phase::Missing;
+        } else if let Some((restore, now)) = doc.restore.zip(disk.fingerprint(&doc.path))
+            && !same_file(restore.fingerprint, now)
+        {
+            doc.phase = Phase::Changed { now, read: None };
+        } else {
+            self.read(at, &mut out);
         }
         out
     }
@@ -453,12 +467,16 @@ impl Analysis {
             Input::Resolve => {
                 let at = self.shown;
                 if let Some(doc) = self.documents.get_mut(at)
-                    && let Phase::Changed(summary) = &doc.phase
+                    && let Phase::Changed { read, .. } = &doc.phase
                 {
-                    doc.phase = Phase::Open(summary.clone());
                     doc.restore = None;
-                    self.fill(at, &mut out);
-                    self.fetch_bytes(at, &mut out);
+                    if let Some(summary) = read.clone() {
+                        doc.phase = Phase::Open(summary);
+                        self.fill(at, &mut out);
+                        self.fetch_bytes(at, &mut out);
+                    } else {
+                        self.read(at, &mut out);
+                    }
                 }
             }
             Input::Relink { missing, to } => {
@@ -472,8 +490,8 @@ impl Analysis {
                         result.output.clone_from(&to);
                     }
                     doc.path = to;
+                    doc.phase = Phase::Unread;
                     self.shown = at;
-                    self.read(at, &mut out);
                 }
             }
             other => {
@@ -750,7 +768,10 @@ impl Analysis {
                     Some(restore) if !same_file(restore.fingerprint, summary.fingerprint) => {
                         // Never trust the path alone: the view waits.
                         doc.restore = Some(restore);
-                        doc.phase = Phase::Changed(Box::new(summary));
+                        doc.phase = Phase::Changed {
+                            now: summary.fingerprint,
+                            read: Some(Box::new(summary)),
+                        };
                     }
                     restore => {
                         doc.phase = Phase::Open(Box::new(summary));

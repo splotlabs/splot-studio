@@ -20,6 +20,19 @@ impl Disk for Everything {
     }
 }
 
+/// A disk where every path is a file with this size and modification time.
+struct Stat(SourceFingerprint);
+
+impl Disk for Stat {
+    fn kind(&self, _: &std::path::Path) -> Kind {
+        Kind::File
+    }
+
+    fn fingerprint(&self, _: &std::path::Path) -> Option<SourceFingerprint> {
+        Some(self.0)
+    }
+}
+
 const PATH: &str = "/media/clip.obu";
 
 /// The Analyze documents a journal restored.
@@ -84,7 +97,7 @@ fn a_restored_document_shows_nothing_until_it_is_read_again_from_the_same_file()
         [saved(Some(restore(200, Some(151), type_7())))]
     );
 
-    let effects = analysis.read_unread(&Everything(Kind::File));
+    let effects = analysis.read_shown(&Everything(Kind::File));
     assert_eq!(opens(&effects), [1]);
     assert!(analysis.needs_engine());
     engine.settle(&mut analysis, effects);
@@ -95,7 +108,7 @@ fn a_restored_document_shows_nothing_until_it_is_read_again_from_the_same_file()
     // OBU 151 is type 7, row 75 of the type-7 rows.
     assert_eq!(selected(&analysis), Some((151, Position::Row(75))));
     // Read once: a second call reads nothing.
-    assert_eq!(analysis.read_unread(&Everything(Kind::File)).len(), 0);
+    assert_eq!(analysis.read_shown(&Everything(Kind::File)).len(), 0);
 }
 
 #[test]
@@ -104,11 +117,11 @@ fn a_changed_file_waits_until_it_is_read_as_new() {
     // Recorded at another length: not the same file.
     let old = restore(120, Some(3), type_7());
     let mut analysis = restored(vec![saved(Some(old))], 0, 0);
-    let effects = analysis.read_unread(&Everything(Kind::File));
+    let effects = analysis.read_shown(&Everything(Kind::File));
     let after_open = engine.answer(&mut analysis, effects);
     // Nothing of the new read is asked for or shown.
     assert!(after_open.is_empty(), "{after_open:?}");
-    assert!(matches!(doc(&analysis).phase(), Phase::Changed(_)));
+    assert!(matches!(doc(&analysis).phase(), Phase::Changed { .. }));
     assert!(doc(&analysis).summary().is_none());
     assert!(doc(&analysis).selected().is_none());
     // The engine holds the read; the journal keeps the old view.
@@ -126,11 +139,71 @@ fn a_changed_file_waits_until_it_is_read_as_new() {
     );
 }
 
+/// A size or modification time that already differs shows the change
+/// without a read of the file; Read as New then reads it.
+#[test]
+fn a_changed_size_or_time_waits_without_a_read() {
+    let engine = Engine { rows: stream(200) };
+    let old = restore(200, Some(3), type_7());
+    let later = SourceFingerprint {
+        modified: Some((1, 0)),
+        ..fingerprint(200)
+    };
+    for now in [fingerprint(120), later] {
+        let mut analysis = restored(vec![saved(Some(old))], 0, 0);
+        assert_eq!(analysis.read_shown(&Stat(now)), []);
+        assert_eq!(*doc(&analysis).phase(), Phase::Changed { now, read: None });
+        assert!(!analysis.needs_engine());
+        assert_eq!(analysis.saved().0, [saved(Some(old))]);
+        // Closing it has no read to close.
+        let mut closed = restored(vec![saved(Some(old))], 0, 0);
+        closed.read_shown(&Stat(now));
+        assert_eq!(closed.input(Input::Close), []);
+
+        let effects = analysis.input(Input::Resolve);
+        assert_eq!(opens(&effects), [1]);
+        engine.settle(&mut analysis, effects);
+        assert!(doc(&analysis).summary().is_some());
+        assert_eq!(doc(&analysis).filter(), RowFilter::default());
+        assert!(doc(&analysis).selected().is_none());
+    }
+    // The same size and time: it is read, and the engine's reading decides.
+    let mut analysis = restored(vec![saved(Some(old))], 0, 0);
+    let effects = analysis.read_shown(&Stat(fingerprint(200)));
+    engine.settle(&mut analysis, effects);
+    assert_eq!(selected(&analysis).map(|s| s.0), Some(3));
+}
+
+/// Only the shown document is read; another one is read when it is shown,
+/// so a long read of a document not shown never delays the shown one.
+#[test]
+fn only_the_shown_document_is_read() {
+    let engine = Engine { rows: stream(20) };
+    let at = |name: &str| Saved {
+        path: PathBuf::from(name),
+        ..saved(Some(restore(20, Some(2), RowFilter::default())))
+    };
+    let mut analysis = restored(vec![at("/a"), at("/b"), at("/c")], 1, 0);
+    let effects = analysis.read_shown(&Everything(Kind::File));
+    assert_eq!(opens(&effects), [1]);
+    let phases: Vec<_> = analysis.documents().iter().map(Document::phase).collect();
+    assert_eq!(phases, [&Phase::Unread, &Phase::Opening, &Phase::Unread]);
+    engine.settle(&mut analysis, effects);
+    assert_eq!(selected(&analysis).map(|s| s.0), Some(2));
+    // Reading again reads nothing.
+    assert_eq!(analysis.read_shown(&Everything(Kind::File)), []);
+    // Shown: read.
+    analysis.input(Input::Show(2));
+    let effects = analysis.read_shown(&Everything(Kind::File));
+    assert_eq!(opens(&effects), [2]);
+    assert_eq!(*analysis.documents()[0].phase(), Phase::Unread);
+}
+
 #[test]
 fn closing_a_changed_document_closes_its_read() {
     let engine = Engine { rows: stream(10) };
     let mut analysis = restored(vec![saved(Some(restore(99, None, type_7())))], 0, 0);
-    let effects = analysis.read_unread(&Everything(Kind::File));
+    let effects = analysis.read_shown(&Everything(Kind::File));
     engine.settle(&mut analysis, effects);
     let effects = analysis.input(Input::Close);
     assert!(matches!(
@@ -160,15 +233,17 @@ fn a_missing_file_waits_for_its_new_place_and_is_checked_there() {
     let engine = Engine { rows: stream(200) };
     let mut analysis = restored(vec![saved(Some(restore(200, Some(8), type_7())))], 0, 0);
     // Nothing at the path: no process is needed and nothing is read.
-    let effects = analysis.read_unread(&Everything(Kind::Missing));
+    let effects = analysis.read_shown(&Everything(Kind::Missing));
     assert_eq!(effects.len(), 0);
     assert_eq!(*doc(&analysis).phase(), Phase::Missing);
     assert!(!analysis.needs_engine());
-    // Opening the same path again does not reuse the missing document.
+    // The file located there is checked as a restored one is.
     let effects = analysis.input(Input::Relink {
         missing: PathBuf::from(PATH),
         to: PathBuf::from("/moved/clip.obu"),
     });
+    assert_eq!(effects.len(), 0);
+    let effects = analysis.read_shown(&Everything(Kind::File));
     assert_eq!(opens(&effects), [1]);
     engine.settle(&mut analysis, effects);
     assert_eq!(
@@ -303,7 +378,7 @@ fn a_restored_view_the_file_does_not_offer_is_not_applied() {
         layer: None,
     };
     let mut analysis = restored(vec![saved(Some(restore(20, Some(20), odd)))], 0, 0);
-    let effects = analysis.read_unread(&Everything(Kind::File));
+    let effects = analysis.read_shown(&Everything(Kind::File));
     let next = engine.answer(&mut analysis, effects);
     // No locate for an element past the end.
     assert!(
@@ -403,7 +478,7 @@ fn jobs_list_each_read_with_its_own_state() {
     );
     assert_eq!(states(&analysis), []);
     analysis.documents[1].phase = Phase::Missing;
-    let first = analysis.read_unread(&Everything(Kind::File));
+    let first = analysis.read_shown(&Everything(Kind::File));
     let second = analysis.input(Input::Open(vec![PathBuf::from("/media/b.obu")]));
     let third = analysis.input(Input::Open(vec![PathBuf::from("/media/c.obu")]));
     assert_eq!(
@@ -465,7 +540,7 @@ fn a_read_that_stops_early_keeps_the_restored_view() {
     let engine = Engine { rows: stream(200) };
     let old = restore(200, Some(151), type_7());
     let mut analysis = restored(vec![saved(Some(old))], 0, 0);
-    let open = analysis.read_unread(&Everything(Kind::File));
+    let open = analysis.read_shown(&Everything(Kind::File));
     // The read is cancelled after 20 OBUs, long before OBU 151.
     let next = analysis.event(
         open[0].request_id,
@@ -484,7 +559,7 @@ fn a_read_that_stops_early_keeps_the_restored_view() {
     assert_eq!(selected(&analysis).map(|s| s.0), Some(151));
     // A choice of the user's own replaces the restored view.
     let mut analysis = restored(vec![saved(Some(old))], 0, 0);
-    let open = analysis.read_unread(&Everything(Kind::File));
+    let open = analysis.read_shown(&Everything(Kind::File));
     let next = analysis.event(
         open[0].request_id,
         Event::AnalysisOpened {
@@ -508,7 +583,7 @@ fn only_a_real_choice_replaces_the_kept_view() {
     let engine = Engine { rows: stream(200) };
     let old = restore(200, Some(151), type_7());
     let mut analysis = restored(vec![saved(Some(old))], 0, 0);
-    let open = analysis.read_unread(&Everything(Kind::File));
+    let open = analysis.read_shown(&Everything(Kind::File));
     let next = analysis.event(
         open[0].request_id,
         Event::AnalysisOpened {

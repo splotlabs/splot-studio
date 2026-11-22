@@ -11,12 +11,11 @@
 //! unstated pixels, limited (or unstated) range, and a frame size within the
 //! byte budget. A source is bound to the [`SourceFingerprint`] the app saw.
 
-use std::fs::{File, Metadata};
+use std::fs::File;
 use std::io::{self, BufRead, BufReader, Chain, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::ChildStdout;
 use std::sync::atomic::AtomicBool;
-use std::time::UNIX_EPOCH;
 
 use splot_encode::y4m::{Y4mColorRange, Y4mError, Y4mHeader, Y4mReader};
 use splot_encode::{ContentDescription, MAX_FRAME_DIMENSION, PixelFormat};
@@ -176,7 +175,7 @@ pub fn open(path: &Path, selection: Selection) -> Result<Source, Stop> {
     }
     let id = FileId::of_file(&file, path)
         .map_err(|e| invalid(format!("cannot identify the source: {e}")))?;
-    let fingerprint = fingerprint(&metadata);
+    let fingerprint = SourceFingerprint::of(&metadata);
     if selection
         .fingerprint
         .is_some_and(|seen| seen != fingerprint)
@@ -542,36 +541,10 @@ pub(crate) fn still_the_same(
 ) -> Result<(), Stop> {
     let now = std::fs::metadata(path).map_err(|_| changed())?;
     let same_file = FileId::of_path(path).is_ok_and(|now| now == *id);
-    if same_file && fingerprint(&now) == seen {
+    if same_file && SourceFingerprint::of(&now) == seen {
         Ok(())
     } else {
         Err(changed())
-    }
-}
-
-/// The file's size and modification time.
-#[must_use]
-pub fn fingerprint(metadata: &Metadata) -> SourceFingerprint {
-    let modified = metadata.modified().ok().map(|time| {
-        match time.duration_since(UNIX_EPOCH) {
-            Ok(after) => (
-                i64::try_from(after.as_secs()).unwrap_or(i64::MAX),
-                after.subsec_nanos(),
-            ),
-            // Before the epoch: whole seconds rounded down, nanoseconds up.
-            Err(before) => {
-                let before = before.duration();
-                let secs = i64::try_from(before.as_secs()).unwrap_or(i64::MAX);
-                match before.subsec_nanos() {
-                    0 => (-secs, 0),
-                    nanos => (-secs - 1, 1_000_000_000 - nanos),
-                }
-            }
-        }
-    });
-    SourceFingerprint {
-        len: metadata.len(),
-        modified,
     }
 }
 
