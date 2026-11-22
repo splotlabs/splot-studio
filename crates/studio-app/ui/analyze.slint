@@ -262,8 +262,10 @@ component Navigator inherits KeyboardFocus {
                 accessible-role: none;
             }
 
+            // As wide as the offset needs (16 hex digits at most), so it is
+            // never cut; the title gives up the room.
             Text {
-                width: 48px;
+                width: max(48px, self.preferred-width);
                 text: row.offset;
                 color: Tokens.text-secondary;
                 font-size: Tokens.type-caption * 1rem;

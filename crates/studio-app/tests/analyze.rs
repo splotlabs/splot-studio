@@ -598,5 +598,57 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
     assert_eq!(rig.selected(), Some((1, Position::Row(1))));
     assert_eq!(rig.global().get_document_index(), 0);
 
+    offsets_are_never_cut(&rig);
+
     eprintln!("Tab stops: navigator after {tabs}, byte view {byte_tabs} later");
+}
+
+/// An offset of 16 hex digits, the most a `u64` has, is drawn whole in the
+/// navigator. The offsets are monospace, so 18 characters ("0x" and 16
+/// digits) are three times as wide as 6 ("0xFFFF"), which always fit.
+fn offsets_are_never_cut(rig: &Rig) {
+    let shown = rig
+        .global()
+        .get_rows()
+        .row_data(0)
+        .unwrap_or_else(|| unreachable!("no row"));
+    let row = |offset: &str| {
+        let mut row = shown.clone();
+        row.depth = 0;
+        row.title = SharedString::new();
+        row.detail = SharedString::new();
+        row.offset = offset.into();
+        row.selected = true;
+        row
+    };
+    let rows = [row("0xFFFF"), row(&format!("0x{:X}", u64::MAX))];
+    rig.global()
+        .set_rows(Rc::new(slint::VecModel::from(rows.to_vec())).into());
+    // Each selected row has the accent bar at its left edge; the rest of
+    // the row is its tint, except the offset's glyphs.
+    let (x0, y0) = rig
+        .find_bar((0x63, 0x42, 0xD6), 20)
+        .unwrap_or_else(|| unreachable!("no selected row"));
+    let width = SIZE.0 as usize;
+    let pixels = rig.pixels();
+    let ink = |top: usize| {
+        let columns: Vec<usize> = (x0 + 3..width)
+            .filter(|&x| {
+                (top..top + 24).any(|y| {
+                    let p = pixels[y * width + x];
+                    (p.r, p.g, p.b) != (0xE9, 0xE4, 0xFB)
+                        && (p.r, p.g, p.b) != (0x63, 0x42, 0xD6)
+                })
+            })
+            // The row ends 10 px before the navigator's edge.
+            .take_while(|&x| x < x0 + 310)
+            .collect();
+        columns.last().map_or(0, |last| last - columns[0])
+    };
+    let (short, long) = (ink(y0), ink(y0 + 24));
+    assert!(short > 0, "the short offset was not drawn");
+    assert!(
+        long * 6 >= short * 15,
+        "cut: {long} px for 18 characters, {short} px for 6"
+    );
 }
