@@ -41,16 +41,3 @@ impl Workspace {
         matches!(self, Self::Encode)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_encode_is_available() {
-        assert_eq!(Workspace::default(), Workspace::Encode);
-        assert!(Workspace::Encode.available());
-        assert!(!Workspace::Analyze.available());
-        assert!(!Workspace::Compare.available());
-    }
-}

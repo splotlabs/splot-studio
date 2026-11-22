@@ -27,10 +27,6 @@ export enum SourceView { none, probing, ready, unreadable }
 // Where the current or last job is. `none` shows the Convert button.
 export enum JobView { none, running, cancelling, completed, cancelled, failed, lost, interrupted }
 
-// Which workspace the shell shows. Only `encode` has a view; Analyze and
-// Compare are not built, and Rust never sets them.
-export enum WorkspaceView { encode, analyze, compare }
-
 // How the queue is shown: the empty state, the one-file card, or a list.
 export enum ViewMode { empty, single, list }
 
@@ -820,9 +816,11 @@ export component AppWindow inherits Window {
     // Identity
     in property <string> app-version;
 
-    // The workspace shell: what is shown, and its name in the toolbar.
-    in property <WorkspaceView> workspace;
-    in property <string> workspace-title: "Encode";
+    // The workspace shell: Rust says which workspace is shown and names it.
+    // Encode is the only workspace with a view. It is shown by default so a
+    // window that Rust has not rendered yet still lays out.
+    in property <bool> encode-shown: true;
+    in property <string> workspace-title;
 
     // Source. Paths are display strings; Rust keeps the real paths.
     in property <SourceView> source-view;
@@ -1133,35 +1131,36 @@ export component AppWindow inherits Window {
                     padding-right: root.card-padding;
                     padding-top: root.card-padding - Tokens.space-1;
                     padding-bottom: root.card-padding - Tokens.space-1;
-                    spacing: Tokens.space-4;
+                    spacing: Tokens.space-2;
 
                     // The shell's toolbar: the workspace shown and the shared Jobs
                     // entry. Jobs is reserved until it lists real work from every
                     // workspace, so it is present but unavailable, and no Tab stop.
+                    // Only text: it takes no control height from the card.
                     HorizontalLayout {
                         spacing: Tokens.space-3;
-                        accessible-role: navigation;
-                        accessible-label: "Workspaces";
 
                         Text {
                             horizontal-stretch: 1;
                             text: root.workspace-title;
-                            color: Tokens.text;
-                            font-size: Tokens.type-body * 1rem;
+                            color: Tokens.text-secondary;
+                            font-size: Tokens.type-caption * 1rem;
                             font-weight: Tokens.weight-semibold;
                             vertical-alignment: center;
                             accessible-label: "Workspace: " + root.workspace-title;
                         }
 
                         LinkButton {
+                            min-height: 0;
                             text: "Jobs";
+                            quiet: true;
                             enabled: false;
                             description: "Not available yet. The files to convert are listed in Encode.";
                         }
                     }
 
-                    // The workspace shown. Only Encode exists; Rust never sets another.
-                    if root.workspace == WorkspaceView.encode: HorizontalLayout {
+                    // The workspace shown: Encode, the only one with a view.
+                    if root.encode-shown: HorizontalLayout {
                         alignment: start;
                         accessible-role: main;
                         accessible-label: root.workspace-title;
