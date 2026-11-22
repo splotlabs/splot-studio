@@ -216,6 +216,7 @@ fn serve<'scope>(
                 ),
             ),
             Command::AnalysisOpen { .. }
+            | Command::AnalysisCancel { .. }
             | Command::AnalysisPage { .. }
             | Command::AnalysisBytes { .. }
             | Command::AnalysisClose { .. } => outbox.reply(
@@ -334,7 +335,7 @@ fn failed(stop: Stop) -> Event {
 }
 
 /// Best-effort `request_id` of a frame that did not decode as a command.
-fn request_id_of(frame: &[u8]) -> u64 {
+pub(crate) fn request_id_of(frame: &[u8]) -> u64 {
     serde_json::from_slice::<serde_json::Value>(frame)
         .ok()
         .and_then(|value| value.get("request_id")?.as_u64())

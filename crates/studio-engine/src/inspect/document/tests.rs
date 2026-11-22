@@ -860,3 +860,176 @@ fn a_changed_or_replaced_source_is_refused() -> Result<(), Box<dyn std::error::E
 fn a_kept_element_takes_at_most_64_bytes() {
     assert!(size_of::<Item>() <= 64, "{}", size_of::<Item>());
 }
+
+/// Serves `bytes` and raises `trip` on read number `trip_at`.
+struct Tripping<'a> {
+    bytes: &'a [u8],
+    at: usize,
+    reads: usize,
+    trip_at: usize,
+    trip: &'a Cell<bool>,
+}
+
+impl Read for Tripping<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.reads += 1;
+        if self.reads == self.trip_at {
+            self.trip.set(true);
+        }
+        let n = buf.len().min(self.bytes.len() - self.at);
+        buf[..n].copy_from_slice(&self.bytes[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
+/// A cancel during the read of one large unit stops inside it: the next
+/// read fails, and the failure is reported as the cancel, not as I/O.
+#[test]
+fn a_cancel_inside_one_large_unit_stops_its_read() {
+    let mut bytes = vec![0x01, 0x08, 0x81, 0x80, 0x40, 0x64];
+    bytes.resize(bytes.len() + (1 << 20), 0);
+    let trip = Cell::new(false);
+    let cancelled = || trip.get();
+    let mut source = Tripping {
+        bytes: &bytes,
+        at: 0,
+        reads: 0,
+        trip_at: 4,
+        trip: &trip,
+    };
+    let checked = Checked {
+        inner: &mut source,
+        cancelled: &cancelled,
+    };
+    let got = scan(checked, bytes.len() as u64, &cancelled);
+    assert!(
+        matches!(
+            got,
+            Err(Refusal {
+                code: AnalysisFailure::Cancelled,
+                ..
+            })
+        ),
+        "{got:?}"
+    );
+    // Stopped inside the padding OBU, long before its end.
+    assert!(source.at < bytes.len() / 2, "{}", source.at);
+}
+
+/// The file changes while the open reads it: the open is refused.
+#[test]
+fn a_source_that_changes_during_the_open_is_refused() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("stream.obu");
+    std::fs::write(&path, annex_b())?;
+    let touched = Cell::new(false);
+    let change = || {
+        if !touched.replace(true) {
+            let appended = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .and_then(|mut file| file.write_all(&[0x01, 0x08]));
+            assert!(appended.is_ok(), "{appended:?}");
+        }
+        false
+    };
+    let got = Document::open(&WirePath::from_path(&path), &change);
+    assert!(touched.get());
+    assert!(
+        matches!(
+            got,
+            Err(Refusal {
+                code: AnalysisFailure::SourceChanged,
+                ..
+            })
+        ),
+        "{got:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn the_ivf_element_limit_counts_the_header() -> Result<(), Refusal> {
+    let records = |n: usize| {
+        let mut bytes = ivf_header(*b"AV02", 32);
+        for pts in 0..n as u64 {
+            bytes.extend(record(pts, &[]));
+        }
+        bytes
+    };
+    let full = records(MAX_RETAINED_ELEMENTS - 1);
+    let scanned = scanned(&full)?;
+    assert_eq!(scanned.outcome, ScanOutcome::Complete);
+    assert_eq!(scanned.items.len(), MAX_RETAINED_ELEMENTS);
+    let over = records(MAX_RETAINED_ELEMENTS);
+    let scanned = self::scanned(&over)?;
+    assert_eq!(scanned.items.len(), MAX_RETAINED_ELEMENTS + 1);
+    assert_eq!(
+        stopped(&scanned),
+        Some((
+            ProblemKind::LimitReached,
+            over.len() as u64 - IVF_FRAME_HEADER_SIZE as u64,
+            IVF_FRAME_HEADER_SIZE as u64
+        ))
+    );
+    Ok(())
+}
+
+/// The messages of regions inside payloads stay within their budget; the
+/// regions beyond it are still reported, with a fixed text.
+#[test]
+fn region_messages_stay_within_their_budget() -> Result<(), Refusal> {
+    let mut bytes = ivf_header(*b"AV02", 32);
+    for pts in 0..2000 {
+        // An OBU that declares 5 bytes and has 1.
+        bytes.extend(record(pts, &[0x05, 0x04]));
+    }
+    let scanned = scanned(&bytes)?;
+    assert!(matches!(scanned.outcome, ScanOutcome::Damaged { .. }));
+    let messages: Vec<&String> = scanned
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Unparsed { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(messages.len(), 2000);
+    let kept: usize = messages.iter().map(|m| m.capacity()).sum();
+    assert!(kept <= MAX_KEPT_MESSAGE_BYTES, "{kept}");
+    assert!(messages[0].contains("IVF record 0"));
+    let last = scanned.items.last().map(Item::element);
+    assert!(
+        matches!(last, Some(Element::Unparsed { ref message, .. }) if message == MESSAGE_NOT_KEPT),
+        "{last:?}"
+    );
+    Ok(())
+}
+
+/// Opening a FIFO would wait for a writer forever; it is refused first.
+#[cfg(unix)]
+#[test]
+fn a_fifo_is_refused_without_waiting() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("pipe.obu");
+    let made = std::process::Command::new("mkfifo").arg(&path).status()?;
+    assert!(made.success());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let source = WirePath::from_path(&path);
+    std::thread::spawn(move || {
+        let _ = tx.send(Document::open(&source, &never).map(drop));
+    });
+    let got = rx.recv_timeout(std::time::Duration::from_secs(10))?;
+    assert!(
+        matches!(
+            got,
+            Err(Refusal {
+                code: AnalysisFailure::Unsupported,
+                ..
+            })
+        ),
+        "{got:?}"
+    );
+    Ok(())
+}

@@ -146,12 +146,8 @@ pub enum Command {
     /// Asks the running job to stop. [`Event::CancelRequested`] acknowledges
     /// the request; only [`Event::Cancelled`] means the job has stopped.
     /// Closing the worker's input has the same effect.
-    ///
-    /// In the inspect process: stops every [`Command::AnalysisOpen`] not yet
-    /// answered. [`Event::CancelRequested`] acknowledges it, and each of
-    /// those opens is then answered by [`Event::AnalysisFailed`] with
-    /// [`AnalysisFailure::Cancelled`]; refused with [`ErrorCode::WrongState`]
-    /// when every open has been answered.
+    /// The inspect process refuses it: [`Command::AnalysisCancel`] names the
+    /// document.
     Cancel,
     /// Preview process only. Asks for one picture. Answered by one
     /// [`Event::Picture`] or [`Event::PictureUnavailable`] with the same
@@ -200,6 +196,16 @@ pub enum Command {
         document: u64,
         /// The file. It is never modified.
         source: WirePath,
+    },
+    /// Inspect process only. Stops the [`Command::AnalysisOpen`] of
+    /// `document` if it is not answered yet; other documents are not
+    /// affected. Answered by [`Event::CancelRequested`], after which that
+    /// open is always answered by [`Event::AnalysisFailed`] with
+    /// [`AnalysisFailure::Cancelled`]; refused with [`ErrorCode::WrongState`]
+    /// when the open was already answered or never sent.
+    AnalysisCancel {
+        /// The document whose open to stop.
+        document: u64,
     },
     /// Inspect process only. Asks for elements `first..first + count` of a
     /// document. Answered by [`Event::AnalysisPage`] or
@@ -286,7 +292,9 @@ pub enum Event {
         /// The counters.
         progress: Progress,
     },
-    /// [`Command::Cancel`] was received. The job is still stopping.
+    /// [`Command::Cancel`] was received. The job is still stopping. Also
+    /// the acceptance of a [`Command::AnalysisCancel`], under its
+    /// `request_id`.
     CancelRequested,
     /// One picture. Its pixels follow this frame on the stream; see
     /// [`PictureHeader`]. Pictures are skippable: the app shows only the

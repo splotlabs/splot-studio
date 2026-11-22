@@ -6,23 +6,25 @@
 //!
 //! Two threads. The caller's thread reads commands and never touches a
 //! file: it answers `Hello`, refuses what this process does not serve,
-//! acknowledges `Cancel`, and queues analysis requests for the work thread
-//! (at most [`REQUEST_BACKLOG`]; a request beyond that is refused, so a
-//! `Cancel` is always read). The work thread serves the requests in order,
+//! decides `AnalysisCancel`, and queues analysis requests for the work
+//! thread (at most [`REQUEST_BACKLOG`]; a request beyond that is refused, so
+//! a cancel is always read). The work thread serves the requests in order,
 //! with at most [`MAX_DOCUMENTS`] documents open. Both write their replies
 //! under one lock, each frame whole. The process ends at the end of its
 //! input, which cancels every open not yet answered.
 //!
-//! An open is cancelled when its document id is at most the cancel mark:
-//! the reader raises it to the newest open it has queued, and the work
-//! thread polls it while reading. Whether an open was still pending, and so
-//! whether it ends as cancelled or open, is decided under one lock, so a
-//! `CancelRequested` is never followed by that open succeeding.
+//! The [`Ledger`] holds the opens that are queued or running and not yet
+//! answered, and which of them are cancelled. A cancel is accepted only for
+//! such an open, and the open's answer is decided from the same ledger under
+//! the same lock: after `CancelRequested`, that open is answered
+//! [`AnalysisFailure::Cancelled`], whatever else happened to it, and a
+//! cancel that comes after the answer is refused. Cancelling one document
+//! never touches another.
 
 pub mod document;
 
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
@@ -35,7 +37,7 @@ use studio_domain::protocol::{
 
 use self::document::{Document, Refusal};
 use crate::job::JOB_STACK_BYTES;
-use crate::worker::SessionError;
+use crate::worker::{SessionError, request_id_of};
 use crate::{build_identity, capabilities};
 
 /// Documents open at once; another open is refused until one is closed.
@@ -57,7 +59,7 @@ pub fn run(input: &mut impl Read, output: impl Write + Send) -> Result<(), Sessi
             error: None,
         }),
         ledger: Mutex::new(Ledger::default()),
-        cancel_upto: AtomicU64::new(0),
+        stopped: AtomicBool::new(false),
     };
     let (requests, queue) = mpsc::sync_channel(REQUEST_BACKLOG);
     let shared = &shared;
@@ -72,7 +74,7 @@ pub fn run(input: &mut impl Read, output: impl Write + Send) -> Result<(), Sessi
                 // Ends the work thread once the queue is empty.
                 drop(requests);
                 // Nobody can cancel later.
-                shared.cancel_upto.store(u64::MAX, Ordering::SeqCst);
+                shared.stopped.store(true, Ordering::SeqCst);
                 // The work body has no panics to report.
                 let _ = work.join();
                 read
@@ -103,8 +105,8 @@ type Queued = (u64, u64, Request);
 struct Shared<W> {
     out: Mutex<Out<W>>,
     ledger: Mutex<Ledger>,
-    /// Opens of documents up to this id are cancelled.
-    cancel_upto: AtomicU64,
+    /// The input ended or the output failed: every open is cancelled.
+    stopped: AtomicBool,
 }
 
 struct Out<W> {
@@ -113,12 +115,57 @@ struct Out<W> {
     error: Option<ProtocolError>,
 }
 
+/// The opens not yet answered.
 #[derive(Debug, Default)]
 struct Ledger {
     /// The newest document id an open was queued for.
-    queued: u64,
-    /// The newest document id an open was answered for.
-    answered: u64,
+    newest: u64,
+    /// Opens queued or running and not yet answered: at most the queue's
+    /// capacity and the one running.
+    pending: Vec<u64>,
+    /// Those of them that were cancelled.
+    cancelled: Vec<u64>,
+}
+
+impl Ledger {
+    /// Records a queued open; `false` unless `document` is newer than every
+    /// earlier one.
+    fn queue(&mut self, document: u64) -> bool {
+        if document <= self.newest {
+            return false;
+        }
+        self.newest = document;
+        self.pending.push(document);
+        true
+    }
+
+    /// Forgets an open that could not be queued after all.
+    fn unqueue(&mut self, document: u64) {
+        self.pending.retain(|d| *d != document);
+    }
+
+    /// Cancels `document`'s open; `false` when it is not pending.
+    fn cancel(&mut self, document: u64) -> bool {
+        if !self.pending.contains(&document) {
+            return false;
+        }
+        if !self.cancelled.contains(&document) {
+            self.cancelled.push(document);
+        }
+        true
+    }
+
+    fn is_cancelled(&self, document: u64) -> bool {
+        self.cancelled.contains(&document)
+    }
+
+    /// Marks `document`'s open answered; `true` when it was cancelled.
+    fn settle(&mut self, document: u64) -> bool {
+        self.pending.retain(|d| *d != document);
+        let cancelled = self.is_cancelled(document);
+        self.cancelled.retain(|d| *d != document);
+        cancelled
+    }
 }
 
 impl<W: Write> Shared<W> {
@@ -138,12 +185,16 @@ impl<W: Write> Shared<W> {
         if let Err(error) = write_message(&mut out.writer, &Envelope::new(request_id, event)) {
             out.error = Some(error);
             // Nobody can hear an open finish any more.
-            self.cancel_upto.store(u64::MAX, Ordering::SeqCst);
+            self.stopped.store(true, Ordering::SeqCst);
         }
     }
 
+    fn stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+
     fn cancelled(&self, document: u64) -> bool {
-        document <= self.cancel_upto.load(Ordering::SeqCst)
+        self.stopped() || self.ledger().is_cancelled(document)
     }
 }
 
@@ -160,14 +211,6 @@ fn refusal(code: ErrorCode, message: impl Into<String>) -> Event {
         code,
         message: message.into(),
     }
-}
-
-/// Best-effort `request_id` of a frame that did not decode as a command.
-fn request_id_of(frame: &[u8]) -> u64 {
-    serde_json::from_slice::<serde_json::Value>(frame)
-        .ok()
-        .and_then(|value| value.get("request_id")?.as_u64())
-        .unwrap_or(0)
 }
 
 fn serve<W: Write>(
@@ -202,21 +245,24 @@ fn serve<W: Write>(
                 );
                 continue;
             }
-            Command::Cancel => {
-                let ledger = shared.ledger();
-                if ledger.answered < ledger.queued {
-                    shared.cancel_upto.store(ledger.queued, Ordering::SeqCst);
-                    shared.send(id, Event::CancelRequested);
+            Command::AnalysisCancel { document } => {
+                let mut ledger = shared.ledger();
+                let reply = if ledger.cancel(document) {
+                    Event::CancelRequested
                 } else {
-                    shared.send(
-                        id,
-                        refusal(ErrorCode::WrongState, "no document is being opened"),
-                    );
-                }
+                    refusal(
+                        ErrorCode::WrongState,
+                        format!("document {document} is not being opened"),
+                    )
+                };
+                // Under the ledger, so the open's answer cannot overtake it.
+                shared.send(id, reply);
+                drop(ledger);
                 continue;
             }
             Command::Probe { .. }
             | Command::Start { .. }
+            | Command::Cancel
             | Command::Picture { .. }
             | Command::Play { .. }
             | Command::StopPlayback => {
@@ -224,18 +270,20 @@ fn serve<W: Write>(
                     id,
                     refusal(
                         ErrorCode::WrongState,
-                        "the inspect process serves only analysis commands",
+                        "the inspect process serves only analysis commands; \
+                         analysis_cancel names the document to cancel",
                     ),
                 );
                 continue;
             }
             Command::AnalysisOpen { document, source } => {
                 let mut ledger = shared.ledger();
-                if document <= ledger.queued {
+                if !ledger.queue(document) {
                     let message = format!(
                         "document ids must increase; {document} is not above {}",
-                        ledger.queued
+                        ledger.newest
                     );
+                    drop(ledger);
                     shared.send(
                         id,
                         failed(
@@ -247,10 +295,9 @@ fn serve<W: Write>(
                 }
                 if requests
                     .try_send((id, document, Request::Open { source }))
-                    .is_ok()
+                    .is_err()
                 {
-                    ledger.queued = document;
-                } else {
+                    ledger.unqueue(document);
                     drop(ledger);
                     busy(shared, id, document);
                 }
@@ -351,30 +398,68 @@ fn open_document<W: Write>(
     document: u64,
     source: &WirePath,
 ) {
-    let opened = if documents.len() >= MAX_DOCUMENTS {
-        Err(Refusal::new(
+    let opened = if shared.cancelled(document) {
+        // Not started: its answer is decided below.
+        None
+    } else if documents.len() >= MAX_DOCUMENTS {
+        Some(Err(Refusal::new(
             AnalysisFailure::LimitReached,
             format!("{MAX_DOCUMENTS} documents are open; close one first"),
-        ))
+        )))
     } else {
-        Document::open(source, &|| shared.cancelled(document))
+        Some(Document::open(source, &|| shared.cancelled(document)))
     };
     let mut ledger = shared.ledger();
-    ledger.answered = document;
+    let cancelled = ledger.settle(document) || shared.stopped();
     let answer = match opened {
-        Ok(_) if shared.cancelled(document) => failed(
+        _ if cancelled => failed(
             document,
             Refusal::new(AnalysisFailure::Cancelled, "the open was cancelled"),
         ),
-        Ok(opened) => {
+        Some(Ok(opened)) => {
             let summary = opened.summary().clone();
             documents.push((document, opened));
             Event::AnalysisOpened { document, summary }
         }
-        Err(refusal) => failed(document, refusal),
+        Some(Err(refusal)) => failed(document, refusal),
+        None => failed(
+            document,
+            Refusal::new(AnalysisFailure::Cancelled, "the open was cancelled"),
+        ),
     };
-    // Sent under the ledger, so a cancel decided after this sees it answered
-    // and one decided before it is honoured above.
+    // Sent under the ledger, so a cancel decided after this one is refused
+    // and one decided before it was honoured above.
     shared.send(id, answer);
     drop(ledger);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Ledger;
+
+    #[test]
+    fn a_cancel_counts_only_while_its_open_is_pending() {
+        let mut ledger = Ledger::default();
+        // Cancelled before it starts, then answered as cancelled.
+        assert!(ledger.queue(1));
+        assert!(ledger.cancel(1));
+        assert!(ledger.settle(1));
+        // After the answer, a cancel is refused.
+        assert!(!ledger.cancel(1));
+        // Answered first: not cancelled, and a later cancel is refused.
+        assert!(ledger.queue(2));
+        assert!(!ledger.settle(2));
+        assert!(!ledger.cancel(2));
+        // Cancelling one pending open leaves the other alone.
+        assert!(ledger.queue(3) && ledger.queue(4));
+        assert!(ledger.cancel(4));
+        assert!(!ledger.settle(3));
+        assert!(ledger.settle(4));
+        // Ids only increase; a refused id is not pending.
+        assert!(!ledger.queue(4) && !ledger.queue(2));
+        assert!(!ledger.cancel(9));
+        assert!(ledger.queue(5));
+        ledger.unqueue(5);
+        assert!(!ledger.cancel(5));
+    }
 }

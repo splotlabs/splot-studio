@@ -51,11 +51,22 @@ use crate::source;
 pub const MAX_UNIT_BYTES: usize = 64 << 20;
 
 /// The most elements kept for one document, besides the final unparsed
-/// region: about 64 bytes each, so 16 MiB.
+/// region: at most 64 bytes each, so 16 MiB, plus at most
+/// [`MAX_KEPT_MESSAGE_BYTES`] of messages for the regions inside IVF
+/// payloads and one message of [`MAX_PROBLEM_MESSAGE`] bytes for the last.
 pub const MAX_RETAINED_ELEMENTS: usize = 1 << 18;
 
 /// The longest problem message kept, in bytes.
-const MAX_PROBLEM_MESSAGE: usize = 512;
+pub const MAX_PROBLEM_MESSAGE: usize = 512;
+
+/// The most message bytes kept for the unparsed regions inside IVF
+/// payloads of one document; later regions say only that the reason was not
+/// kept.
+pub const MAX_KEPT_MESSAGE_BYTES: usize = 64 * 1024;
+
+/// The message of a region whose own message was not kept.
+const MESSAGE_NOT_KEPT: &str =
+    "the OBU does not parse; the reason is not kept, too many regions did not parse";
 
 /// The part of a message that a page's elements may take; the rest is for
 /// the envelope around them.
@@ -105,14 +116,14 @@ impl Document {
             .to_path_buf()
             .map_err(|e| Refusal::new(AnalysisFailure::InvalidRequest, e.to_string()))?;
         let not_a_file = || Refusal::new(AnalysisFailure::Unsupported, "not a regular file");
-        let file = File::open(&path).map_err(|e| {
-            // Windows refuses to open a directory as a file.
-            if std::fs::metadata(&path).is_ok_and(|m| !m.is_file()) {
-                not_a_file()
-            } else {
-                io("cannot open the file", e)
-            }
-        })?;
+        // Before opening: opening a FIFO waits for a writer, and Windows
+        // refuses to open a directory.
+        let named = std::fs::metadata(&path).map_err(|e| io("cannot inspect the file", e))?;
+        if !named.is_file() {
+            return Err(not_a_file());
+        }
+        let file = File::open(&path).map_err(|e| io("cannot open the file", e))?;
+        // The file opened, in case the path changed after the check.
         let metadata = file
             .metadata()
             .map_err(|e| io("cannot inspect the file", e))?;
@@ -332,7 +343,11 @@ impl Item {
             } => Element::Unparsed {
                 span: span(*offset, *len, Provenance::Derived),
                 kind: *kind,
-                message: message.clone(),
+                message: if message.is_empty() {
+                    MESSAGE_NOT_KEPT.to_owned()
+                } else {
+                    message.clone()
+                },
             },
         }
     }
@@ -382,6 +397,8 @@ struct Builder {
     stream: u64,
     /// The first region that did not parse while reading went on.
     damaged: Option<Problem>,
+    /// The heap bytes of the messages kept for those regions.
+    message_bytes: usize,
 }
 
 /// What one unit did to the reading.
@@ -479,7 +496,7 @@ impl Builder {
                 }
                 Ok(None) => return Step::Continue,
                 Err(e) => {
-                    let message = clip(format!(
+                    let mut message = clip(format!(
                         "IVF record {index}: the OBU does not parse: {e}; the rest of its payload is not read"
                     ));
                     self.damaged.get_or_insert_with(|| Problem {
@@ -487,6 +504,13 @@ impl Builder {
                         offset: at,
                         message: message.clone(),
                     });
+                    message.shrink_to_fit();
+                    let kept = self.message_bytes.saturating_add(message.capacity());
+                    if kept > MAX_KEPT_MESSAGE_BYTES {
+                        message = String::new();
+                    } else {
+                        self.message_bytes = kept;
+                    }
                     let region = Item::Unparsed {
                         offset: at,
                         len: start.saturating_add(len).saturating_sub(at),
@@ -684,15 +708,15 @@ fn page(items: &[Item], first: u64, count: u32) -> Result<Vec<Element>, Refusal>
             )
         })?;
     let mut elements = Vec::new();
-    let mut used = 0;
+    let mut used: usize = 0;
     for item in items.iter().skip(start).take(count as usize) {
         let element = item.element();
         // A comma between elements; an unencodable element cannot occur.
         let size = serde_json::to_vec(&element).map_or(usize::MAX, |bytes| bytes.len() + 1);
-        if !elements.is_empty() && used + size > PAGE_BUDGET {
+        if !elements.is_empty() && used.saturating_add(size) > PAGE_BUDGET {
             break;
         }
-        used += size;
+        used = used.saturating_add(size);
         elements.push(element);
     }
     Ok(elements)

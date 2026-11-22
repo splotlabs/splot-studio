@@ -9,8 +9,11 @@
 //! file order, numbered from zero and fetched a page at a time: the IVF file
 //! header, IVF frame records ([`PacketFact`], wrapper packets), OBUs
 //! ([`ObuFact`]) and regions that did not parse ([`Element::Unparsed`]).
-//! Together they cover every byte of the file exactly once. A packet is not
-//! an OBU and not a frame; an OBU names the packet that carries it.
+//! Outside IVF payloads they cover every byte of the file exactly once. A
+//! packet spans its record header and payload; the OBUs and unparsed
+//! regions after it, up to the next packet, cover its payload exactly once,
+//! nested inside it. A packet is not an OBU and not a frame; an OBU names
+//! the record index of the packet that carries it.
 //!
 //! Every [`Span`] says where its numbers came from ([`Provenance`]), and
 //! every layer id whether the file signals it or the specification infers

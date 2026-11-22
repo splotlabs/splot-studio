@@ -290,7 +290,7 @@ fn a_cancel_and_the_open_it_cancels_agree() -> TestResult {
             document: 1,
             source: source.clone(),
         },
-        Command::Cancel,
+        Command::AnalysisCancel { document: 1 },
     ])?;
     let (mut open, mut cancel) = (None, None);
     for _ in 0..2 {
@@ -331,18 +331,21 @@ fn a_cancel_and_the_open_it_cancels_agree() -> TestResult {
     } else {
         assert!(matches!(page, Event::AnalysisPage { .. }), "{page:?}");
     }
-    // Nothing left to cancel.
-    let again = inspect.ask(Command::Cancel)?;
-    assert!(
-        matches!(
-            again,
-            Event::Error {
-                code: ErrorCode::WrongState,
-                ..
-            }
-        ),
-        "{again:?}"
-    );
+    // Nothing left to cancel, and the inspect process refuses the job
+    // cancel, which names no document.
+    for again in [Command::AnalysisCancel { document: 1 }, Command::Cancel] {
+        let again = inspect.ask(again)?;
+        assert!(
+            matches!(
+                again,
+                Event::Error {
+                    code: ErrorCode::WrongState,
+                    ..
+                }
+            ),
+            "{again:?}"
+        );
+    }
     // An id is never reused: stale requests cannot reach a newer document.
     let reused = inspect.ask(Command::AnalysisOpen {
         document: 1,
@@ -443,5 +446,139 @@ fn versions_foreign_commands_and_the_document_limit() -> TestResult {
         source: WirePath::from_path(&empty),
     })?;
     assert_eq!(failure(&refused), Some(AnalysisFailure::Unsupported));
+    Ok(())
+}
+
+/// Cancelling one pending open stops it alone: an open queued before it,
+/// still reading, completes.
+#[test]
+fn cancelling_one_open_leaves_another_alone() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("long.obu");
+    long_stream(&path)?;
+    let mut inspect = Inspect::spawn()?;
+    let source = WirePath::from_path(&path);
+    let ids = inspect.send(vec![
+        Command::AnalysisOpen {
+            document: 1,
+            source: source.clone(),
+        },
+        Command::AnalysisOpen {
+            document: 2,
+            source,
+        },
+        Command::AnalysisCancel { document: 2 },
+    ])?;
+    let mut answers = std::collections::HashMap::new();
+    for _ in 0..3 {
+        let answer = inspect.next()?;
+        answers.insert(answer.request_id, answer.body);
+    }
+    assert!(
+        matches!(answers.get(&ids[0]), Some(Event::AnalysisOpened { document: 1, summary }) if summary.outcome == ScanOutcome::Complete),
+        "{answers:?}"
+    );
+    let consistent = matches!(
+        (answers.get(&ids[2]), answers.get(&ids[1])),
+        (
+            Some(Event::CancelRequested),
+            Some(Event::AnalysisFailed {
+                document: 2,
+                code: AnalysisFailure::Cancelled,
+                ..
+            })
+        ) | (
+            Some(Event::Error {
+                code: ErrorCode::WrongState,
+                ..
+            }),
+            Some(Event::AnalysisOpened { document: 2, .. })
+        )
+    );
+    assert!(consistent, "{answers:?}");
+    Ok(())
+}
+
+/// A request that finds the file changed closes the document.
+#[test]
+fn a_changed_source_closes_its_document() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("td.obu");
+    fs::write(&path, [0x01, 0x08])?;
+    let mut inspect = Inspect::spawn()?;
+    inspect.open(1, &path)?;
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)?
+        .write_all(&[0x01, 0x08])?;
+    let page = || Command::AnalysisPage {
+        document: 1,
+        first: 0,
+        count: 1,
+    };
+    assert_eq!(
+        failure(&inspect.ask(page())?),
+        Some(AnalysisFailure::SourceChanged)
+    );
+    assert_eq!(
+        failure(&inspect.ask(page())?),
+        Some(AnalysisFailure::UnknownDocument)
+    );
+    let summary = inspect.open(2, &path)?;
+    assert_eq!(summary.obus, 2);
+    Ok(())
+}
+
+/// After `CancelRequested`, the open is answered as cancelled even when it
+/// would have failed for another reason (here: too many documents).
+#[test]
+fn a_cancelled_open_is_answered_cancelled_whatever_else_happened() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let small = dir.path().join("td.obu");
+    fs::write(&small, [0x01, 0x08])?;
+    let long = dir.path().join("long.obu");
+    long_stream(&long)?;
+    let mut inspect = Inspect::spawn()?;
+    for document in 1..=3 {
+        inspect.open(document, &small)?;
+    }
+    // The fourth document fills the limit while the fifth waits behind it.
+    let ids = inspect.send(vec![
+        Command::AnalysisOpen {
+            document: 4,
+            source: WirePath::from_path(&long),
+        },
+        Command::AnalysisOpen {
+            document: 5,
+            source: WirePath::from_path(&small),
+        },
+        Command::AnalysisCancel { document: 5 },
+    ])?;
+    let mut answers = std::collections::HashMap::new();
+    for _ in 0..3 {
+        let answer = inspect.next()?;
+        answers.insert(answer.request_id, answer.body);
+    }
+    assert!(
+        matches!(
+            answers.get(&ids[0]),
+            Some(Event::AnalysisOpened { document: 4, .. })
+        ),
+        "{answers:?}"
+    );
+    let consistent = matches!(
+        (answers.get(&ids[2]), answers.get(&ids[1]).and_then(failure)),
+        (
+            Some(Event::CancelRequested),
+            Some(AnalysisFailure::Cancelled)
+        ) | (
+            Some(Event::Error {
+                code: ErrorCode::WrongState,
+                ..
+            }),
+            Some(AnalysisFailure::LimitReached)
+        )
+    );
+    assert!(consistent, "{answers:?}");
     Ok(())
 }
