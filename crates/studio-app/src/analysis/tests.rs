@@ -653,7 +653,7 @@ fn an_encoded_result_keeps_its_identity() {
     engine.settle(&mut analysis, effects);
     assert!(
         doc(&analysis)
-            .notice()
+            .caution()
             .is_some_and(|n| n.contains("360 bytes now") && n.contains("999"))
     );
 }
@@ -853,7 +853,7 @@ fn answers_that_do_not_fit_fail_the_document() {
     let broken = |rows: Vec<Row>, first: u64, total: u64| {
         let (mut analysis, _engine) = opened(200);
         let page = analysis.input(Input::Scroll(100));
-        analysis.event(
+        let effects = analysis.event(
             page[0].request_id,
             Event::AnalysisPage {
                 document: 1,
@@ -862,7 +862,14 @@ fn answers_that_do_not_fit_fail_the_document() {
                 rows,
             },
         );
-        matches!(doc(&analysis).phase(), Phase::Failed { .. })
+        let closed = matches!(
+            commands(&effects)[..],
+            [Command::AnalysisClose { document: 1 }]
+        );
+        let failed = matches!(doc(&analysis).phase(), Phase::Failed { .. });
+        // A broken document gives its engine slot back.
+        assert_eq!(closed, failed, "{effects:?}");
+        failed
     };
     assert!(broken(stream(65), 100, 200), "more rows than asked for");
     assert!(broken(stream(64), 100, 150), "rows past the total");
@@ -882,7 +889,7 @@ fn answers_that_do_not_fit_fail_the_document() {
             _ => None,
         })
         .unwrap_or_default();
-    analysis.event(
+    let effects = analysis.event(
         asked,
         Event::AnalysisBytes {
             document: 1,
@@ -891,6 +898,10 @@ fn answers_that_do_not_fit_fail_the_document() {
         },
     );
     assert!(matches!(doc(&analysis).phase(), Phase::Failed { .. }));
+    assert!(matches!(
+        commands(&effects)[..],
+        [Command::AnalysisClose { document: 1 }]
+    ));
 
     // A document that claims u64::MAX rows: End and Page Down saturate.
     let (mut analysis, _engine) = opened(200);
@@ -982,7 +993,82 @@ fn notices_clear_at_the_next_input_and_cautions_stay() {
     analysis.input(Input::Move(Step::Down));
     assert!(
         doc(&analysis)
-            .notice()
+            .caution()
             .is_some_and(|n| n.contains("conversion wrote 5"))
     );
+    assert_eq!(analysis.notice_line(), doc(&analysis).caution());
+}
+
+/// The workspace's one notice: the document's request problem first, then
+/// a refusal about no single document, then what stays true of the file.
+#[test]
+fn a_caution_never_hides_a_refusal() {
+    let engine = Engine { rows: stream(40) };
+    let mut analysis = Analysis::new();
+    let effects = analysis.input(Input::OpenResult(ResultOf {
+        item: 1,
+        source: PathBuf::from("/media/a.y4m"),
+        output: PathBuf::from("/media/a.obu"),
+        bytes: 5,
+    }));
+    engine.settle(&mut analysis, effects);
+    for i in 0..3 {
+        let effects = analysis.input(Input::Open(vec![PathBuf::from(format!("/media/{i}.obu"))]));
+        engine.settle(&mut analysis, effects);
+    }
+    analysis.input(Input::Show(0));
+    assert!(
+        analysis
+            .notice_line()
+            .is_some_and(|n| n.contains("conversion wrote 5"))
+    );
+    // A fifth document is refused: that is what the workspace says.
+    analysis.input(Input::Open(vec![PathBuf::from("/media/fifth.obu")]));
+    assert!(
+        analysis
+            .notice_line()
+            .is_some_and(|n| n.contains("fifth.obu")),
+        "{:?}",
+        analysis.notice_line()
+    );
+    // A problem of the shown document's last request comes first.
+    let effects = analysis.input(Input::ByteClicked(3));
+    analysis.event(
+        effects[0].request_id,
+        Event::AnalysisFailed {
+            document: 1,
+            code: AnalysisFailure::LimitReached,
+            message: "busy".into(),
+        },
+    );
+    assert!(analysis.notice_line().is_some_and(|n| n.contains("busy")));
+}
+
+/// Pages that fail after a filter change leave no rows and no total; the
+/// next key press asks for them again, and the keys work once they come.
+#[test]
+fn a_key_press_restarts_paging_that_failed() {
+    let (mut analysis, engine) = opened(200);
+    let old = analysis.input(Input::Scroll(100));
+    let first = analysis.input(Input::TypeFilter(1));
+    for effect in old.iter().chain(&first) {
+        if matches!(effect.command, Command::AnalysisPage { .. }) {
+            analysis.event(
+                effect.request_id,
+                Event::AnalysisFailed {
+                    document: 1,
+                    code: AnalysisFailure::LimitReached,
+                    message: "more than 64 requests are waiting".into(),
+                },
+            );
+        }
+    }
+    assert_eq!(doc(&analysis).total(), None);
+    let retry = analysis.input(Input::Move(Step::Down));
+    assert_eq!(pages(&retry).len(), 1, "{retry:?}");
+    engine.settle(&mut analysis, retry);
+    assert_eq!(doc(&analysis).total(), Some(100));
+    let effects = analysis.input(Input::Move(Step::Down));
+    engine.settle(&mut analysis, effects);
+    assert!(selected(&analysis).is_some());
 }

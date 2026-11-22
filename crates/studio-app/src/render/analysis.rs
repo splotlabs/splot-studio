@@ -31,11 +31,7 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
         .collect();
     global.set_documents(model(documents));
     global.set_document_index(int(analysis.shown_index() as u64));
-    let notice = analysis
-        .shown()
-        .and_then(Document::notice)
-        .or_else(|| analysis.notice())
-        .unwrap_or_default();
+    let notice = analysis.notice_line().unwrap_or_default();
     global.set_notice(notice.into());
     let Some(doc) = analysis.shown() else {
         global.set_state(AnalysisState::Empty);

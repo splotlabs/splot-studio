@@ -167,14 +167,15 @@ fn the_switch_leads_the_keys_and_a_round_trip_keeps_encode() {
     press(&window, " ");
     assert_eq!(opened.get(), 1, "Tab did not reach Encode's Open… next");
 
-    // Encode's Open… has the focus; a switch to Analyze takes it away, so
-    // a Space pressed at once activates nothing hidden.
-    press(&window, Key::Backtab);
-    press(&window, Key::Tab);
+    // Encode's Open… has the focus: Space activates it once more. A switch
+    // to Analyze takes the focus away, so a Space pressed at once
+    // activates nothing hidden.
+    press(&window, " ");
+    assert_eq!(opened.get(), 2, "Encode's Open… does not have the focus");
     workspace(&mut state, Workspace::Analyze);
     studio_app::render(&window, &state, Instant::now());
     press(&window, " ");
-    assert_eq!(opened.get(), 1, "a hidden Encode control took a key");
+    assert_eq!(opened.get(), 2, "a hidden Encode control took a key");
     assert_eq!(analyze_opened.get(), 0);
     workspace(&mut state, Workspace::Encode);
     studio_app::render(&window, &state, Instant::now());
@@ -191,7 +192,7 @@ fn the_switch_leads_the_keys_and_a_round_trip_keeps_encode() {
     press(&window, " ");
     assert_eq!(
         (opened.get(), analyze_opened.get()),
-        (1, 1),
+        (2, 1),
         "the hidden Encode took a key"
     );
 

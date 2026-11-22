@@ -215,6 +215,17 @@ impl Analysis {
         self.notice.as_deref()
     }
 
+    /// The one notice the workspace shows: the shown document's request
+    /// problem, then a problem about no single document, then what stays
+    /// true of the shown file.
+    #[must_use]
+    pub fn notice_line(&self) -> Option<&str> {
+        let doc = self.shown();
+        doc.and_then(Document::notice)
+            .or(self.notice.as_deref())
+            .or_else(|| doc.and_then(Document::caution))
+    }
+
     /// Whether a request to the inspect process is not answered yet.
     #[must_use]
     pub fn waiting(&self) -> bool {
@@ -596,7 +607,7 @@ impl Analysis {
                 doc.asked.retain(|a| *a != (generation, first));
                 if generation == doc.filter_generation {
                     if answered != first || !page_fits(first, total, rows.len()) {
-                        broken(doc, "a page that does not fit the rows it counts");
+                        self.broken(at, "a page that does not fit the rows it counts", &mut out);
                         return out;
                     }
                     doc.total = Some(total);
@@ -623,7 +634,11 @@ impl Analysis {
                     doc.bytes.asked = None;
                 }
                 if bytes.len() != len as usize {
-                    broken(doc, "a byte range of another length than asked for");
+                    self.broken(
+                        at,
+                        "a byte range of another length than asked for",
+                        &mut out,
+                    );
                 } else if doc.bytes.offset == offset {
                     doc.bytes.data = Some(bytes);
                 }
@@ -638,7 +653,7 @@ impl Analysis {
             }
             // An answer of the wrong kind breaks the protocol.
             (Asked::Cancel | Asked::Close, _) => {}
-            _ => broken(&mut self.documents[at], "an answer of the wrong kind"),
+            _ => self.broken(at, "an answer of the wrong kind", &mut out),
         }
         out
     }
@@ -730,6 +745,20 @@ impl Analysis {
             }
             Asked::Cancel | Asked::Close => {}
         }
+    }
+
+    /// The engine broke the protocol for document `at`: nothing more it
+    /// says about it is trusted, and its engine slot is given back.
+    fn broken(&mut self, at: usize, what: &str, out: &mut Vec<Effect>) {
+        let doc = &mut self.documents[at];
+        doc.phase = Phase::Failed {
+            message: format!("The engine sent {what}. Reopen the file to read it again."),
+        };
+        let document = doc.id;
+        self.pending.retain(|_, (d, _)| *d != document);
+        self.send(document, Asked::Close, out, |document| {
+            Command::AnalysisClose { document }
+        });
     }
 
     /// The inspect process ended: every document it held is gone.
@@ -878,9 +907,15 @@ impl Analysis {
 
     fn step(&mut self, at: usize, step: Step, out: &mut Vec<Effect>) {
         let doc = &self.documents[at];
-        let Some(total) = doc.total.filter(|t| *t > 0) else {
+        let Some(total) = doc.total else {
+            // No page has answered for this filter yet: ask again, so a key
+            // press restarts paging that failed.
+            self.fill(at, out);
             return;
         };
+        if total == 0 {
+            return;
+        }
         let last = total - 1;
         let current = doc.selected.as_ref().and_then(|s| s.position.row());
         let target = match (step, current) {
@@ -1004,14 +1039,6 @@ fn fail_or_notice(doc: &mut Document, code: Option<AnalysisFailure>, message: &s
         }
         _ => doc.notice = Some(format!("The engine could not answer: {message}")),
     }
-}
-
-/// The engine broke the protocol for this document: nothing more it says
-/// about it is trusted.
-fn broken(doc: &mut Document, what: &str) {
-    doc.phase = Phase::Failed {
-        message: format!("The engine sent {what}. Reopen the file to read it again."),
-    };
 }
 
 /// Whether a page of `len` rows from `first` fits `total` rows: no more

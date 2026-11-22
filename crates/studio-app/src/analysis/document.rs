@@ -228,11 +228,16 @@ impl Document {
         &self.bytes
     }
 
-    /// A problem that did not end the document: the last request's, until
-    /// the next input; otherwise what stays true of the file.
+    /// The last request's problem, until the next input here.
     #[must_use]
     pub fn notice(&self) -> Option<&str> {
-        self.notice.as_deref().or(self.caution.as_deref())
+        self.notice.as_deref()
+    }
+
+    /// What stays true of the file while it is open.
+    #[must_use]
+    pub fn caution(&self) -> Option<&str> {
+        self.caution.as_deref()
     }
 
     /// The file's length, once open.
