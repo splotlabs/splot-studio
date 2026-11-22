@@ -2389,6 +2389,13 @@ export component AppWindow inherits Window {
             accessible-role: groupbox;
             accessible-label: "Jobs";
 
+            // Another number of jobs gives every row new controls, so a
+            // focused Show or Cancel is gone: the focus goes to Close.
+            property <int> count: root.jobs.length;
+            changed count => {
+                jobs-close.focus();
+            }
+
             // Escape bubbling up from the controls closes the list; never a
             // Tab stop.
             FocusScope {

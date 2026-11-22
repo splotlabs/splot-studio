@@ -499,3 +499,49 @@ fn a_read_that_stops_early_keeps_the_restored_view() {
     assert_eq!(now, selected(&analysis).map(|s| s.0));
     assert!(now.is_some_and(|i| i < 20), "{now:?}");
 }
+
+/// Input that changes neither selection nor filter keeps a restored view
+/// the read could not apply; a selection by byte, answered later, replaces
+/// it.
+#[test]
+fn only_a_real_choice_replaces_the_kept_view() {
+    let engine = Engine { rows: stream(200) };
+    let old = restore(200, Some(151), type_7());
+    let mut analysis = restored(vec![saved(Some(old))], 0, 0);
+    let open = analysis.read_unread(&Everything(Kind::File));
+    let next = analysis.event(
+        open[0].request_id,
+        Event::AnalysisOpened {
+            document: 1,
+            summary: cancelled_after(200, 20),
+        },
+    );
+    engine.settle(&mut analysis, next);
+    let applied = analysis
+        .type_choices()
+        .iter()
+        .position(|k| *k == type_7().kind)
+        .and_then(|i| i32::try_from(i).ok())
+        .unwrap_or(-1);
+    for input in [
+        Input::Back,
+        Input::Forward,
+        Input::GoTo("not an offset".into()),
+        Input::RowClicked(99),
+        Input::TypeFilter(applied),
+        Input::Scroll(3),
+        Input::ToggleBytes,
+    ] {
+        let effects = analysis.input(input.clone());
+        engine.settle(&mut analysis, effects);
+        let kept = analysis.saved().0[0].restore;
+        assert_eq!(kept.and_then(|r| r.selected), Some(151), "{input:?}");
+        assert_eq!(kept.map(|r| r.filter), Some(type_7()), "{input:?}");
+    }
+    // A byte selects asynchronously, through a locate: that is a choice.
+    let effects = analysis.input(Input::ByteClicked(20));
+    engine.settle(&mut analysis, effects);
+    let kept = analysis.saved().0[0].restore.and_then(|r| r.selected);
+    assert_eq!(kept, selected(&analysis).map(|s| s.0));
+    assert!(kept.is_some_and(|i| i != 151), "{kept:?}");
+}

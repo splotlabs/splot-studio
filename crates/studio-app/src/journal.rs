@@ -14,7 +14,8 @@
 //! documents, as where to read them and the view to restore, never their
 //! facts. A version 1 journal is read as version 2 with the Encode
 //! workspace and no documents; its items and settings are the same DTOs,
-//! so nothing of them changes. The next save writes version 2.
+//! so nothing of them changes. The next save writes version 2, and the
+//! session saves once at start.
 //!
 //! Load rules: a missing file is an empty queue; a newer [`VERSION`] (or a
 //! file that cannot be read at all) is left untouched and this session does
@@ -631,8 +632,11 @@ pub fn load(path: &Path) -> Loaded {
             }
             Err(e) => match without_view(&bytes) {
                 Some(journal) => {
+                    // The copy is synced before any save can replace the file.
                     return match free_name(path).and_then(|copy| {
                         fs::copy(path, &copy)?;
+                        // Writable: Windows flushes only a handle that can write.
+                        OpenOptions::new().write(true).open(&copy)?.sync_all()?;
                         Ok(copy)
                     }) {
                         Ok(copy) => Loaded::ViewUnreadable {

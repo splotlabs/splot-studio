@@ -512,10 +512,20 @@ fn cancel_and_close(rig: &mut Rig, scratch: &Scratch) {
     // The first document is still open there.
     assert!(session.inspecting());
 
+    // The keyboard is on the last row's Show when that row goes away (its
+    // document is closed): the focus stays in the list, on Close, so Space
+    // closes the list.
+    rig.window.invoke_show_jobs();
+    rig.press(Key::Backtab);
+    rig.input(Input::Close);
+    rig.settle("one job fewer", |s| s.jobs().len() == 3);
+    assert!(rig.jobs_open(), "the Jobs list closed by itself");
+    rig.press(" ");
+    assert!(rig.asked.borrow().is_empty(), "{:?}", rig.asked.borrow());
+    assert!(!rig.jobs_open(), "the focus left the Jobs list");
+
     // Close both documents: no process is kept, and nothing late arrives.
-    for _ in 0..2 {
-        rig.input(Input::Close);
-    }
+    rig.input(Input::Close);
     assert!(!rig.session().inspecting(), "the inspect process was kept");
     rig.settle("late answers delivered", |s| !s.analysis().waiting());
     assert_eq!(rig.session().analysis().documents().len(), 0);

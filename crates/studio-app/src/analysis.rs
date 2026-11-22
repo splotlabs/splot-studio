@@ -196,6 +196,10 @@ enum Purpose {
     /// Select what it found. From a byte or an offset the byte window
     /// stays; from the list it moves to the element.
     Select { from_list: bool },
+    /// Select the element of a restored view, as from the list. Unlike a
+    /// selection of the user's, it keeps a restored view the read could
+    /// not apply in full.
+    Restore,
     /// Learn the selection's row under the filter.
     Position,
 }
@@ -490,17 +494,8 @@ impl Analysis {
     }
 
     fn document_input(&mut self, at: usize, input: Input, out: &mut Vec<Effect>) {
-        let doc = &mut self.documents[at];
         // A problem stays in view until the user does something else here.
-        doc.notice = None;
-        // A restored view the read could not apply is kept until the user
-        // chooses a selection or filter of their own.
-        if !matches!(
-            input,
-            Input::Scroll(_) | Input::ScrollTo(_) | Input::Cursor(_) | Input::ToggleBytes
-        ) {
-            doc.restore = None;
-        }
+        self.documents[at].notice = None;
         match input {
             Input::RowClicked(slot) => {
                 let Ok(slot) = u64::try_from(slot) else {
@@ -859,7 +854,7 @@ impl Analysis {
         let doc = &mut self.documents[at];
         let current = generation == doc.filter_generation;
         match purpose {
-            Purpose::Select { from_list } => {
+            Purpose::Select { .. } | Purpose::Restore => {
                 if doc.locating != Some(request_id) {
                     return;
                 }
@@ -869,7 +864,16 @@ impl Analysis {
                 } else {
                     Position::Unknown
                 };
+                // The restored element is no choice of the user's: what
+                // was kept of the restored view stays.
+                let kept = (purpose == Purpose::Restore)
+                    .then(|| doc.restore.take())
+                    .flatten();
+                let from_list = !matches!(purpose, Purpose::Select { from_list: false });
                 self.select(at, found, position, from_list, out);
+                if kept.is_some() {
+                    self.documents[at].restore = kept;
+                }
                 if !current {
                     self.position_selection(at, out);
                 }
@@ -977,9 +981,10 @@ impl Analysis {
 
     /// Puts back the view `restore` on document `at`, just read from the
     /// same file. A filter the document offers no choice for, and an
-    /// element past its end, are not applied; a read that stopped early
-    /// may not have reached them, so then the whole view is kept for the
-    /// journal and the next read.
+    /// element past its end (a read that stopped early may not reach it),
+    /// are not applied. Whenever any part is not applied, the whole view
+    /// is kept for the journal and the next read until the user chooses a
+    /// selection or filter of their own.
     fn apply(&mut self, at: usize, restore: Restore, out: &mut Vec<Effect>) {
         let doc = &mut self.documents[at];
         doc.bytes.shown = restore.bytes_shown;
@@ -996,8 +1001,7 @@ impl Analysis {
             doc.restore = Some(restore);
         }
         if let Some(index) = selected {
-            let purpose = Purpose::Select { from_list: true };
-            self.locate(at, LocateTarget::Element { index }, purpose, out);
+            self.locate(at, LocateTarget::Element { index }, Purpose::Restore, out);
         }
     }
 
@@ -1026,6 +1030,9 @@ impl Analysis {
             }
             return;
         }
+        // A new selection replaces a restored view kept; the restored
+        // element's own locate puts it back (`Purpose::Restore`).
+        doc.restore = None;
         let start = extent(&row.element).0;
         if from_list {
             doc.bytes.cursor = start;
@@ -1106,7 +1113,7 @@ impl Analysis {
                 target,
             },
         );
-        if let Purpose::Select { .. } = purpose {
+        if let Purpose::Select { .. } | Purpose::Restore = purpose {
             self.documents[at].locating = Some(id);
         }
     }
@@ -1116,6 +1123,8 @@ impl Analysis {
         if doc.filter == filter {
             return;
         }
+        // A filter of the user's own replaces a restored view kept.
+        doc.restore = None;
         doc.filter = filter;
         doc.filter_generation += 1;
         doc.total = None;
