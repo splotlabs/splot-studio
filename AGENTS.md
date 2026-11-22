@@ -1,8 +1,7 @@
 # AGENTS.md — Splot Studio
 
 Canonical rules for humans and coding agents. CLAUDE.md and Copilot instructions
-point here. Adapted from Splot AGENTS, blob
-`daf08ea45c6386223f791b1d2046179a357c92bd`, inspected 2026-11-20.
+point here.
 
 ## Behaviour
 
@@ -41,9 +40,33 @@ Slint/toolkit choice.
 
 Run `git status --short`; inspect touched files, callers, and applicable instructions.
 Preserve user changes. Confirm this is splot-studio, not the codec checkout. Use a
-phase/issue ID for nontrivial changes and Conventional Commit subjects. Do not push,
+phase/issue ID for nontrivial changes and Conventional Commit subjects. Do not
 change visibility, publish a release, or change organization settings without
 explicit permission. Never expose credentials or signing material.
+
+## Autonomous work
+
+The owner turns autonomous mode on in the task ("autonomous", "take it to
+merge") or by handing over a GitHub issue. Without it, a commit, push, PR or
+merge needs the task to name it.
+
+In autonomous mode, do the whole path without asking or reporting progress:
+branch, implement, commit, run the gate and a code review, push, open the PR
+(linked to its issue, if any), address every review comment (fix it, or reply
+with the reason it stays), and merge when CI is green. Diagnose failing checks
+and conflicts, and continue.
+
+Stop only for a decision that is the owner's:
+
+- The requirement is unclear.
+- The best solution is a larger restructure than the task implies, or several
+  sound designs exist.
+- A rule in this file says to ask or needs explicit permission.
+- The action is destructive or cannot be undone.
+
+Ask once, with the options, their pros, cons and effort, and a recommendation.
+Continue the work that does not depend on the answer. Never reach the merge
+with a hack, workaround, weakened check, skipped test or dismissed comment.
 
 ## Crate boundaries
 
@@ -64,7 +87,7 @@ its adapter and no Slint types in the media/job model.
 ## Toolchain and dependencies
 
 Use the pinned rust-toolchain.toml, edition 2024, resolver 3, and committed Cargo.lock.
-The initial inspected codec baseline uses Rust 1.100.0. Until Splot has releases,
+Until Splot has releases,
 splot-* Git sources track `main` (owner decision, 2026-11-20): Cargo.lock holds the
 one exact commit for all of them, and it moves only by a deliberate `cargo update`
 with the full gate. No other moving branch dependency, uncommitted path patch,
@@ -153,9 +176,8 @@ output-equivalent paths correct and report each meaningful regression.
 
 ## Validation and handover
 
-Once implemented, `cargo xtask ci` is the full gate and `cargo xtask ci --fast`
-plus touched tests is the local loop. Before those commands exist, use actual
-Cargo commands. Compile real Slint; don't mock it away to pass CI. Check supported
+`cargo xtask ci` is the full gate and `cargo xtask ci --fast` plus touched tests
+is the local loop. Compile real Slint; don't mock it away to pass CI. Check supported
 feature combinations rather than blindly --all-features when backends conflict.
 
 Tests include malformed input, truncation, delayed flush, both depths, protocol
@@ -164,9 +186,9 @@ Record host/target/renderer/build. Cross-compile is not runtime testing; configu
 CI is not executed CI; missing independent tests are not passes.
 
 Report exact checks and results in the pull request. File remaining risks as GitHub
-issues. Keep documentation for people: no agent plans, prompts, status reports or
-evidence dumps in the repository. Do not add generated status matrices, repetitive progress
-reports, fake screenshots, or unrun benchmark numbers.
+issues. Keep documentation for people: no agent plans, prompts, status reports,
+generated matrices or evidence dumps in the repository, and no fake screenshots
+or unrun benchmark numbers.
 
 ## Licences and approvals
 
