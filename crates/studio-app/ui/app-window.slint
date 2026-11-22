@@ -1129,9 +1129,12 @@ export component AppWindow inherits Window {
                     height: self.preferred-height;
                     padding-left: root.card-padding;
                     padding-right: root.card-padding;
-                    padding-top: root.card-padding - Tokens.space-1;
+                    // The toolbar sits in the card's top padding: with it, Encode
+                    // starts about where it did without it, so a file list at the
+                    // height cap still shows its progress row without scrolling.
+                    padding-top: Tokens.space-1;
                     padding-bottom: root.card-padding - Tokens.space-1;
-                    spacing: Tokens.space-2;
+                    spacing: Tokens.space-1;
 
                     // The shell's toolbar: the workspace shown and the shared Jobs
                     // entry. Jobs is reserved until it lists real work from every
@@ -1349,7 +1352,7 @@ export component AppWindow inherits Window {
 
                                     HorizontalLayout {
                                         alignment: center;
-                                        padding-top: Tokens.space-2;
+                                        padding-top: Tokens.space-1;
 
                                         open-button := Button {
                                             text: "Open…";
@@ -2199,7 +2202,7 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             alignment: end;
                             spacing: Tokens.space-2;
-                            padding-top: Tokens.space-2;
+                            padding-top: Tokens.space-1;
 
                             if root.confirm-first: PrimaryButton {
                                 horizontal-stretch: 0;
