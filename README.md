@@ -53,7 +53,8 @@ stands between the test builds and a real release is tracked in
 
 - `studio-app` (`splot-studio`): the Slint desktop app.
 - `studio-engine` (`splot-studio-engine`): the headless engine. `worker` runs one job per
-  process over a versioned, length-prefixed control protocol, `preview` serves pictures, and
+  process over a versioned, length-prefixed control protocol, `preview` serves pictures,
+  `inspect` reads IVF and Annex B files read-only for their OBU envelope and header facts, and
   `encode` runs the same job from the command line.
 - `studio-domain`: shared settings, job and protocol values (no GUI, codec or native types).
 

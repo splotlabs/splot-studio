@@ -12,6 +12,9 @@
 //! and the protocol version before the body is interpreted, so a mismatched
 //! app/engine pair fails with [`ProtocolError::IncompatibleVersion`] instead
 //! of a confusing parse error.
+//!
+//! Three engine processes speak it: a job worker, the preview process and
+//! the inspect process, which serves the [`crate::analysis`] commands.
 
 use std::io::{self, Read, Write};
 
@@ -19,6 +22,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::analysis::{AnalysisFailure, DocumentSummary, Element, Framing};
 use crate::job::{Failure, JobReport, JobSpec, Progress, SourceFacts, Stage, WirePath};
 use crate::preview::{
     MAX_PICTURE_BYTES, PictureBox, PictureFailure, PictureFrame, PictureHeader, PictureTarget,
@@ -27,7 +31,7 @@ use crate::preview::{
 use crate::settings::OutputKind;
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -85,6 +89,8 @@ pub struct Capabilities {
     /// The `FFmpeg` this engine reads ordinary media files with; `None` means
     /// only Y4M can be read.
     pub media_tool: Option<MediaTool>,
+    /// The framings the inspect process reads.
+    pub analysis_framings: Vec<Framing>,
 }
 
 /// Where the engine found its `FFmpeg`.
@@ -140,6 +146,8 @@ pub enum Command {
     /// Asks the running job to stop. [`Event::CancelRequested`] acknowledges
     /// the request; only [`Event::Cancelled`] means the job has stopped.
     /// Closing the worker's input has the same effect.
+    /// The inspect process refuses it: [`Command::AnalysisCancel`] names the
+    /// document.
     Cancel,
     /// Preview process only. Asks for one picture. Answered by one
     /// [`Event::Picture`] or [`Event::PictureUnavailable`] with the same
@@ -178,6 +186,55 @@ pub enum Command {
     /// Preview process only. Stops playback; answered by
     /// [`Event::PlaybackEnded`] when something was playing.
     StopPlayback,
+    /// Inspect process only. Opens `source` read-only and reads all of its
+    /// framing once. Answered by [`Event::AnalysisOpened`] or
+    /// [`Event::AnalysisFailed`]. Requests are served one at a time, in
+    /// order, so a page asked for after this open waits for it.
+    AnalysisOpen {
+        /// Chosen by the app; greater than every id used before in this
+        /// process.
+        document: u64,
+        /// The file. It is never modified.
+        source: WirePath,
+    },
+    /// Inspect process only. Stops the [`Command::AnalysisOpen`] of
+    /// `document` if it is not answered yet; other documents are not
+    /// affected. Answered by [`Event::CancelRequested`], after which that
+    /// open is always answered by [`Event::AnalysisFailed`] with
+    /// [`AnalysisFailure::Cancelled`]; refused with [`ErrorCode::WrongState`]
+    /// when the open was already answered or never sent.
+    AnalysisCancel {
+        /// The document whose open to stop.
+        document: u64,
+    },
+    /// Inspect process only. Asks for elements `first..first + count` of a
+    /// document. Answered by [`Event::AnalysisPage`] or
+    /// [`Event::AnalysisFailed`].
+    AnalysisPage {
+        /// The document.
+        document: u64,
+        /// The first element, below [`DocumentSummary::elements`].
+        first: u64,
+        /// At most [`crate::analysis::MAX_PAGE_ELEMENTS`], at least one.
+        count: u32,
+    },
+    /// Inspect process only. Asks for the file's bytes
+    /// `offset..offset + len`, which must lie inside the file. Answered by
+    /// [`Event::AnalysisBytes`] or [`Event::AnalysisFailed`].
+    AnalysisBytes {
+        /// The document.
+        document: u64,
+        /// The first byte.
+        offset: u64,
+        /// At most [`crate::analysis::MAX_BYTE_RANGE`], at least one.
+        len: u32,
+    },
+    /// Inspect process only. Closes a document. Answered by
+    /// [`Event::AnalysisClosed`] or [`Event::AnalysisFailed`].
+    AnalysisClose {
+        /// The document.
+        document: u64,
+    },
 }
 
 /// Why the engine refused a command.
@@ -235,7 +292,9 @@ pub enum Event {
         /// The counters.
         progress: Progress,
     },
-    /// [`Command::Cancel`] was received. The job is still stopping.
+    /// [`Command::Cancel`] was received. The job is still stopping. Also
+    /// the acceptance of a [`Command::AnalysisCancel`], under its
+    /// `request_id`.
     CancelRequested,
     /// One picture. Its pixels follow this frame on the stream; see
     /// [`PictureHeader`]. Pictures are skippable: the app shows only the
@@ -272,6 +331,45 @@ pub enum Event {
     Failed {
         /// Why.
         failure: Failure,
+    },
+    /// Answers [`Command::AnalysisOpen`]: the document is open.
+    AnalysisOpened {
+        /// The document.
+        document: u64,
+        /// What reading the file found.
+        summary: DocumentSummary,
+    },
+    /// Answers [`Command::AnalysisPage`].
+    AnalysisPage {
+        /// The document.
+        document: u64,
+        /// The index of the first element.
+        first: u64,
+        /// One or more elements from `first` on.
+        elements: Vec<Element>,
+    },
+    /// Answers [`Command::AnalysisBytes`].
+    AnalysisBytes {
+        /// The document.
+        document: u64,
+        /// The offset of the first byte.
+        offset: u64,
+        /// Exactly the bytes asked for.
+        bytes: Vec<u8>,
+    },
+    /// Answers [`Command::AnalysisClose`].
+    AnalysisClosed {
+        /// The document.
+        document: u64,
+    },
+    /// An analysis request has no answer.
+    AnalysisFailed {
+        /// The document of the request.
+        document: u64,
+        /// The machine-readable reason.
+        code: AnalysisFailure,
+        /// A human-readable explanation.
+        message: String,
     },
 }
 

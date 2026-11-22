@@ -15,12 +15,16 @@
 //! finished outputs ([`stream`] decodes them with the Splot decoder), all
 //! through one display transform, [`picture`].
 //!
+//! The [`inspect`] process opens local AV2 IVF and Annex B files read-only
+//! and serves their envelope and header facts a page at a time.
+//!
 //! Licensed under `PolyForm` Noncommercial 1.0.0; commercial use requires a
 //! separate written license from Bartosz Tomczyk.
 
 #![forbid(unsafe_code)]
 
 pub mod cli;
+pub mod inspect;
 pub mod job;
 pub mod live;
 pub mod media;
@@ -32,6 +36,7 @@ pub mod stream;
 pub mod verify;
 pub mod worker;
 
+use studio_domain::analysis::Framing;
 use studio_domain::protocol::{BuildIdentity, Capabilities};
 use studio_domain::settings::OutputKind;
 
@@ -47,12 +52,14 @@ pub fn build_identity() -> BuildIdentity {
     }
 }
 
-/// What this build can do: both output kinds, and ordinary media files
-/// when a usable `FFmpeg` is found ([`media::tool`]).
+/// What this build can do: both output kinds, ordinary media files when a
+/// usable `FFmpeg` is found ([`media::tool`]), and inspection of both
+/// framings.
 #[must_use]
 pub fn capabilities() -> Capabilities {
     Capabilities {
         encode_outputs: OutputKind::ALL.to_vec(),
         media_tool: media::identity(),
+        analysis_framings: vec![Framing::Ivf, Framing::AnnexB],
     }
 }

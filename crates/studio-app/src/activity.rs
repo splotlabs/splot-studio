@@ -265,7 +265,12 @@ impl Activity {
             | Event::Working { .. }
             | Event::Picture { .. }
             | Event::PictureUnavailable { .. }
-            | Event::PlaybackEnded { .. } => Step::IGNORED,
+            | Event::PlaybackEnded { .. }
+            | Event::AnalysisOpened { .. }
+            | Event::AnalysisPage { .. }
+            | Event::AnalysisBytes { .. }
+            | Event::AnalysisClosed { .. }
+            | Event::AnalysisFailed { .. } => Step::IGNORED,
         }
     }
 

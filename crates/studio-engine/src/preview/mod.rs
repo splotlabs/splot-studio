@@ -52,7 +52,7 @@ use studio_domain::protocol::{
 use crate::job::{JOB_STACK_BYTES, Stop};
 use crate::media::process::Killer;
 use crate::picture::{self, Frame, Rendered};
-use crate::worker::SessionError;
+use crate::worker::{SessionError, request_id_of};
 use crate::{build_identity, capabilities};
 
 /// Files kept open with their decoding sessions; the least recently used
@@ -134,12 +134,19 @@ fn serve(input: &mut impl Read, shared: &Shared) -> Result<(), ProtocolError> {
                 );
                 continue;
             }
-            Command::Probe { .. } | Command::Start { .. } | Command::Cancel => {
+            Command::Probe { .. }
+            | Command::Start { .. }
+            | Command::Cancel
+            | Command::AnalysisOpen { .. }
+            | Command::AnalysisCancel { .. }
+            | Command::AnalysisPage { .. }
+            | Command::AnalysisBytes { .. }
+            | Command::AnalysisClose { .. } => {
                 shared.reply(
                     id,
                     refusal(
                         ErrorCode::WrongState,
-                        "the preview process runs no jobs; a worker does",
+                        "the preview process runs no jobs or analysis",
                     ),
                 );
                 continue;
@@ -181,14 +188,6 @@ fn refusal(code: ErrorCode, message: impl Into<String>) -> Event {
         code,
         message: message.into(),
     }
-}
-
-/// Best-effort `request_id` of a frame that did not decode as a command.
-fn request_id_of(frame: &[u8]) -> u64 {
-    serde_json::from_slice::<serde_json::Value>(frame)
-        .ok()
-        .and_then(|value| value.get("request_id")?.as_u64())
-        .unwrap_or(0)
 }
 
 /// One request for the work thread.
