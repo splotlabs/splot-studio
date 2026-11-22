@@ -524,7 +524,7 @@ fn encode_with_keyint(
             let mut write = |encoder: &mut Encoder| -> Result<(), String> {
                 while let Some(packet) = encoder.receive_packet().map_err(|e| e.to_string())? {
                     let key = packet.frame_type == FrameType::Key;
-                    if key != studio_engine::stream::is_random_access(&packet.data) {
+                    if key != splot_core::stream_reader::is_random_access_point(&packet.data) {
                         return Err(format!("packet {} misjudged", packet.pts));
                     }
                     if key {

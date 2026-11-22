@@ -1,22 +1,17 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
-//! Decoding this encoder's AV2 output for pictures: the preview decoder,
-//! random access points, and decoded pictures as [`Frame`]s.
+//! Decoding this encoder's AV2 output for pictures: the preview decoder and
+//! decoded pictures as [`Frame`]s.
 //!
-//! Random access: the pinned encoder codes a closed-loop key frame at the
-//! first frame, every `keyint` frames after the last one (120 by default;
-//! Studio does not change it) and at scene cuts. Each one is a temporal
-//! unit of its own holding the sequence header and an
-//! `OBU_CLOSED_LOOP_KEY` frame, and nothing after it refers to anything
-//! before it. A temporal unit holding both OBU types is therefore where a
-//! fresh decoder can start; only OBU headers are read to find it. Every
-//! temporal unit of this encoder outputs exactly one frame, so a unit's
-//! index is its frame's display index.
+//! Random access: a decoder can start at a temporal unit that
+//! [`splot_core::stream_reader::is_random_access_point`] accepts. The pinned
+//! encoder codes such a unit, with a closed-loop key frame, at the first
+//! frame, every `keyint` frames after the last one (120 by default; Studio
+//! does not change it) and at scene cuts, and nothing after it refers to
+//! anything before it. Every temporal unit of this encoder outputs exactly
+//! one frame, so a unit's index is its frame's display index.
 
-use splot_core::annexb::AnnexBObuCursor;
-use splot_core::span::ByteOffset;
-use splot_core::types::ObuType;
 use splot_decode::{
     BitDepth, DecodeLimitName, DecodeLimitThreshold, DecodeLimits, Decoder, DecoderSettings,
     FrameDelay, Picture, PictureSamples, PlaneId, PlaneRef, ReconSample, ThreadCount,
@@ -32,22 +27,6 @@ pub const PREVIEW_DECODE_THREADS: usize = 2;
 /// The most bytes of decoded frames a preview decoder may keep alive:
 /// references, frames in flight and pictures being shown.
 pub const DECODE_STORE_BYTES: u64 = 1 << 30;
-
-/// Whether `unit`, one temporal unit, is a random access point (see the
-/// module documentation). A unit that does not parse is not one.
-#[must_use]
-pub fn is_random_access(unit: &[u8]) -> bool {
-    let mut cursor = AnnexBObuCursor::new(unit, ByteOffset::new(0));
-    let (mut sequence, mut key) = (false, false);
-    while let Ok(Some(obu)) = cursor.next_obu() {
-        match obu.header.obu_type {
-            ObuType::SequenceHeader => sequence = true,
-            ObuType::ClosedLoopKey => key = true,
-            _ => {}
-        }
-    }
-    sequence && key
-}
 
 /// A streaming decoder for pictures: `threads` workers, one frame in
 /// flight, and frame sizes and decoded bytes bounded like a job's.
