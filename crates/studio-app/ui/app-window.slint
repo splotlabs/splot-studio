@@ -336,7 +336,10 @@ component Bar inherits Rectangle {
     clip: true;
     accessible-role: progress-indicator;
     accessible-label: "Conversion progress";
-    accessible-value: root.value-text;
+    // A number between the bounds, so it reads as a share; no value while
+    // the share is not known. The counts are the description.
+    accessible-value: root.known ? round(root.fraction * 100) / 100 : "";
+    accessible-description: root.value-text;
     accessible-value-minimum: 0;
     accessible-value-maximum: 1;
 
@@ -411,8 +414,13 @@ component JobList inherits VerticalLayout {
             }
         }
 
-        Caption {
+        // The row's label says this already; a plain `Text`, because
+        // `accessible-role: none` on a `Caption` leaves an unknown element.
+        Text {
             text: job.detail;
+            color: Tokens.text-secondary;
+            font-size: Tokens.type-caption * 1rem;
+            wrap: word-wrap;
             accessible-role: none;
         }
 

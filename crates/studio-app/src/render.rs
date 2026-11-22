@@ -569,3 +569,22 @@ pub fn render_jobs(window: &AppWindow, jobs: &[Job<'_>]) {
 pub(crate) fn model<T: Clone + 'static>(rows: Vec<T>) -> ModelRc<T> {
     ModelRc::new(VecModel::from(rows))
 }
+
+/// Puts `rows` into `current`, a model made by [`model`], when it has as
+/// many: only the rows that differ are set, so the window keeps its row
+/// items and assistive technology is told only of the rows that changed. A
+/// new model replaces it otherwise, and is returned to be set.
+pub(crate) fn refill<T: Clone + PartialEq + 'static>(
+    current: &ModelRc<T>,
+    rows: Vec<T>,
+) -> Option<ModelRc<T>> {
+    if current.row_count() != rows.len() {
+        return Some(model(rows));
+    }
+    for (at, row) in rows.into_iter().enumerate() {
+        if current.row_data(at).as_ref() != Some(&row) {
+            current.set_row_data(at, row);
+        }
+    }
+    None
+}
