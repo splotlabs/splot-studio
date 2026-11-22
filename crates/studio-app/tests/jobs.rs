@@ -688,10 +688,7 @@ fn restart(rig: &mut Rig, scratch: &Scratch) {
     // changed with no read, and Jobs has no read of it.
     rig.input(Input::Show(0));
     let session = rig.session();
-    assert!(matches!(
-        phase(session, 0),
-        Some(Phase::Changed { read: None, .. })
-    ));
+    assert!(matches!(phase(session, 0), Some(Phase::Changed { .. })));
     assert!(!reading(session));
     assert!(
         !session

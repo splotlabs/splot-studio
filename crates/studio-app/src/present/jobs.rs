@@ -60,6 +60,7 @@ pub const fn state_word(state: State) -> &'static str {
         State::Running => "Running",
         State::Cancelling => "Cancelling",
         State::Completed => "Completed",
+        State::Stopped => "Stopped",
         State::Cancelled => "Cancelled",
         State::Failed => "Failed",
         State::Interrupted => "Interrupted",
@@ -69,7 +70,7 @@ pub const fn state_word(state: State) -> &'static str {
 const fn tone(state: State) -> Tone {
     match state {
         State::Queued | State::Running | State::Cancelled => Tone::Neutral,
-        State::Cancelling | State::Interrupted => Tone::Warning,
+        State::Cancelling | State::Stopped | State::Interrupted => Tone::Warning,
         State::Completed => Tone::Success,
         State::Failed => Tone::Error,
     }
@@ -144,13 +145,15 @@ fn read(doc: &crate::analysis::Document, state: State) -> String {
         }
         (State::Cancelling, _) => "Stopping; what was read is kept.".to_owned(),
         (_, Phase::Open(summary)) => found(summary),
-        // Nothing about a changed file is shown before it is read as new.
-        (_, Phase::Changed { .. }) => {
-            "The file changed since it was last read; it waits in Analyze to be read as new."
-                .to_owned()
-        }
         (_, Phase::Failed { message, .. }) => message.clone(),
-        (_, Phase::Unread | Phase::Missing | Phase::Opening | Phase::Cancelling) => String::new(),
+        (
+            _,
+            Phase::Unread
+            | Phase::Missing
+            | Phase::Changed { .. }
+            | Phase::Opening
+            | Phase::Cancelling,
+        ) => String::new(),
     }
 }
 

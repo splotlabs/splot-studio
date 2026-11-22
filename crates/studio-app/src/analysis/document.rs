@@ -50,13 +50,11 @@ pub enum Phase {
     /// It is open.
     Open(Box<DocumentSummary>),
     /// It is not the file the restored view was made on. Nothing about it
-    /// is shown until the user reads it as a new file.
+    /// is shown, and the engine holds no read of it, until the user reads
+    /// it as a new file.
     Changed {
         /// The file as it is now.
         now: SourceFingerprint,
-        /// The read that found the change, held by the engine; `None` when
-        /// the size or modification time showed it before any read.
-        read: Option<Box<DocumentSummary>>,
     },
     /// Restored, and nothing is at its path now.
     Missing,
@@ -279,10 +277,7 @@ impl Document {
     pub const fn in_engine(&self) -> bool {
         matches!(
             self.phase,
-            Phase::Opening
-                | Phase::Cancelling
-                | Phase::Open(_)
-                | Phase::Changed { read: Some(_), .. }
+            Phase::Opening | Phase::Cancelling | Phase::Open(_)
         )
     }
 

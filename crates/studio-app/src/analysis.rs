@@ -319,7 +319,7 @@ impl Analysis {
             .and_then(|r| disk.fingerprint(&doc.path).map(|now| (r, now)))
             && !same_file(restore.fingerprint, now)
         {
-            doc.phase = Phase::Changed { now, read: None };
+            doc.phase = Phase::Changed { now };
         } else {
             self.read(at, &mut out);
         }
@@ -469,16 +469,10 @@ impl Analysis {
             Input::Resolve => {
                 let at = self.shown;
                 if let Some(doc) = self.documents.get_mut(at)
-                    && let Phase::Changed { read, .. } = &doc.phase
+                    && let Phase::Changed { .. } = doc.phase
                 {
                     doc.restore = None;
-                    if let Some(summary) = read.clone() {
-                        doc.phase = Phase::Open(summary);
-                        self.fill(at, &mut out);
-                        self.fetch_bytes(at, &mut out);
-                    } else {
-                        self.read(at, &mut out);
-                    }
+                    self.read(at, &mut out);
                 }
             }
             Input::Relink { missing, to } => {
@@ -768,12 +762,16 @@ impl Analysis {
                 }
                 match doc.restore.take() {
                     Some(restore) if !same_file(restore.fingerprint, summary.fingerprint) => {
-                        // Never trust the path alone: the view waits.
+                        // Never trust the path alone: the view waits. The
+                        // engine gives the read back, so nothing of it
+                        // outlives the change, an engine stop included.
                         doc.restore = Some(restore);
                         doc.phase = Phase::Changed {
                             now: summary.fingerprint,
-                            read: Some(Box::new(summary)),
                         };
+                        self.send(document, Asked::Close, &mut out, |document| {
+                            Command::AnalysisClose { document }
+                        });
                     }
                     restore => {
                         doc.phase = Phase::Open(Box::new(summary));
