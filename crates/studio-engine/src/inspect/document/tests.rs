@@ -11,6 +11,7 @@
 use std::cell::Cell;
 use std::io::Write as _;
 
+use studio_domain::analysis::{KindFilter, LayerFilter};
 use studio_domain::protocol::{Envelope, Event, write_message};
 
 use super::*;
@@ -96,9 +97,9 @@ fn leb128(mut value: u64) -> Vec<u8> {
 /// The plain values of an OBU fact: type, name, reserved, the three layer
 /// ids, the provenance of mlayer and xlayer, and the prefix, OBU, header,
 /// payload and stream spans.
-type Row = (u8, String, bool, [u8; 3], [Provenance; 2], [(u64, u64); 5]);
+type ObuRow = (u8, String, bool, [u8; 3], [Provenance; 2], [(u64, u64); 5]);
 
-fn row(obu: &ObuFact) -> Row {
+fn obu_row(obu: &ObuFact) -> ObuRow {
     let at = |span: Span| (span.offset, span.len);
     (
         obu.obu_type,
@@ -191,7 +192,7 @@ fn annex_b_facts_and_spans() -> Result<(), Refusal> {
     assert!(scanned.header.is_none());
     let elements = elements(&scanned);
     assert_tiles(&elements, 147);
-    let rows: Vec<Row> = obus(&elements).into_iter().map(row).collect();
+    let rows: Vec<ObuRow> = obus(&elements).into_iter().map(obu_row).collect();
     let name = |n: &str| n.to_owned();
     assert_eq!(
         rows,
@@ -317,7 +318,7 @@ fn ivf_records_are_packets_and_their_obus_map_to_the_stream() -> Result<(), Refu
     );
     let found: Vec<_> = obus(&elements)
         .iter()
-        .map(|o| (o.index, o.packet, row(o).5))
+        .map(|o| (o.index, o.packet, obu_row(o).5))
         .collect();
     assert_eq!(
         found,
@@ -332,8 +333,8 @@ fn ivf_records_are_packets_and_their_obus_map_to_the_stream() -> Result<(), Refu
     // where the IVF document says they are in the stream.
     let stream: Vec<u8> = [TD_SH, TD_TG].concat();
     let plain = self::elements(&self::scanned(&stream)?);
-    let in_stream: Vec<_> = obus(&elements).iter().map(|o| row(o).5[4]).collect();
-    let in_file: Vec<_> = obus(&plain).iter().map(|o| row(o).5[4]).collect();
+    let in_stream: Vec<_> = obus(&elements).iter().map(|o| obu_row(o).5[4]).collect();
+    let in_file: Vec<_> = obus(&plain).iter().map(|o| obu_row(o).5[4]).collect();
     assert_eq!(in_stream, in_file);
     Ok(())
 }
@@ -654,10 +655,17 @@ fn spans_past_four_gibibytes_are_exact() -> Result<(), Refusal> {
         stopped(&scanned),
         Some((ProblemKind::Malformed, 2, len - 2))
     );
-    let page = page(&scanned.items, 1, 1)?;
+    let (total, page) = page(&scanned.items, RowFilter::default(), 1, 1)?;
+    assert_eq!(total, 2);
     assert!(
-        matches!(page.as_slice(), [Element::Unparsed { span: Span { len: l, .. }, .. }] if *l == len - 2)
+        matches!(page.as_slice(), [Row { index: 1, parent: None, element: Element::Unparsed { span: Span { len: l, .. }, .. } }] if *l == len - 2)
     );
+    let (row, found) = locate(
+        &scanned.items,
+        RowFilter::default(),
+        LocateTarget::Offset { offset: len - 1 },
+    )?;
+    assert_eq!((row, found.index), (Some(1), 1));
     Ok(())
 }
 
@@ -667,7 +675,8 @@ fn fits(event: Event) -> bool {
 
 #[test]
 fn pages_are_bounded_by_count_range_and_message_size() -> Result<(), Refusal> {
-    let invalid = |got: Result<Vec<Element>, Refusal>| {
+    let all = RowFilter::default();
+    let invalid = |got: Result<(u64, Vec<Row>), Refusal>| {
         matches!(
             got,
             Err(Refusal {
@@ -677,12 +686,12 @@ fn pages_are_bounded_by_count_range_and_message_size() -> Result<(), Refusal> {
         )
     };
     let items = scanned(&annex_b())?.items;
-    assert!(invalid(page(&items, 0, 0)));
-    assert!(invalid(page(&items, 0, MAX_PAGE_ELEMENTS + 1)));
-    assert!(invalid(page(&items, 5, 1)));
-    assert!(invalid(page(&items, u64::MAX, 1)));
-    assert_eq!(page(&items, 4, MAX_PAGE_ELEMENTS)?.len(), 1);
-    assert_eq!(page(&items, 0, 2)?.len(), 2);
+    assert!(invalid(page(&items, all, 0, 0)));
+    assert!(invalid(page(&items, all, 0, MAX_PAGE_ELEMENTS + 1)));
+    assert!(invalid(page(&items, all, 5, 1)));
+    assert!(invalid(page(&items, all, u64::MAX, 1)));
+    assert_eq!(page(&items, all, 4, MAX_PAGE_ELEMENTS)?.1.len(), 1);
+    assert_eq!(page(&items, all, 0, 2)?.1.len(), 2);
     // Messages that JSON escapes to twice their size.
     let wide: Vec<Item> = (0..300)
         .map(|i| Item::Unparsed {
@@ -692,7 +701,8 @@ fn pages_are_bounded_by_count_range_and_message_size() -> Result<(), Refusal> {
             message: "\"".repeat(MAX_PROBLEM_MESSAGE),
         })
         .collect();
-    let first = page(&wide, 0, MAX_PAGE_ELEMENTS)?;
+    let (total, first) = page(&wide, all, 0, MAX_PAGE_ELEMENTS)?;
+    assert_eq!(total, 300);
     assert!(
         !first.is_empty() && first.len() < MAX_PAGE_ELEMENTS as usize,
         "{}",
@@ -702,13 +712,22 @@ fn pages_are_bounded_by_count_range_and_message_size() -> Result<(), Refusal> {
     assert!(fits(Event::AnalysisPage {
         document: u64::MAX,
         first: u64::MAX,
-        elements: first
+        total: u64::MAX,
+        rows: first
     }));
-    let second = page(&wide, next, MAX_PAGE_ELEMENTS)?;
+    // The same budget holds through a filter.
+    let damage = RowFilter {
+        kind: KindFilter::Unparsed,
+        layer: None,
+    };
+    let (total, filtered) = page(&wide, damage, 0, MAX_PAGE_ELEMENTS)?;
+    assert_eq!((total, filtered.len() as u64), (300, next));
+    let second = page(&wide, all, next, MAX_PAGE_ELEMENTS)?.1;
     assert!(
-        matches!(second.first(), Some(Element::Unparsed { span, .. }) if span.offset == u64::MAX - 1000 + next)
+        matches!(second.first(), Some(Row { index, element: Element::Unparsed { span, .. }, .. }) if *index == next && span.offset == u64::MAX - 1000 + next)
     );
-    // A full page of the largest OBU facts.
+    // A full page of the largest OBU facts, each inside the packet before
+    // them.
     let header = AnnexBObuCursor::new(&[0x02, 0x9D, 0x45], ByteOffset::new(0))
         .next_obu()
         .ok()
@@ -717,23 +736,250 @@ fn pages_are_bounded_by_count_range_and_message_size() -> Result<(), Refusal> {
     let Some(header) = header else {
         unreachable!("the tile group header parses");
     };
-    let big: Vec<Item> = (0..u64::from(MAX_PAGE_ELEMENTS))
-        .map(|i| Item::Obu {
-            index: u64::MAX - i,
-            packet: Some(u64::MAX),
-            prefix: u64::MAX - 10,
-            offset: u64::MAX - 8,
-            size: u32::MAX,
-            header,
-            stream_offset: u64::MAX - 10,
-        })
-        .collect();
-    let full = page(&big, 0, MAX_PAGE_ELEMENTS)?;
+    let big: Vec<Item> = std::iter::once(Item::Packet {
+        index: u64::MAX,
+        pts: u64::MAX,
+        payload_offset: u64::MAX - 1000,
+        len: 1000,
+        stream_offset: u64::MAX - 1000,
+    })
+    .chain((0..u64::from(MAX_PAGE_ELEMENTS)).map(|i| Item::Obu {
+        index: u64::MAX - i,
+        packet: Some(u64::MAX),
+        prefix: u64::MAX - 10,
+        offset: u64::MAX - 8,
+        size: u32::MAX,
+        header,
+        stream_offset: u64::MAX - 10,
+    }))
+    .collect();
+    // The largest facts do not all fit: the page is cut short by its budget.
+    let (_, full) = page(&big, all, 1, MAX_PAGE_ELEMENTS)?;
+    assert!(!full.is_empty() && full.len() < MAX_PAGE_ELEMENTS as usize);
+    assert!(full.iter().all(|r| r.parent == Some(0)));
     assert!(fits(Event::AnalysisPage {
         document: u64::MAX,
-        first: 0,
-        elements: full
+        first: u64::MAX,
+        total: u64::MAX,
+        rows: full
     }));
+    Ok(())
+}
+
+/// The IVF fixture: element indices 0 header, 1 record 0, 2 TD, 3 sequence
+/// header, 4 record 1 (empty), 5 record 2, 6 TD, 7 tile group.
+#[test]
+fn rows_carry_their_index_and_parent_packet() -> Result<(), Refusal> {
+    let items = scanned(&ivf())?.items;
+    let (total, rows) = page(&items, RowFilter::default(), 0, MAX_PAGE_ELEMENTS)?;
+    assert_eq!(total, 8);
+    let places: Vec<_> = rows.iter().map(|r| (r.index, r.parent)).collect();
+    assert_eq!(
+        places,
+        [
+            (0, None),
+            (1, None),
+            (2, Some(1)),
+            (3, Some(1)),
+            (4, None),
+            (5, None),
+            (6, Some(5)),
+            (7, Some(5)),
+        ]
+    );
+    // A page that starts inside a payload still names the packet.
+    let (_, rows) = page(&items, RowFilter::default(), 7, 1)?;
+    assert_eq!((rows[0].index, rows[0].parent), (7, Some(5)));
+    // A region inside a payload has its packet; the region a stop leaves
+    // from the start of a record has none.
+    let mut damaged = ivf_header(*b"AV02", 32);
+    damaged.extend(record(0, &[0x01, 0x08, 0x05, 0x08]));
+    damaged.extend(record(1, &TD_SH));
+    damaged.truncate(damaged.len() - 2);
+    let items = scanned(&damaged)?.items;
+    let (_, rows) = page(&items, RowFilter::default(), 0, MAX_PAGE_ELEMENTS)?;
+    let places: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.index,
+                r.parent,
+                matches!(r.element, Element::Unparsed { .. }),
+            )
+        })
+        .collect();
+    assert_eq!(
+        places,
+        [
+            (0, None, false),
+            (1, None, false),
+            (2, Some(1), false),
+            (3, Some(1), true),
+            (4, None, true),
+        ]
+    );
+    // Annex B OBUs have no packet.
+    let items = scanned(&annex_b())?.items;
+    let (_, rows) = page(&items, RowFilter::default(), 0, MAX_PAGE_ELEMENTS)?;
+    assert!(rows.iter().all(|r| r.parent.is_none()));
+    Ok(())
+}
+
+/// Rows are the admitted elements in file order; `first` counts rows, not
+/// elements. A filter that admits nothing has no rows, and row 0 of it is
+/// an empty page, not an error.
+#[test]
+fn filters_page_through_the_admitted_elements() -> Result<(), Refusal> {
+    let items = scanned(&annex_b())?.items;
+    let indices = |filter: RowFilter, first: u64| -> Result<(u64, Vec<u64>), Refusal> {
+        let (total, rows) = page(&items, filter, first, MAX_PAGE_ELEMENTS)?;
+        Ok((total, rows.iter().map(|r| r.index).collect()))
+    };
+    let kind = |obu_type| RowFilter {
+        kind: KindFilter::Obu { obu_type },
+        layer: None,
+    };
+    assert_eq!(indices(kind(1), 0)?, (1, vec![1]));
+    assert_eq!(indices(kind(27), 0)?, (1, vec![3]));
+    let layer = |temporal, embedded| RowFilter {
+        kind: KindFilter::All,
+        layer: Some(LayerFilter { temporal, embedded }),
+    };
+    // tlayer 0 / mlayer 0: TD, sequence header, padding.
+    assert_eq!(indices(layer(0, 0), 0)?, (3, vec![0, 1, 4]));
+    assert_eq!(indices(layer(0, 0), 2)?, (3, vec![4]));
+    assert_eq!(indices(layer(1, 2), 0)?, (1, vec![2]));
+    let none = RowFilter {
+        kind: KindFilter::Unparsed,
+        layer: None,
+    };
+    assert_eq!(indices(none, 0)?, (0, vec![]));
+    assert!(matches!(
+        page(&items, none, 1, 1),
+        Err(Refusal {
+            code: AnalysisFailure::InvalidRequest,
+            ..
+        })
+    ));
+    assert!(matches!(
+        page(&items, layer(0, 0), 3, 1),
+        Err(Refusal {
+            code: AnalysisFailure::InvalidRequest,
+            ..
+        })
+    ));
+    Ok(())
+}
+
+/// Every byte resolves to the innermost element that holds it: the record
+/// header to its packet, a payload byte to its OBU, never the packet.
+#[test]
+fn locate_finds_the_innermost_element_and_its_row() -> Result<(), Refusal> {
+    let bytes = ivf();
+    let items = scanned(&bytes)?.items;
+    let all = RowFilter::default();
+    let at = |offset| -> Result<(Option<u64>, u64), Refusal> {
+        let (row, found) = locate(&items, all, LocateTarget::Offset { offset })?;
+        Ok((row, found.index))
+    };
+    let expected: Vec<(u64, u64)> = (0..82)
+        .map(|offset| {
+            let index = match offset {
+                0..32 => 0,
+                32..44 => 1,
+                44..46 => 2,
+                46..51 => 3,
+                51..63 => 4,
+                63..75 => 5,
+                75..77 => 6,
+                _ => 7,
+            };
+            (offset, index)
+        })
+        .collect();
+    for (offset, index) in expected {
+        assert_eq!(at(offset)?, (Some(index), index), "byte {offset}");
+    }
+    let invalid = |got: Result<(Option<u64>, Row), Refusal>| {
+        matches!(
+            got,
+            Err(Refusal {
+                code: AnalysisFailure::InvalidRequest,
+                ..
+            })
+        )
+    };
+    assert!(invalid(locate(
+        &items,
+        all,
+        LocateTarget::Offset { offset: 82 }
+    )));
+    assert!(invalid(locate(
+        &items,
+        all,
+        LocateTarget::Offset { offset: u64::MAX }
+    )));
+    assert!(invalid(locate(
+        &items,
+        all,
+        LocateTarget::Element { index: 8 }
+    )));
+    assert!(invalid(locate(
+        &items,
+        all,
+        LocateTarget::Element { index: u64::MAX }
+    )));
+
+    // Under a filter the row counts admitted elements only, and an element
+    // the filter does not admit has no row but is still found.
+    let tiles = RowFilter {
+        kind: KindFilter::Obu { obu_type: 2 },
+        layer: None,
+    };
+    let (row, found) = locate(&items, tiles, LocateTarget::Element { index: 6 })?;
+    assert_eq!((row, found.index, found.parent), (Some(1), 6, Some(5)));
+    let (row, found) = locate(&items, tiles, LocateTarget::Offset { offset: 40 })?;
+    assert_eq!((row, found.index), (None, 1));
+    assert!(matches!(found.element, Element::Packet { .. }));
+    Ok(())
+}
+
+#[test]
+fn the_summary_counts_types_layers_and_unparsed_regions() -> Result<(), Refusal> {
+    let summary = scanned(&annex_b())?.summary(SourceFingerprint {
+        len: 147,
+        modified: None,
+    });
+    let types: Vec<_> = summary
+        .obu_types
+        .iter()
+        .map(|t| (t.obu_type, t.type_name.as_str(), t.count))
+        .collect();
+    assert_eq!(
+        types,
+        [
+            (1, "OBU_SEQUENCE_HEADER", 1),
+            (2, "OBU_TEMPORAL_DELIMITER", 1),
+            (7, "OBU_REGULAR_TILE_GROUP", 1),
+            (25, "OBU_PADDING", 1),
+            (27, "Reserved", 1),
+        ]
+    );
+    let layers: Vec<_> = summary
+        .layers
+        .iter()
+        .map(|l| (l.temporal, l.embedded, l.count))
+        .collect();
+    assert_eq!(layers, [(0, 0, 3), (1, 2, 1), (3, 0, 1)]);
+    assert_eq!(summary.unparsed, 0);
+    // A truncated stream: one region.
+    let mut cut = annex_b();
+    cut.truncate(20);
+    let summary = scanned(&cut)?.summary(SourceFingerprint {
+        len: 20,
+        modified: None,
+    });
+    assert_eq!((summary.obus, summary.unparsed), (4, 1));
     Ok(())
 }
 
@@ -826,14 +1072,19 @@ fn a_changed_or_replaced_source_is_refused() -> Result<(), Box<dyn std::error::E
             })
         )
     };
-    assert!(changed(document.page(0, 1).map(drop)));
+    assert!(changed(document.page(RowFilter::default(), 0, 1).map(drop)));
+    assert!(changed(
+        document
+            .locate(RowFilter::default(), LocateTarget::Element { index: 0 })
+            .map(drop)
+    ));
     assert!(changed(document.bytes(0, 1).map(drop)));
 
     let document = Document::open(&source, &never).map_err(|r| r.message)?;
     let other = dir.path().join("other");
     std::fs::write(&other, annex_b())?;
     std::fs::rename(&other, &path)?;
-    assert!(changed(document.page(0, 1).map(drop)));
+    assert!(changed(document.page(RowFilter::default(), 0, 1).map(drop)));
 
     let directory = Document::open(&WirePath::from_path(dir.path()), &never);
     assert!(

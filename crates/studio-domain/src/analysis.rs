@@ -18,6 +18,11 @@
 //! Every [`Span`] says where its numbers came from ([`Provenance`]), and
 //! every layer id whether the file signals it or the specification infers
 //! it.
+//!
+//! A page lists the elements a [`RowFilter`] admits, as [`Row`]s that carry
+//! each element's index and its parent packet. A locate finds the innermost
+//! element at a file byte, or an element by index, and its position among
+//! the rows a filter admits.
 
 use serde::{Deserialize, Serialize};
 
@@ -208,6 +213,142 @@ pub enum Element {
     },
 }
 
+/// One element of a page, with its place in the document.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Row {
+    /// The element's index in the document: its identity there.
+    pub index: u64,
+    /// The index of the packet element whose payload holds it: set for the
+    /// OBUs and unparsed regions inside an IVF payload, `None` otherwise.
+    pub parent: Option<u64>,
+    /// The element.
+    pub element: Element,
+}
+
+/// Which elements a page lists and a locate counts. The default admits
+/// every element; a layer filter admits only OBUs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RowFilter {
+    /// Which kinds of element.
+    pub kind: KindFilter,
+    /// Only OBUs with these layer ids.
+    pub layer: Option<LayerFilter>,
+}
+
+/// The kind part of a [`RowFilter`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum KindFilter {
+    /// Every kind.
+    #[default]
+    All,
+    /// Only regions that did not parse.
+    Unparsed,
+    /// Only OBUs of this raw `obu_type`.
+    Obu {
+        /// The raw `obu_type`.
+        obu_type: u8,
+    },
+}
+
+/// The layer part of a [`RowFilter`]: one `obu_tlayer_id` and
+/// `obu_mlayer_id` pair, signaled or inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LayerFilter {
+    /// `obu_tlayer_id`.
+    pub temporal: u8,
+    /// `obu_mlayer_id`.
+    pub embedded: u8,
+}
+
+impl RowFilter {
+    /// Whether it admits every element.
+    #[must_use]
+    pub const fn is_all(&self) -> bool {
+        matches!(self.kind, KindFilter::All) && self.layer.is_none()
+    }
+
+    /// Whether it admits an OBU with this raw type and these layer ids.
+    #[must_use]
+    pub const fn admits_obu(&self, obu_type: u8, temporal: u8, embedded: u8) -> bool {
+        let kind = match self.kind {
+            KindFilter::All => true,
+            KindFilter::Unparsed => false,
+            KindFilter::Obu { obu_type: wanted } => wanted == obu_type,
+        };
+        let layer = match self.layer {
+            None => true,
+            Some(layer) => layer.temporal == temporal && layer.embedded == embedded,
+        };
+        kind && layer
+    }
+
+    /// Whether it admits a region that did not parse.
+    #[must_use]
+    pub const fn admits_unparsed(&self) -> bool {
+        matches!(self.kind, KindFilter::All | KindFilter::Unparsed) && self.layer.is_none()
+    }
+
+    /// Whether it admits the IVF header or a packet.
+    #[must_use]
+    pub const fn admits_wrapper(&self) -> bool {
+        self.is_all()
+    }
+
+    /// Whether it admits `element`.
+    #[must_use]
+    pub const fn admits(&self, element: &Element) -> bool {
+        match element {
+            Element::IvfHeader { .. } | Element::Packet { .. } => self.admits_wrapper(),
+            Element::Obu { obu } => self.admits_obu(
+                obu.obu_type,
+                obu.temporal_layer_id.value,
+                obu.embedded_layer_id.value,
+            ),
+            Element::Unparsed { .. } => self.admits_unparsed(),
+        }
+    }
+}
+
+/// Where to locate an element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LocateTarget {
+    /// The innermost element that holds this file byte: an OBU or unparsed
+    /// region inside an IVF payload before its packet.
+    Offset {
+        /// The byte.
+        offset: u64,
+    },
+    /// The element with this index.
+    Element {
+        /// The index.
+        index: u64,
+    },
+}
+
+/// How many OBUs of one type a document has.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ObuTypeCount {
+    /// The raw `obu_type`.
+    pub obu_type: u8,
+    /// The specification's name for the type, or `Reserved`.
+    pub type_name: String,
+    /// The number of OBUs.
+    pub count: u64,
+}
+
+/// How many OBUs of one layer pair a document has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct LayerCount {
+    /// `obu_tlayer_id`.
+    pub temporal: u8,
+    /// `obu_mlayer_id`.
+    pub embedded: u8,
+    /// The number of OBUs.
+    pub count: u64,
+}
+
 /// How far reading the file got.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -243,6 +384,14 @@ pub struct DocumentSummary {
     pub packets: u64,
     /// The number of OBUs among them.
     pub obus: u64,
+    /// The number of unparsed regions among them.
+    pub unparsed: u64,
+    /// The OBU types present, by raw type: at most 32, one per `obu_type`
+    /// value.
+    pub obu_types: Vec<ObuTypeCount>,
+    /// The layer pairs present, by `obu_tlayer_id` then `obu_mlayer_id`: at
+    /// most 32.
+    pub layers: Vec<LayerCount>,
     /// How far reading got.
     pub outcome: ScanOutcome,
 }
@@ -292,6 +441,108 @@ mod tests {
         );
         assert_eq!(serde_json::from_str::<Element>(&text)?, element);
         assert_eq!(serde_json::to_string(&Framing::AnnexB)?, r#""annex_b""#);
+        let filter = RowFilter {
+            kind: KindFilter::Obu { obu_type: 7 },
+            layer: Some(LayerFilter {
+                temporal: 1,
+                embedded: 2,
+            }),
+        };
+        let text = serde_json::to_string(&filter)?;
+        assert_eq!(
+            text,
+            r#"{"kind":{"type":"obu","obu_type":7},"layer":{"temporal":1,"embedded":2}}"#
+        );
+        assert_eq!(serde_json::from_str::<RowFilter>(&text)?, filter);
         Ok(())
+    }
+
+    fn obu(obu_type: u8, temporal: u8, embedded: u8) -> Element {
+        let span = Span {
+            offset: 0,
+            len: 1,
+            provenance: Provenance::Located,
+        };
+        let layer = |value| LayerId {
+            value,
+            provenance: Provenance::Signaled,
+        };
+        Element::Obu {
+            obu: ObuFact {
+                index: 0,
+                packet: None,
+                obu_type,
+                type_name: String::new(),
+                reserved: false,
+                has_extension: true,
+                temporal_layer_id: layer(temporal),
+                embedded_layer_id: layer(embedded),
+                extended_layer_id: layer(0),
+                length_prefix: span,
+                obu: span,
+                header: span,
+                payload: span,
+                stream: span,
+            },
+        }
+    }
+
+    #[test]
+    fn filters_admit_by_kind_and_layer_pair() {
+        let header = Element::IvfHeader {
+            span: Span {
+                offset: 0,
+                len: 32,
+                provenance: Provenance::Signaled,
+            },
+        };
+        let unparsed = Element::Unparsed {
+            span: Span {
+                offset: 0,
+                len: 1,
+                provenance: Provenance::Derived,
+            },
+            kind: ProblemKind::Malformed,
+            message: String::new(),
+        };
+        let all = RowFilter::default();
+        assert!(all.is_all());
+        assert!(
+            [&header, &unparsed, &obu(7, 1, 2)]
+                .iter()
+                .all(|e| all.admits(e))
+        );
+
+        let tiles = RowFilter {
+            kind: KindFilter::Obu { obu_type: 7 },
+            layer: None,
+        };
+        assert!(tiles.admits(&obu(7, 3, 0)) && !tiles.admits(&obu(1, 3, 0)));
+        assert!(!tiles.admits(&header) && !tiles.admits(&unparsed));
+
+        let damage = RowFilter {
+            kind: KindFilter::Unparsed,
+            layer: None,
+        };
+        assert!(damage.admits(&unparsed) && !damage.admits(&obu(7, 0, 0)));
+        assert!(!damage.admits(&header));
+
+        // A layer pair admits OBUs of exactly that pair, and nothing else.
+        let layer = RowFilter {
+            kind: KindFilter::All,
+            layer: Some(LayerFilter {
+                temporal: 1,
+                embedded: 2,
+            }),
+        };
+        assert!(layer.admits(&obu(7, 1, 2)) && layer.admits(&obu(1, 1, 2)));
+        assert!(!layer.admits(&obu(7, 2, 1)) && !layer.admits(&obu(7, 1, 0)));
+        assert!(!layer.admits(&unparsed) && !layer.admits(&header));
+        // Both parts must hold.
+        let both = RowFilter {
+            kind: KindFilter::Obu { obu_type: 7 },
+            layer: layer.layer,
+        };
+        assert!(both.admits(&obu(7, 1, 2)) && !both.admits(&obu(1, 1, 2)));
     }
 }

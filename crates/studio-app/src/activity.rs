@@ -268,6 +268,7 @@ impl Activity {
             | Event::PlaybackEnded { .. }
             | Event::AnalysisOpened { .. }
             | Event::AnalysisPage { .. }
+            | Event::AnalysisLocated { .. }
             | Event::AnalysisBytes { .. }
             | Event::AnalysisClosed { .. }
             | Event::AnalysisFailed { .. } => Step::IGNORED,

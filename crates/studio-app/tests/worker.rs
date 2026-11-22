@@ -710,6 +710,7 @@ fn inspect_documents_end_with_their_process() {
     let (mut second, rx) = spawn_inspect();
     let page = Command::AnalysisPage {
         document: 1,
+        filter: studio_domain::analysis::RowFilter::default(),
         first: 0,
         count: 1,
     };

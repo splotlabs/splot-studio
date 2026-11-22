@@ -22,7 +22,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::analysis::{AnalysisFailure, DocumentSummary, Element, Framing};
+use crate::analysis::{AnalysisFailure, DocumentSummary, Framing, LocateTarget, Row, RowFilter};
 use crate::job::{Failure, JobReport, JobSpec, Progress, SourceFacts, Stage, WirePath};
 use crate::preview::{
     MAX_PICTURE_BYTES, PictureBox, PictureFailure, PictureFrame, PictureHeader, PictureTarget,
@@ -31,7 +31,7 @@ use crate::preview::{
 use crate::settings::OutputKind;
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -207,16 +207,30 @@ pub enum Command {
         /// The document whose open to stop.
         document: u64,
     },
-    /// Inspect process only. Asks for elements `first..first + count` of a
-    /// document. Answered by [`Event::AnalysisPage`] or
-    /// [`Event::AnalysisFailed`].
+    /// Inspect process only. Asks for rows `first..first + count` of the
+    /// elements `filter` admits, in file order. Answered by
+    /// [`Event::AnalysisPage`] or [`Event::AnalysisFailed`].
     AnalysisPage {
         /// The document.
         document: u64,
-        /// The first element, below [`DocumentSummary::elements`].
+        /// Which elements are rows.
+        filter: RowFilter,
+        /// The first row: below the number of rows, or `0` when there are
+        /// none.
         first: u64,
         /// At most [`crate::analysis::MAX_PAGE_ELEMENTS`], at least one.
         count: u32,
+    },
+    /// Inspect process only. Finds an element and its row among those
+    /// `filter` admits. Answered by [`Event::AnalysisLocated`] or
+    /// [`Event::AnalysisFailed`].
+    AnalysisLocate {
+        /// The document.
+        document: u64,
+        /// Which elements are rows.
+        filter: RowFilter,
+        /// A file byte, or an element index.
+        target: LocateTarget,
     },
     /// Inspect process only. Asks for the file's bytes
     /// `offset..offset + len`, which must lie inside the file. Answered by
@@ -343,10 +357,22 @@ pub enum Event {
     AnalysisPage {
         /// The document.
         document: u64,
-        /// The index of the first element.
+        /// The first row.
         first: u64,
-        /// One or more elements from `first` on.
-        elements: Vec<Element>,
+        /// The number of rows the filter admits.
+        total: u64,
+        /// Rows from `first` on: none only when `total` is zero.
+        rows: Vec<Row>,
+    },
+    /// Answers [`Command::AnalysisLocate`].
+    AnalysisLocated {
+        /// The document.
+        document: u64,
+        /// Its row among those the filter admits; `None` when the filter
+        /// does not admit it.
+        row: Option<u64>,
+        /// The element found. Boxed: it is the largest event.
+        found: Box<Row>,
     },
     /// Answers [`Command::AnalysisBytes`].
     AnalysisBytes {

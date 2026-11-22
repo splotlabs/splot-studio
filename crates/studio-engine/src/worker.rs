@@ -218,6 +218,7 @@ fn serve<'scope>(
             Command::AnalysisOpen { .. }
             | Command::AnalysisCancel { .. }
             | Command::AnalysisPage { .. }
+            | Command::AnalysisLocate { .. }
             | Command::AnalysisBytes { .. }
             | Command::AnalysisClose { .. } => outbox.reply(
                 id,

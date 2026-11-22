@@ -36,8 +36,9 @@ use splot_core::span::ByteOffset;
 use splot_core::stream_reader::{ReaderError, StreamUnit, TemporalUnitReader};
 use splot_core::types::ObuType;
 use studio_domain::analysis::{
-    AnalysisFailure, DocumentSummary, Element, Framing, IvfHeaderFact, LayerId, MAX_BYTE_RANGE,
-    MAX_PAGE_ELEMENTS, ObuFact, PacketFact, Problem, ProblemKind, Provenance, ScanOutcome, Span,
+    AnalysisFailure, DocumentSummary, Element, Framing, IvfHeaderFact, LayerCount, LayerId,
+    LocateTarget, MAX_BYTE_RANGE, MAX_PAGE_ELEMENTS, ObuFact, ObuTypeCount, PacketFact, Problem,
+    ProblemKind, Provenance, Row, RowFilter, ScanOutcome, Span,
 };
 use studio_domain::job::{SourceFingerprint, WirePath};
 use studio_domain::protocol::MAX_MESSAGE_BYTES;
@@ -171,16 +172,36 @@ impl Document {
         &self.summary
     }
 
-    /// Elements from `first` on: at most `count`, fewer at the end or when
-    /// more would not fit in one protocol message.
+    /// The number of rows `filter` admits, and rows from `first` on: at
+    /// most `count`, fewer at the end or when more would not fit in one
+    /// protocol message.
     ///
     /// # Errors
     /// [`AnalysisFailure::InvalidRequest`] for a `count` outside
-    /// `1..=MAX_PAGE_ELEMENTS` or a `first` past the last element, and
+    /// `1..=MAX_PAGE_ELEMENTS` or a `first` past the last row, and
     /// [`AnalysisFailure::SourceChanged`].
-    pub fn page(&self, first: u64, count: u32) -> Result<Vec<Element>, Refusal> {
+    pub fn page(
+        &self,
+        filter: RowFilter,
+        first: u64,
+        count: u32,
+    ) -> Result<(u64, Vec<Row>), Refusal> {
         self.check()?;
-        page(&self.items, first, count)
+        page(&self.items, filter, first, count)
+    }
+
+    /// The element `target` names and its row among those `filter` admits.
+    ///
+    /// # Errors
+    /// [`AnalysisFailure::InvalidRequest`] for an offset outside the file or
+    /// an index past the last element, and [`AnalysisFailure::SourceChanged`].
+    pub fn locate(
+        &self,
+        filter: RowFilter,
+        target: LocateTarget,
+    ) -> Result<(Option<u64>, Row), Refusal> {
+        self.check()?;
+        locate(&self.items, filter, target)
     }
 
     /// The file's bytes `offset..offset + len`.
@@ -258,6 +279,31 @@ enum Item {
 }
 
 impl Item {
+    /// Its first byte in the file. Elements are kept in this order.
+    fn start(&self) -> u64 {
+        match self {
+            Self::IvfHeader { .. } => 0,
+            Self::Packet { payload_offset, .. } => {
+                payload_offset.saturating_sub(IVF_FRAME_HEADER_SIZE as u64)
+            }
+            Self::Obu { prefix, .. } => *prefix,
+            Self::Unparsed { offset, .. } => *offset,
+        }
+    }
+
+    /// Whether `filter` admits it.
+    const fn admitted(&self, filter: RowFilter) -> bool {
+        match self {
+            Self::IvfHeader { .. } | Self::Packet { .. } => filter.admits_wrapper(),
+            Self::Obu { header, .. } => filter.admits_obu(
+                header.obu_type.raw(),
+                header.temporal_layer_id.get(),
+                header.embedded_layer_id.get(),
+            ),
+            Self::Unparsed { .. } => filter.admits_unparsed(),
+        }
+    }
+
     /// The first byte after it in the file.
     fn end(&self) -> u64 {
         match self {
@@ -396,8 +442,60 @@ impl Scanned {
             elements: self.items.len() as u64,
             packets: count(|i| matches!(i, Item::Packet { .. })),
             obus: count(|i| matches!(i, Item::Obu { .. })),
+            unparsed: count(|i| matches!(i, Item::Unparsed { .. })),
+            obu_types: self.obu_types(),
+            layers: self.layers(),
             outcome: self.outcome.clone(),
         }
+    }
+
+    /// The OBU types present, by raw type. `obu_type` has five bits.
+    fn obu_types(&self) -> Vec<ObuTypeCount> {
+        let mut counts = [(0_u64, ""); 32];
+        for item in &self.items {
+            if let Item::Obu { header, .. } = item
+                && let Some(slot) = counts.get_mut(usize::from(header.obu_type.raw()))
+            {
+                *slot = (slot.0 + 1, header.obu_type.spec_name());
+            }
+        }
+        (0_u8..)
+            .zip(counts)
+            .filter(|(_, (count, _))| *count > 0)
+            .map(|(obu_type, (count, name))| ObuTypeCount {
+                obu_type,
+                type_name: name.to_owned(),
+                count,
+            })
+            .collect()
+    }
+
+    /// The layer pairs present. `obu_tlayer_id` has two bits and
+    /// `obu_mlayer_id` three.
+    fn layers(&self) -> Vec<LayerCount> {
+        let mut counts = [[0_u64; 8]; 4];
+        for item in &self.items {
+            if let Item::Obu { header, .. } = item
+                && let Some(slot) = counts
+                    .get_mut(usize::from(header.temporal_layer_id.get()))
+                    .and_then(|row| row.get_mut(usize::from(header.embedded_layer_id.get())))
+            {
+                *slot += 1;
+            }
+        }
+        let mut layers = Vec::new();
+        for (temporal, row) in (0_u8..).zip(counts) {
+            for (embedded, count) in (0_u8..).zip(row) {
+                if count > 0 {
+                    layers.push(LayerCount {
+                        temporal,
+                        embedded,
+                        count,
+                    });
+                }
+            }
+        }
+        layers
     }
 }
 
@@ -734,38 +832,123 @@ fn clip(mut message: String) -> String {
     message
 }
 
-fn page(items: &[Item], first: u64, count: u32) -> Result<Vec<Element>, Refusal> {
+/// The packet whose payload holds the element at `at`, if any. Only the
+/// OBUs and unparsed regions after a packet and inside its payload have one.
+fn parent(items: &[Item], at: usize) -> Option<usize> {
+    let item = items.get(at)?;
+    if !matches!(
+        item,
+        Item::Obu {
+            packet: Some(_),
+            ..
+        } | Item::Unparsed { .. }
+    ) {
+        return None;
+    }
+    let packet = items[..at]
+        .iter()
+        .rposition(|i| matches!(i, Item::Packet { .. }))?;
+    (item.start() < items[packet].end()).then_some(packet)
+}
+
+fn row(items: &[Item], at: usize) -> Row {
+    Row {
+        index: at as u64,
+        parent: parent(items, at).map(|p| p as u64),
+        element: items[at].element(),
+    }
+}
+
+fn page(
+    items: &[Item],
+    filter: RowFilter,
+    first: u64,
+    count: u32,
+) -> Result<(u64, Vec<Row>), Refusal> {
     if count == 0 || count > MAX_PAGE_ELEMENTS {
         return Err(Refusal::new(
             AnalysisFailure::InvalidRequest,
-            format!("a page holds 1 to {MAX_PAGE_ELEMENTS} elements, not {count}"),
+            format!("a page holds 1 to {MAX_PAGE_ELEMENTS} rows, not {count}"),
         ));
     }
-    let start = usize::try_from(first)
-        .ok()
-        .filter(|start| *start < items.len())
-        .ok_or_else(|| {
-            Refusal::new(
-                AnalysisFailure::InvalidRequest,
-                format!(
-                    "there is no element {first}; the document has {}",
-                    items.len()
-                ),
-            )
-        })?;
-    let mut elements = Vec::new();
+    // The indices of up to `count` admitted elements from row `first` on,
+    // and how many rows there are. Without a filter, rows are elements.
+    let skip = usize::try_from(first).unwrap_or(usize::MAX);
+    let take = count as usize;
+    let (total, wanted): (u64, Vec<usize>) = if filter.is_all() {
+        let start = skip.min(items.len());
+        (
+            items.len() as u64,
+            (start..items.len()).take(take).collect(),
+        )
+    } else {
+        let admitted = || (0..items.len()).filter(|at| items[*at].admitted(filter));
+        (
+            admitted().count() as u64,
+            admitted().skip(skip).take(take).collect(),
+        )
+    };
+    if first >= total && !(first == 0 && total == 0) {
+        return Err(Refusal::new(
+            AnalysisFailure::InvalidRequest,
+            format!("there is no row {first}; the filter admits {total}"),
+        ));
+    }
+    let mut rows = Vec::new();
     let mut used: usize = 0;
-    for item in items.iter().skip(start).take(count as usize) {
-        let element = item.element();
-        // A comma between elements; an unencodable element cannot occur.
-        let size = serde_json::to_vec(&element).map_or(usize::MAX, |bytes| bytes.len() + 1);
-        if !elements.is_empty() && used.saturating_add(size) > PAGE_BUDGET {
+    for at in wanted {
+        let row = row(items, at);
+        // A comma between rows; an unencodable row cannot occur.
+        let size = serde_json::to_vec(&row).map_or(usize::MAX, |bytes| bytes.len() + 1);
+        if !rows.is_empty() && used.saturating_add(size) > PAGE_BUDGET {
             break;
         }
         used = used.saturating_add(size);
-        elements.push(element);
+        rows.push(row);
     }
-    Ok(elements)
+    Ok((total, rows))
+}
+
+fn locate(
+    items: &[Item],
+    filter: RowFilter,
+    target: LocateTarget,
+) -> Result<(Option<u64>, Row), Refusal> {
+    let invalid = |message: String| Refusal::new(AnalysisFailure::InvalidRequest, message);
+    let at = match target {
+        LocateTarget::Element { index } => usize::try_from(index)
+            .ok()
+            .filter(|at| *at < items.len())
+            .ok_or_else(|| {
+                invalid(format!(
+                    "there is no element {index}; the document has {}",
+                    items.len()
+                ))
+            })?,
+        LocateTarget::Offset { offset } => {
+            let holds = |at: usize| {
+                let item = &items[at];
+                (item.start()..item.end()).contains(&offset)
+            };
+            // The last element that starts at or before the byte holds it,
+            // unless the byte is past its end inside its packet's payload.
+            items
+                .partition_point(|i| i.start() <= offset)
+                .checked_sub(1)
+                .and_then(|at| {
+                    if holds(at) {
+                        Some(at)
+                    } else {
+                        parent(items, at).filter(|p| holds(*p))
+                    }
+                })
+                .ok_or_else(|| invalid(format!("no element holds byte {offset}")))?
+        }
+    };
+    let row_index = items[at]
+        .admitted(filter)
+        .then(|| items[..at].iter().filter(|i| i.admitted(filter)).count() as u64);
+    Ok((row_index, row(items, at)))
 }
 
 /// Reads `offset..offset + len` of a file of `file_len` bytes.

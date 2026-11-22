@@ -140,6 +140,7 @@ fn serve(input: &mut impl Read, shared: &Shared) -> Result<(), ProtocolError> {
             | Command::AnalysisOpen { .. }
             | Command::AnalysisCancel { .. }
             | Command::AnalysisPage { .. }
+            | Command::AnalysisLocate { .. }
             | Command::AnalysisBytes { .. }
             | Command::AnalysisClose { .. } => {
                 shared.reply(
