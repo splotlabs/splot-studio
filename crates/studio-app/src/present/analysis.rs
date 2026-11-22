@@ -161,6 +161,7 @@ pub const fn problem_kind(kind: ProblemKind) -> &'static str {
         ProblemKind::Unsupported => "not supported",
         ProblemKind::Io => "read failure",
         ProblemKind::LimitReached => "engine limit",
+        ProblemKind::Cancelled => "cancelled",
     }
 }
 

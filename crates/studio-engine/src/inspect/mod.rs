@@ -15,11 +15,13 @@
 //!
 //! The [`Ledger`] holds the opens that are queued or running and not yet
 //! answered, and which of them are cancelled. A cancel is accepted only for
-//! such an open, and the open's answer is decided from the same ledger under
-//! the same lock: after `CancelRequested`, that open is answered
-//! [`AnalysisFailure::Cancelled`], whatever else happened to it, and a
-//! cancel that comes after the answer is refused. Cancelling one document
-//! never touches another.
+//! such an open, and a cancel that comes after the open's answer is refused:
+//! both are decided under the same lock. A cancelled open stops reading at
+//! the next unit and is answered with what it read before, as a document
+//! whose outcome is stopped by [`ProblemKind::Cancelled`] (or, when the read
+//! finished first, with the whole document). Only an open cancelled before
+//! its framing was known is answered [`AnalysisFailure::Cancelled`].
+//! Cancelling one document never touches another.
 
 pub mod document;
 
@@ -29,6 +31,8 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 
+#[cfg(doc)]
+use studio_domain::analysis::ProblemKind;
 use studio_domain::analysis::{AnalysisFailure, LocateTarget, RowFilter};
 use studio_domain::job::WirePath;
 use studio_domain::protocol::{
@@ -168,12 +172,10 @@ impl Ledger {
         self.cancelled.contains(&document)
     }
 
-    /// Marks `document`'s open answered; `true` when it was cancelled.
-    fn settle(&mut self, document: u64) -> bool {
+    /// Marks `document`'s open answered.
+    fn settle(&mut self, document: u64) {
         self.pending.retain(|d| *d != document);
-        let cancelled = self.is_cancelled(document);
         self.cancelled.retain(|d| *d != document);
-        cancelled
     }
 }
 
@@ -463,12 +465,9 @@ fn open_document<W: Write>(
         Some(Document::open(source, &|| shared.cancelled(document)))
     };
     let mut ledger = shared.ledger();
-    let cancelled = ledger.settle(document) || shared.stopped();
+    ledger.settle(document);
     let answer = match opened {
-        _ if cancelled => failed(
-            document,
-            Refusal::new(AnalysisFailure::Cancelled, "the open was cancelled"),
-        ),
+        // A cancelled read keeps what it read: the outcome says it stopped.
         Some(Ok(opened)) => {
             let summary = opened.summary().clone();
             documents.push((document, opened));
@@ -502,21 +501,22 @@ mod tests {
     #[test]
     fn a_cancel_counts_only_while_its_open_is_pending() {
         let mut ledger = Ledger::default();
-        // Cancelled before it starts, then answered as cancelled.
+        // Cancelled before it starts, then answered.
         assert!(queued(&mut ledger, 1));
         assert!(ledger.cancel(1));
-        assert!(ledger.settle(1));
+        assert!(ledger.is_cancelled(1));
+        ledger.settle(1);
         // After the answer, a cancel is refused.
-        assert!(!ledger.cancel(1));
+        assert!(!ledger.cancel(1) && !ledger.is_cancelled(1));
         // Answered first: not cancelled, and a later cancel is refused.
         assert!(queued(&mut ledger, 2));
-        assert!(!ledger.settle(2));
+        assert!(!ledger.is_cancelled(2));
+        ledger.settle(2);
         assert!(!ledger.cancel(2));
         // Cancelling one pending open leaves the other alone.
         assert!(queued(&mut ledger, 3) && queued(&mut ledger, 4));
         assert!(ledger.cancel(4));
-        assert!(!ledger.settle(3));
-        assert!(ledger.settle(4));
+        assert!(!ledger.is_cancelled(3) && ledger.is_cancelled(4));
         // Ids only increase; an id never sent is not pending.
         assert!(!ledger.admits(4) && !ledger.admits(2));
         assert!(!ledger.cancel(9));

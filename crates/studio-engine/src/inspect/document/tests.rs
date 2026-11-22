@@ -607,7 +607,7 @@ impl Read for Source<'_> {
 }
 
 #[test]
-fn a_read_failure_keeps_what_was_read_and_cancelling_keeps_nothing() -> Result<(), Refusal> {
+fn a_read_failure_or_a_cancel_keeps_what_was_read() -> Result<(), Refusal> {
     let bytes = annex_b();
     let len = bytes.len() as u64;
     let source = |fail_at, trip| Source {
@@ -630,17 +630,28 @@ fn a_read_failure_keeps_what_was_read_and_cancelling_keeps_nothing() -> Result<(
         ),
         "{first:?}"
     );
+    // Cancelled once the first bytes are read: the units read before the
+    // cancel stay, and the rest of the file is one region.
     let trip = Cell::new(false);
-    let cancelled = scan(source(usize::MAX, Some(&trip)), len, &|| trip.get());
+    let cancelled = scan(source(usize::MAX, Some(&trip)), len, &|| trip.get())?;
+    let kept = obus(&elements(&cancelled)).len();
+    assert!(kept >= 1, "{kept}");
+    let Some((kind, offset, rest)) = stopped(&cancelled) else {
+        unreachable!("{:?}", cancelled.outcome)
+    };
+    assert_eq!(kind, ProblemKind::Cancelled);
+    assert!(offset > 0 && offset + rest == len, "{offset} + {rest}");
+    // Cancelled before the framing is known: nothing to keep.
+    let early = scan(source(usize::MAX, None), len, &|| true);
     assert!(
         matches!(
-            cancelled,
+            early,
             Err(Refusal {
                 code: AnalysisFailure::Cancelled,
                 ..
             })
         ),
-        "{cancelled:?}"
+        "{early:?}"
     );
     Ok(())
 }
@@ -1160,17 +1171,15 @@ fn a_cancel_inside_one_large_unit_stops_its_read() {
         inner: &mut source,
         cancelled: &cancelled,
     };
-    let got = scan(checked, bytes.len() as u64, &cancelled);
-    assert!(
-        matches!(
-            got,
-            Err(Refusal {
-                code: AnalysisFailure::Cancelled,
-                ..
-            })
-        ),
-        "{got:?}"
-    );
+    let len = bytes.len() as u64;
+    let got = scan(checked, len, &cancelled);
+    // The temporal delimiter before the cancel is kept; the padding OBU it
+    // stopped in is the region that was not read.
+    let Ok(got) = got else {
+        unreachable!("{got:?}")
+    };
+    assert_eq!(obus(&elements(&got)).len(), 1);
+    assert_eq!(stopped(&got), Some((ProblemKind::Cancelled, 2, len - 2)));
     // Stopped inside the padding OBU, long before its end.
     assert!(source.at < bytes.len() / 2, "{}", source.at);
 }

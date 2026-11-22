@@ -31,7 +31,7 @@ use crate::preview::{
 use crate::settings::OutputKind;
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -199,10 +199,14 @@ pub enum Command {
     },
     /// Inspect process only. Stops the [`Command::AnalysisOpen`] of
     /// `document` if it is not answered yet; other documents are not
-    /// affected. Answered by [`Event::CancelRequested`], after which that
-    /// open is always answered by [`Event::AnalysisFailed`] with
-    /// [`AnalysisFailure::Cancelled`]; refused with [`ErrorCode::WrongState`]
-    /// when the open was already answered or never sent.
+    /// affected. Answered by [`Event::CancelRequested`], after which reading
+    /// stops at the next unit and the open is answered with what it read: an
+    /// [`Event::AnalysisOpened`] whose outcome is stopped by
+    /// [`crate::analysis::ProblemKind::Cancelled`] (the whole document when
+    /// reading ended first), [`AnalysisFailure::Cancelled`] when nothing was
+    /// read yet, or the failure the open met anyway. Refused with
+    /// [`ErrorCode::WrongState`] when the open was already answered or never
+    /// sent.
     AnalysisCancel {
         /// The document whose open to stop.
         document: u64,

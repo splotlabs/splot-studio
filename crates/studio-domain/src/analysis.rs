@@ -172,6 +172,8 @@ pub enum ProblemKind {
     /// A limit of this engine was reached: a declared unit larger than it
     /// reads, or more elements than it keeps.
     LimitReached,
+    /// The open was cancelled; what was read before is kept.
+    Cancelled,
 }
 
 /// A problem and the first byte it left unparsed.
@@ -398,7 +400,7 @@ pub enum AnalysisFailure {
     SourceChanged,
     /// The file could not be read.
     Io,
-    /// The open was cancelled.
+    /// The open was cancelled before its framing was known.
     Cancelled,
     /// Too many documents are open, or too many requests are waiting.
     LimitReached,
