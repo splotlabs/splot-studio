@@ -317,6 +317,10 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
     }))
     .unwrap_or_else(|e| unreachable!("{e}"));
     let window = studio_app::new_window().unwrap_or_else(|e| unreachable!("{e}"));
+    // The colours the pointer steps look for are the light ones.
+    window
+        .global::<studio_app::Palette>()
+        .set_color_scheme(slint::language::ColorScheme::Light);
     window.window().set_size(PhysicalSize::new(SIZE.0, SIZE.1));
     window.show().unwrap_or_else(|e| unreachable!("{e}"));
     let (tx, rx) = mpsc::channel();
