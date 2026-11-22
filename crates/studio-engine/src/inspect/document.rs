@@ -51,10 +51,24 @@ use crate::source;
 pub const MAX_UNIT_BYTES: usize = 64 << 20;
 
 /// The most elements kept for one document, besides the final unparsed
-/// region: at most 64 bytes each, so 16 MiB, plus at most
-/// [`MAX_KEPT_MESSAGE_BYTES`] of messages for the regions inside IVF
-/// payloads and one message of [`MAX_PROBLEM_MESSAGE`] bytes for the last.
+/// region.
+///
+/// Their list never has more than [`ELEMENT_SLOTS`] slots of at most 64
+/// bytes, 16 MiB: it doubles up to [`GROWTH_STEP_LIMIT`] slots (1 MiB) and
+/// then grows once to the full size, so it holds at most 17 MiB while it
+/// moves. Messages come on top: at most [`MAX_KEPT_MESSAGE_BYTES`] for the
+/// regions inside IVF payloads, and two of at most [`MAX_PROBLEM_MESSAGE`]
+/// bytes: the final region's and the summary's problem (the stop, or the
+/// first damage).
 pub const MAX_RETAINED_ELEMENTS: usize = 1 << 18;
+
+/// The slots of the element list at its full size: the elements and the
+/// final unparsed region.
+pub const ELEMENT_SLOTS: usize = MAX_RETAINED_ELEMENTS + 1;
+
+/// Below this many slots the element list doubles; above it, it grows once
+/// to [`ELEMENT_SLOTS`].
+const GROWTH_STEP_LIMIT: usize = 1 << 14;
 
 /// The longest problem message kept, in bytes.
 pub const MAX_PROBLEM_MESSAGE: usize = 512;
@@ -428,6 +442,12 @@ impl Builder {
                 format!("only the first {MAX_RETAINED_ELEMENTS} elements are kept"),
             ));
         }
+        if !make_room(&mut self.items) {
+            return Err(problem(
+                ProblemKind::LimitReached,
+                "no memory for more elements",
+            ));
+        }
         self.items.push(item);
         Ok(())
     }
@@ -575,7 +595,9 @@ impl Builder {
         let outcome = match stop {
             Some((kind, message)) => {
                 let message = clip(message);
-                if len > end {
+                // `push` left its slot free; only an allocation failure in
+                // a small list can make this grow beyond it.
+                if len > end && make_room(&mut self.items) {
                     self.items.push(Item::Unparsed {
                         offset: end,
                         len: len - end,
@@ -664,7 +686,14 @@ fn scan(input: impl Read, len: u64, cancelled: &dyn Fn() -> bool) -> Result<Scan
                     ),
                 ));
             }
-            doc.items.insert(0, item);
+            if make_room(&mut doc.items) {
+                doc.items.insert(0, item);
+            } else {
+                break Some((
+                    ProblemKind::LimitReached,
+                    "no memory for more elements".to_owned(),
+                ));
+            }
         }
         match step {
             Step::Stop(kind, message) => break Some((kind, message)),
@@ -674,6 +703,23 @@ fn scan(input: impl Read, len: u64, cancelled: &dyn Fn() -> bool) -> Result<Scan
         }
     };
     doc.finish(stop, len, header)
+}
+
+/// Makes room for one more element without the list ever passing
+/// [`ELEMENT_SLOTS`] slots; `false` when it is full or the memory is not
+/// there.
+fn make_room(items: &mut Vec<Item>) -> bool {
+    let capacity = items.capacity();
+    if items.len() < capacity {
+        return true;
+    }
+    let wanted = if capacity < GROWTH_STEP_LIMIT {
+        (capacity * 2).max(64)
+    } else {
+        ELEMENT_SLOTS
+    };
+    let wanted = wanted.min(ELEMENT_SLOTS);
+    wanted > items.len() && items.try_reserve_exact(wanted - items.len()).is_ok()
 }
 
 /// Keeps a message to [`MAX_PROBLEM_MESSAGE`] bytes, on a character boundary.

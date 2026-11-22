@@ -561,15 +561,20 @@ fn a_declared_unit_over_the_cap_is_a_limit_and_at_the_cap_is_not() -> Result<(),
 
 #[test]
 fn the_element_limit_is_exact() -> Result<(), Refusal> {
+    let small = scanned(&annex_b())?;
+    assert_eq!(small.items.capacity(), 64);
     let full = [0x01, 0x08].repeat(MAX_RETAINED_ELEMENTS);
     let scanned = scanned(&full)?;
     assert_eq!(scanned.outcome, ScanOutcome::Complete);
     assert_eq!(scanned.items.len(), MAX_RETAINED_ELEMENTS);
+    assert_eq!(scanned.items.capacity(), ELEMENT_SLOTS);
     let over = [0x01, 0x08].repeat(MAX_RETAINED_ELEMENTS + 1);
     let scanned = self::scanned(&over)?;
     let end = 2 * MAX_RETAINED_ELEMENTS as u64;
     assert_eq!(stopped(&scanned), Some((ProblemKind::LimitReached, end, 2)));
-    assert_eq!(scanned.items.len(), MAX_RETAINED_ELEMENTS + 1);
+    assert_eq!(scanned.items.len(), ELEMENT_SLOTS);
+    // The final region took the last slot; the list never grew past it.
+    assert_eq!(scanned.items.capacity(), ELEMENT_SLOTS);
     Ok(())
 }
 
@@ -964,7 +969,8 @@ fn the_ivf_element_limit_counts_the_header() -> Result<(), Refusal> {
     assert_eq!(scanned.items.len(), MAX_RETAINED_ELEMENTS);
     let over = records(MAX_RETAINED_ELEMENTS);
     let scanned = self::scanned(&over)?;
-    assert_eq!(scanned.items.len(), MAX_RETAINED_ELEMENTS + 1);
+    assert_eq!(scanned.items.len(), ELEMENT_SLOTS);
+    assert_eq!(scanned.items.capacity(), ELEMENT_SLOTS);
     assert_eq!(
         stopped(&scanned),
         Some((

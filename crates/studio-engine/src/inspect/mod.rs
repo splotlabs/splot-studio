@@ -128,20 +128,16 @@ struct Ledger {
 }
 
 impl Ledger {
-    /// Records a queued open; `false` unless `document` is newer than every
-    /// earlier one.
-    fn queue(&mut self, document: u64) -> bool {
-        if document <= self.newest {
-            return false;
-        }
-        self.newest = document;
-        self.pending.push(document);
-        true
+    /// Whether `document` is newer than every open queued before.
+    fn admits(&self, document: u64) -> bool {
+        document > self.newest
     }
 
-    /// Forgets an open that could not be queued after all.
-    fn unqueue(&mut self, document: u64) {
-        self.pending.retain(|d| *d != document);
+    /// Records an open that [`Self::admits`] and the queue took. An open the
+    /// queue refused is not recorded, so its id stays free for a retry.
+    fn queue(&mut self, document: u64) {
+        self.newest = document;
+        self.pending.push(document);
     }
 
     /// Cancels `document`'s open; `false` when it is not pending.
@@ -277,30 +273,7 @@ fn serve<W: Write>(
                 continue;
             }
             Command::AnalysisOpen { document, source } => {
-                let mut ledger = shared.ledger();
-                if !ledger.queue(document) {
-                    let message = format!(
-                        "document ids must increase; {document} is not above {}",
-                        ledger.newest
-                    );
-                    drop(ledger);
-                    shared.send(
-                        id,
-                        failed(
-                            document,
-                            Refusal::new(AnalysisFailure::InvalidRequest, message),
-                        ),
-                    );
-                    continue;
-                }
-                if requests
-                    .try_send((id, document, Request::Open { source }))
-                    .is_err()
-                {
-                    ledger.unqueue(document);
-                    drop(ledger);
-                    busy(shared, id, document);
-                }
+                queue_open(shared, requests, id, document, source);
                 continue;
             }
             Command::AnalysisPage {
@@ -318,6 +291,44 @@ fn serve<W: Write>(
         if requests.try_send((id, document, request)).is_err() {
             busy(shared, id, document);
         }
+    }
+}
+
+/// Queues an open, or refuses it: its id must be new, and the queue must
+/// take it.
+fn queue_open<W: Write>(
+    shared: &Shared<W>,
+    requests: &SyncSender<Queued>,
+    id: u64,
+    document: u64,
+    source: WirePath,
+) {
+    // The ledger is held until the open is recorded, so the work thread
+    // cannot answer it first.
+    let mut ledger = shared.ledger();
+    if !ledger.admits(document) {
+        let message = format!(
+            "document ids must increase; {document} is not above {}",
+            ledger.newest
+        );
+        drop(ledger);
+        shared.send(
+            id,
+            failed(
+                document,
+                Refusal::new(AnalysisFailure::InvalidRequest, message),
+            ),
+        );
+        return;
+    }
+    if requests
+        .try_send((id, document, Request::Open { source }))
+        .is_ok()
+    {
+        ledger.queue(document);
+    } else {
+        drop(ledger);
+        busy(shared, id, document);
     }
 }
 
@@ -437,29 +448,48 @@ fn open_document<W: Write>(
 mod tests {
     use super::Ledger;
 
+    /// Queues `document` as the reader does when the queue takes it.
+    fn queued(ledger: &mut Ledger, document: u64) -> bool {
+        let admitted = ledger.admits(document);
+        if admitted {
+            ledger.queue(document);
+        }
+        admitted
+    }
+
     #[test]
     fn a_cancel_counts_only_while_its_open_is_pending() {
         let mut ledger = Ledger::default();
         // Cancelled before it starts, then answered as cancelled.
-        assert!(ledger.queue(1));
+        assert!(queued(&mut ledger, 1));
         assert!(ledger.cancel(1));
         assert!(ledger.settle(1));
         // After the answer, a cancel is refused.
         assert!(!ledger.cancel(1));
         // Answered first: not cancelled, and a later cancel is refused.
-        assert!(ledger.queue(2));
+        assert!(queued(&mut ledger, 2));
         assert!(!ledger.settle(2));
         assert!(!ledger.cancel(2));
         // Cancelling one pending open leaves the other alone.
-        assert!(ledger.queue(3) && ledger.queue(4));
+        assert!(queued(&mut ledger, 3) && queued(&mut ledger, 4));
         assert!(ledger.cancel(4));
         assert!(!ledger.settle(3));
         assert!(ledger.settle(4));
-        // Ids only increase; a refused id is not pending.
-        assert!(!ledger.queue(4) && !ledger.queue(2));
+        // Ids only increase; an id never sent is not pending.
+        assert!(!ledger.admits(4) && !ledger.admits(2));
         assert!(!ledger.cancel(9));
-        assert!(ledger.queue(5));
-        ledger.unqueue(5);
+    }
+
+    /// An open the full queue refused is not recorded: its id can be sent
+    /// again and it cannot be cancelled.
+    #[test]
+    fn a_refused_open_keeps_its_id_free() {
+        let mut ledger = Ledger::default();
+        assert!(queued(&mut ledger, 1));
+        // The queue refuses document 5: the reader checks and records nothing.
+        assert!(ledger.admits(5));
         assert!(!ledger.cancel(5));
+        assert!(queued(&mut ledger, 5));
+        assert!(ledger.cancel(5));
     }
 }
