@@ -603,21 +603,8 @@ impl Analysis {
                     ..
                 },
             ) => {
-                let doc = &mut self.documents[at];
-                doc.asked.retain(|a| *a != (generation, first));
-                if generation == doc.filter_generation {
-                    if answered != first || !page_fits(first, total, rows.len()) {
-                        self.broken(at, "a page that does not fit the rows it counts", &mut out);
-                        return out;
-                    }
-                    doc.total = Some(total);
-                    for (position, row) in (first..).zip(rows) {
-                        doc.rows.insert(position, row);
-                    }
-                    self.clamp_top(at);
-                    self.take_wanted(at, &mut out);
-                }
-                self.fill(at, &mut out);
+                let asked = (generation, first);
+                self.paged(at, asked, answered, total, rows, &mut out);
             }
             (
                 Asked::Locate {
@@ -656,6 +643,33 @@ impl Analysis {
             _ => self.broken(at, "an answer of the wrong kind", &mut out),
         }
         out
+    }
+
+    /// A page answered the request for `(generation, first)`.
+    fn paged(
+        &mut self,
+        at: usize,
+        (generation, first): (u64, u64),
+        answered: u64,
+        total: u64,
+        rows: Vec<Row>,
+        out: &mut Vec<Effect>,
+    ) {
+        let doc = &mut self.documents[at];
+        doc.asked.retain(|a| *a != (generation, first));
+        if generation == doc.filter_generation {
+            if answered != first || !page_fits(first, total, rows.len()) {
+                self.broken(at, "a page that does not fit the rows it counts", out);
+                return;
+            }
+            doc.total = Some(total);
+            for (position, row) in (first..).zip(rows) {
+                doc.rows.insert(position, row);
+            }
+            self.clamp_top(at);
+            self.take_wanted(at, out);
+        }
+        self.fill(at, out);
     }
 
     #[allow(clippy::too_many_arguments)]
