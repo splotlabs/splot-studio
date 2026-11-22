@@ -4,10 +4,10 @@
 //! Pushes the Analyze workspace into the window's `Analysis` global: only
 //! the visible rows and the one byte window, as display strings.
 
-use slint::{ComponentHandle, ModelRc, SharedString};
+use slint::{ComponentHandle, SharedString};
 use studio_domain::analysis::{DocumentSummary, Element, Span};
 
-use super::model;
+use super::{model, refill};
 use crate::analysis::{
     Analysis, Bytes, Document, LINE_BYTES, Phase, Selected, VISIBLE_ROWS, WINDOW_BYTES, extent,
 };
@@ -74,7 +74,9 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
     global.set_filtered(!filter.is_all());
     global.set_rows_line(text::rows_line(filter, doc.total(), summary.elements).into());
     global.set_hidden_note(text::hidden_note(doc.selected()).into());
-    global.set_rows(rows(doc));
+    if let Some(rows) = refill(&global.get_rows(), rows(doc)) {
+        global.set_rows(rows);
+    }
     global.set_total_rows(int(doc.total().unwrap_or(0)));
     global.set_top_row(int(doc.top()));
     global.set_can_back(doc.can_go_back());
@@ -82,7 +84,10 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
 
     let (title, properties) = text::properties(summary, doc.origin(), doc.path(), doc.selected());
     global.set_inspector_title(title.into());
-    global.set_properties(model(properties.into_iter().map(property).collect()));
+    let properties = properties.into_iter().map(property).collect();
+    if let Some(properties) = refill(&global.get_properties(), properties) {
+        global.set_properties(properties);
+    }
     let selected = doc.selected();
     global.set_selected_line(
         selected
@@ -185,36 +190,34 @@ fn property(p: PropertyText) -> Property {
 
 /// The visible rows: those that arrived, and a loading row for each that
 /// has not.
-fn rows(doc: &Document) -> ModelRc<NavRow> {
+fn rows(doc: &Document) -> Vec<NavRow> {
     let selected = doc.selected().map(|s| s.row.index);
     let top = doc.top();
     let end = doc.total().map_or(top.saturating_add(1), |t| {
         t.min(top.saturating_add(VISIBLE_ROWS))
     });
-    model(
-        (top..end)
-            .map(|position| match doc.row(position) {
-                Some(row) => NavRow {
-                    loaded: true,
-                    depth: i32::from(row.parent.is_some()),
-                    title: text::row_title(row).into(),
-                    detail: text::row_detail(row).into(),
-                    offset: text::row_offset(row).into(),
-                    selected: selected == Some(row.index),
-                    accessible: text::row_line(row).into(),
-                },
-                None => NavRow {
-                    loaded: false,
-                    depth: 0,
-                    title: SharedString::new(),
-                    detail: SharedString::new(),
-                    offset: SharedString::new(),
-                    selected: false,
-                    accessible: "Loading".into(),
-                },
-            })
-            .collect(),
-    )
+    (top..end)
+        .map(|position| match doc.row(position) {
+            Some(row) => NavRow {
+                loaded: true,
+                depth: i32::from(row.parent.is_some()),
+                title: text::row_title(row).into(),
+                detail: text::row_detail(row).into(),
+                offset: text::row_offset(row).into(),
+                selected: selected == Some(row.index),
+                accessible: text::row_line(row).into(),
+            },
+            None => NavRow {
+                loaded: false,
+                depth: 0,
+                title: SharedString::new(),
+                detail: SharedString::new(),
+                offset: SharedString::new(),
+                selected: false,
+                accessible: "Loading".into(),
+            },
+        })
+        .collect()
 }
 
 /// Which part of the selected element `offset` is in, from its spans.
@@ -274,7 +277,9 @@ const fn region_name(region: ByteRegion) -> &'static str {
 fn render_bytes(global: &Global<'_>, bytes: &Bytes, len: u64, selected: Option<&Selected>) {
     let element = selected.map(|s| &s.row.element);
     global.set_bytes_shown(bytes.shown);
-    global.set_legend(model(legend(element)));
+    if let Some(legend) = refill(&global.get_legend(), legend(element)) {
+        global.set_legend(legend);
+    }
     let end = bytes.offset.saturating_add(WINDOW_BYTES).min(len);
     global.set_bytes_title(
         match &bytes.data {
