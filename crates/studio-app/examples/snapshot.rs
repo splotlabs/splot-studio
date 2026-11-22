@@ -243,6 +243,7 @@ impl Driver {
                     frames_read: encoded + 14,
                     frames_encoded: encoded,
                     bytes_written: 2_481_337,
+                    frames_coded_milli: encoded * 1000,
                 },
             }),
         );

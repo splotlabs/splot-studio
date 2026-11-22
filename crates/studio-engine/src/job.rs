@@ -4,7 +4,8 @@
 //! One encode job, from source to published file.
 //!
 //! [`run`] is synchronous and owns the encoder for its whole life. It reports
-//! through a callback and checks its [`Control`]'s cancel flag before every
+//! through a callback, also from a ticker thread while a codec call runs, so
+//! the counters move inside a frame. It checks its [`Control`]'s cancel flag before every
 //! frame read, between packets, and inside the scan and verification; it
 //! hands the encoder's [`CancelToken`] to the [`Control`], which stops a
 //! codec call already running. Publication must be
@@ -15,7 +16,10 @@ use std::fs::File;
 use std::io::{self, BufWriter};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use splot_encode::{
     BitDepth, CancelToken, Config, Encoder, PixelFormat, Preset, RateControlMode, SourceFrame,
@@ -37,6 +41,11 @@ use splot_encode::y4m::Y4mHeader;
 /// recurses through the partition walk; upstream sizes its own worker and
 /// CLI threads the same way (`splot-parallel`, `WORKER_STACK_SIZE_BYTES`).
 pub const JOB_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+/// How often the encoder's own frame count is read while a codec call runs.
+/// A frame can take seconds, and a bar that moves four times a second reads
+/// as alive.
+const CODED_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Why a job or probe stopped early.
 #[derive(Debug, Error)]
@@ -110,7 +119,7 @@ impl Control for AtomicBool {
 /// Runs `job` to its terminal event: [`Event::Completed`],
 /// [`Event::Cancelled`] or [`Event::Failed`]. Every other event goes to
 /// `report` as it happens.
-pub fn run(job: &JobSpec, control: &dyn Control, report: &mut dyn FnMut(Event)) -> Event {
+pub fn run(job: &JobSpec, control: &dyn Control, report: &mut (dyn FnMut(Event) + Send)) -> Event {
     let end = execute(job, control, report);
     // `execute` has dropped or published the temporary file by now.
     control.release_temp();
@@ -137,7 +146,7 @@ pub fn spawn<T: Send + 'static>(
 fn execute(
     job: &JobSpec,
     control: &dyn Control,
-    report: &mut dyn FnMut(Event),
+    report: &mut (dyn FnMut(Event) + Send),
 ) -> Result<JobReport, Stop> {
     let cancel = control.cancel_flag();
     let source_path = job
@@ -303,6 +312,47 @@ pub fn config(header: &Y4mHeader, settings: EncoderSettings) -> Result<Config, S
     Ok(config)
 }
 
+/// The counters of an encode and where they go. The encode loop and the
+/// ticker that reads the encoder's frame count share one.
+struct Reporter<'a> {
+    progress: Progress,
+    coded: splot_encode::Progress,
+    report: &'a mut (dyn FnMut(Event) + Send),
+}
+
+impl Reporter<'_> {
+    /// The encoder's frame count in thousandths. The codec steps back by a
+    /// frame when it codes one again; the reported count does not.
+    fn coded_milli(&self) -> u64 {
+        // A frame count times 1000 is far inside `u64`, and never negative.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let milli = (self.coded.frames() * 1000.0) as u64;
+        milli.max(self.progress.frames_coded_milli)
+    }
+
+    fn emit(&mut self) {
+        self.progress.frames_coded_milli = self.coded_milli();
+        (self.report)(Event::Progress {
+            progress: self.progress,
+        });
+    }
+}
+
+fn lock<'a, 'b>(reporter: &'a Mutex<Reporter<'b>>) -> MutexGuard<'a, Reporter<'b>> {
+    reporter.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Reports the encoder's frame count whenever it has moved, until `stopped`
+/// closes. Sleeps between readings.
+fn tick(reporter: &Mutex<Reporter<'_>>, stopped: &mpsc::Receiver<()>) {
+    while stopped.recv_timeout(CODED_INTERVAL) == Err(RecvTimeoutError::Timeout) {
+        let mut reporter = lock(reporter);
+        if reporter.coded_milli() > reporter.progress.frames_coded_milli {
+            reporter.emit();
+        }
+    }
+}
+
 /// Streams every source frame through the encoder into `file` and returns
 /// the frame count. Frames get consecutive zero-based PTS in the source
 /// frame rate's time base.
@@ -312,75 +362,106 @@ fn encode(
     kind: OutputKind,
     file: &File,
     control: &dyn Control,
-    report: &mut dyn FnMut(Event),
+    report: &mut (dyn FnMut(Event) + Send),
 ) -> Result<u64, Stop> {
-    let cancel = control.cancel_flag();
     let output_error = |e: io::Error| output::output(format!("cannot write the output: {e}"));
     let mut encoder = Encoder::new(config.clone()).map_err(encoder_error)?;
     control.hold_encoder(encoder.cancel_token());
     let mut sink = PacketSink::new(kind, BufWriter::new(file), config).map_err(output_error)?;
-    let mut progress = Progress::default();
+    let reporter = Mutex::new(Reporter {
+        progress: Progress::default(),
+        coded: encoder.progress(),
+        report,
+    });
+    let (stop, stopped) = mpsc::channel();
+    let frames = thread::scope(|scope| {
+        let reporter = &reporter;
+        // Without the ticker the counters still move with every frame and packet.
+        let _ = thread::Builder::new()
+            .name("studio-progress".to_owned())
+            .spawn_scoped(scope, move || tick(reporter, &stopped));
+        let frames = encode_frames(source, config, &mut encoder, &mut sink, control, reporter);
+        drop(stop);
+        frames
+    })?;
+    sink.finish()
+        .and_then(|writer| writer.into_inner().map_err(io::IntoInnerError::into_error))
+        .and_then(File::sync_all)
+        .map_err(output_error)?;
+    Ok(frames)
+}
+
+/// The encode loop: reads every frame, drains the encoder, and returns the
+/// frame count once the encoder has returned a packet for each.
+fn encode_frames(
+    source: &mut Source,
+    config: &Config,
+    encoder: &mut Encoder,
+    sink: &mut PacketSink<BufWriter<&File>>,
+    control: &dyn Control,
+    reporter: &Mutex<Reporter<'_>>,
+) -> Result<u64, Stop> {
+    let cancel = control.cancel_flag();
+    let mut frames_read = 0;
     loop {
         stop_if(cancel)?;
         let Some(planes) = source.read_frame()? else {
             break;
         };
-        let frame = SourceFrame::new(config, progress.frames_read, planes).map_err(|e| {
+        let frame = SourceFrame::new(config, frames_read, planes).map_err(|e| {
             Stop::failed(
                 FailureCode::InvalidSource,
-                format!("frame {}: {e}", progress.frames_read),
+                format!("frame {frames_read}: {e}"),
             )
         })?;
         encoder.send_frame(frame).map_err(encoder_error)?;
-        progress.frames_read += 1;
-        report(Event::Progress { progress });
-        drain(&mut encoder, &mut sink, &mut progress, control, report)?;
+        frames_read += 1;
+        {
+            let mut reporter = lock(reporter);
+            reporter.progress.frames_read = frames_read;
+            reporter.emit();
+        }
+        drain(encoder, sink, control, reporter)?;
     }
-    if progress.frames_read == 0 {
+    if frames_read == 0 {
         return Err(Stop::failed(
             FailureCode::InvalidSource,
             "the source has no frames",
         ));
     }
-    report(Event::Stage {
+    (lock(reporter).report)(Event::Stage {
         stage: Stage::Finalizing,
     });
     encoder.flush().map_err(encoder_error)?;
-    drain(&mut encoder, &mut sink, &mut progress, control, report)?;
-    if progress.frames_encoded != progress.frames_read {
+    drain(encoder, sink, control, reporter)?;
+    let frames_encoded = lock(reporter).progress.frames_encoded;
+    if frames_encoded != frames_read {
         return Err(Stop::failed(
             FailureCode::Encoder,
-            format!(
-                "the encoder returned {} packets for {} frames",
-                progress.frames_encoded, progress.frames_read
-            ),
+            format!("the encoder returned {frames_encoded} packets for {frames_read} frames"),
         ));
     }
-    sink.finish()
-        .and_then(|writer| writer.into_inner().map_err(io::IntoInnerError::into_error))
-        .and_then(File::sync_all)
-        .map_err(output_error)?;
-    Ok(progress.frames_read)
+    Ok(frames_read)
 }
 
 /// Writes every packet the encoder has ready.
 fn drain(
     encoder: &mut Encoder,
     sink: &mut PacketSink<BufWriter<&File>>,
-    progress: &mut Progress,
     control: &dyn Control,
-    report: &mut dyn FnMut(Event),
+    reporter: &Mutex<Reporter<'_>>,
 ) -> Result<(), Stop> {
     let cancel = control.cancel_flag();
     while let Some(packet) = encoder.receive_packet().map_err(encoder_error)? {
         sink.write(&packet)
             .map_err(|e| output::output(format!("cannot write the output: {e}")))?;
         control.packet_written(&packet.data);
-        progress.frames_encoded += 1;
-        progress.bytes_written = sink.bytes();
-        report(Event::Progress {
-            progress: *progress,
-        });
+        {
+            let mut reporter = lock(reporter);
+            reporter.progress.frames_encoded += 1;
+            reporter.progress.bytes_written = sink.bytes();
+            reporter.emit();
+        }
         stop_if(cancel)?;
     }
     Ok(())

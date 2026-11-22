@@ -156,6 +156,7 @@ impl Activity {
                 frames_read: 0,
                 frames_encoded: 0,
                 bytes_written: 0,
+                frames_coded_milli: 0,
             },
             started: now,
             ended: None,
@@ -235,6 +236,7 @@ impl Activity {
             }
             Event::Completed { report } => {
                 self.progress.frames_encoded = report.frames;
+                self.progress.frames_coded_milli = report.frames.saturating_mul(1000);
                 self.progress.bytes_written = report.bytes;
                 self.phase = Phase::Completed(report);
                 Step::phase(Effect::CloseInput)
@@ -327,18 +329,25 @@ impl Activity {
             .saturating_duration_since(self.started)
     }
 
-    /// Encoded frames as a fraction of the total, only when the total is
-    /// known and counts have arrived. Before the first frame a share of
-    /// zero would look frozen; the bar stays indeterminate instead.
+    /// Coded frames as a fraction of the total, only when the total is
+    /// known and counts have arrived. Frames still inside the encoder count
+    /// by their coded share, so the bar moves between packets. Before the
+    /// first frame a share of zero would look frozen; the bar stays
+    /// indeterminate instead.
     #[must_use]
     pub fn fraction(&self) -> Option<f32> {
         let total = self.total_frames.filter(|&t| t > 0)?;
         if self.before_first_frame() {
             return None;
         }
+        let coded = self
+            .progress
+            .frames_coded_milli
+            .max(self.progress.frames_encoded.saturating_mul(1000));
+        let total = total.saturating_mul(1000);
         // Display precision only; counts stay exact everywhere else.
         #[allow(clippy::cast_precision_loss)]
-        let fraction = self.progress.frames_encoded.min(total) as f64 / total as f64;
+        let fraction = coded.min(total) as f64 / total as f64;
         #[allow(clippy::cast_possible_truncation)]
         Some(fraction as f32)
     }
@@ -363,6 +372,7 @@ mod tests {
                 frames_read: read,
                 frames_encoded: encoded,
                 bytes_written: bytes,
+                frames_coded_milli: encoded * 1000,
             },
         })
     }
@@ -403,6 +413,28 @@ mod tests {
         Input::WorkerEnded {
             detail: "exit status: 0".into(),
         }
+    }
+
+    /// Frames still inside the encoder move the bar between packets, and a
+    /// count below the packets written cannot pull it back.
+    #[test]
+    fn the_bar_moves_with_frames_in_coding() {
+        let (mut a, now) = job(Some(90));
+        a.apply(stage(Stage::Encoding), now);
+        let coding = |frames_coded_milli| {
+            Input::Event(Event::Progress {
+                progress: Progress {
+                    frames_read: 50,
+                    frames_encoded: 45,
+                    bytes_written: 1000,
+                    frames_coded_milli,
+                },
+            })
+        };
+        a.apply(coding(49_500), now);
+        assert_eq!(a.fraction(), Some(0.55));
+        a.apply(coding(0), now);
+        assert_eq!(a.fraction(), Some(0.5));
     }
 
     #[test]

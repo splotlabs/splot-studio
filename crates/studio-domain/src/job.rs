@@ -272,6 +272,11 @@ pub struct Progress {
     pub frames_encoded: u64,
     /// Bytes written to the output so far.
     pub bytes_written: u64,
+    /// Frames the encoder has coded, in thousandths of a frame. A frame
+    /// still inside the encoder counts by the share of its blocks coded, so
+    /// this moves between packets. It runs ahead of `frames_encoded` and
+    /// never goes back.
+    pub frames_coded_milli: u64,
 }
 
 /// A named verification operation.
