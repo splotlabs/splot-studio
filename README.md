@@ -26,6 +26,11 @@ codec is young.
   original, scrubbing and playback of source and result.
 - Every result is verified, then published without ever replacing an existing file. Source
   files are never modified.
+- The Analyze workspace (File > Open to Analyze, or Open in Analyze on a converted file)
+  reads AV2 IVF and Annex B files without changing them: a navigator of IVF records, OBUs and
+  regions that did not parse, the selected element's envelope and header properties with
+  their exact offsets, and its bytes. Filters by OBU type and layer, Back and Forward, go to
+  offset and copy.
 
 **What it refuses, with a reason**
 
@@ -34,10 +39,11 @@ rotation or cropping, RGB or alpha, encrypted streams, network and playlist inpu
 
 **What it does not do yet**
 
-- Analyze and Compare. The approved direction is one AV2 workbench with three workspaces
-  (Encode, Analyze for read-only stream and byte inspection, and Compare) and shared Jobs; see
-  the [roadmap](https://github.com/splotlabs/splot-studio/issues/33). Only Encode is built. The
-  Jobs entry in the toolbar is reserved and not available yet.
+- Compare, and more of Analyze. The approved direction is one AV2 workbench with three
+  workspaces (Encode, Analyze and Compare) and shared Jobs; see the
+  [roadmap](https://github.com/splotlabs/splot-studio/issues/33). Analyze shows envelope and
+  header facts only: no syntax trees, validation findings or playback yet. Compare is not
+  built, and the Jobs entry in the toolbar is reserved and not available yet.
 - Audio, subtitles and chapters are not carried over; the app lists what a file would lose
   and asks before converting. Container output with audio is planned in
   [#12](https://github.com/splotlabs/splot-studio/issues/12).

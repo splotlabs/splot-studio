@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
 //! The app without its window: the [`AppState`], the engine workers it
-//! asks for, the [`Preview`] and its engine process, and the journal it is
-//! saved to.
+//! asks for, the [`Preview`] and its engine process, the [`Analysis`] and
+//! its inspect engine process, and the journal it is saved to.
 //!
 //! [`Session::dispatch`] applies an intent and carries out its effects:
 //! starting probe and job workers, talking to them, removing a dead
@@ -24,12 +24,14 @@ use studio_domain::protocol::{BuildIdentity, Command, Envelope, Event, ProtocolE
 use studio_domain::settings::OutputKind;
 
 use crate::activity::{self, Changed};
+use crate::analysis::{self, Analysis};
 use crate::engine::{self, Delivery, Ending, EngineStatus, Role, Worker};
 use crate::journal::{self, Writer};
 use crate::preview::{self, Dirty, Preview};
 use crate::recovery::{self, RealDisk};
 use crate::source::ProbeFailure;
 use crate::state::{AppState, Effect, Intent};
+use crate::workspace::Workspace;
 
 /// The request id of the startup `Hello`; probes and jobs count from 1.
 const HELLO_ID: u64 = 0;
@@ -45,6 +47,8 @@ pub enum Route {
     Job(u64),
     /// The preview process, by how many were started before it.
     Preview(u64),
+    /// The inspect process, by how many were started before it.
+    Inspect(u64),
 }
 
 /// How worker deliveries leave their reader threads.
@@ -53,8 +57,10 @@ pub type Post = Arc<dyn Fn(Route, Delivery) + Send + Sync>;
 /// What only the window can do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiEffect {
-    /// Show the native Open dialog.
+    /// Show the native Open dialog, to add files to convert.
     ShowOpenDialog,
+    /// Show the native Open dialog, to open AV2 streams in Analyze.
+    ShowAnalyzeDialog,
     /// Show the native Save dialog.
     ShowSaveDialog {
         /// The folder to start in.
@@ -82,6 +88,33 @@ pub struct Outcome {
     pub changed: Changed,
     /// What of the picture area to redraw.
     pub preview: Dirty,
+    /// The Analyze workspace changed.
+    pub analysis: bool,
+}
+
+impl Outcome {
+    const fn nothing() -> Self {
+        Self {
+            ui: Vec::new(),
+            changed: Changed::Nothing,
+            preview: Dirty {
+                picture: false,
+                view: false,
+                thumbs: false,
+            },
+            analysis: false,
+        }
+    }
+
+    /// Adds what `other` changed.
+    fn merge(&mut self, other: Self) {
+        self.ui.extend(other.ui);
+        self.changed = more(self.changed, other.changed);
+        self.preview.picture |= other.preview.picture;
+        self.preview.view |= other.preview.view;
+        self.preview.thumbs |= other.preview.thumbs;
+        self.analysis |= other.analysis;
+    }
 }
 
 /// The state, its workers and its journal.
@@ -96,6 +129,14 @@ pub struct Session {
     /// The preview process, started on first need, with its spawn number.
     previewer: Option<(u64, Worker)>,
     previewers_started: u64,
+    analysis: Analysis,
+    /// The inspect process, started on first need, with its spawn number.
+    inspector: Option<(u64, Worker)>,
+    inspectors_started: u64,
+    /// The Analyze Open dialog is showing.
+    analyze_dialog: bool,
+    /// The window is not minimized; the picture area also needs Encode shown.
+    window_visible: bool,
     journal: Option<Writer>,
     /// The journal bytes last submitted.
     saved: Option<Vec<u8>>,
@@ -123,6 +164,11 @@ impl Session {
             preview: Preview::new(),
             previewer: None,
             previewers_started: 0,
+            analysis: Analysis::new(),
+            inspector: None,
+            inspectors_started: 0,
+            analyze_dialog: false,
+            window_visible: true,
             journal,
             saved: None,
             shut_down: false,
@@ -143,14 +189,24 @@ impl Session {
         &self.preview
     }
 
-    /// The user did something to the picture area or the window.
+    /// The Analyze workspace.
+    #[must_use]
+    pub const fn analysis(&self) -> &Analysis {
+        &self.analysis
+    }
+
+    /// The user did something to the picture area or the window. The
+    /// picture area counts as visible only while Encode is shown.
     pub fn preview_input(&mut self, input: preview::Input) -> Outcome {
-        let mut outcome = Outcome {
-            ui: Vec::new(),
-            changed: Changed::Nothing,
-            preview: Dirty::default(),
-        };
+        let mut outcome = Outcome::nothing();
         if !self.shut_down {
+            let input = match input {
+                preview::Input::Visible(visible) => {
+                    self.window_visible = visible;
+                    preview::Input::Visible(self.picture_visible())
+                }
+                other => other,
+            };
             let effects = self.preview.input(input);
             self.send_preview(effects);
             outcome.preview = self.preview.take_dirty();
@@ -171,11 +227,7 @@ impl Session {
         match started {
             Ok(worker) => {
                 self.hello = Some(worker);
-                Outcome {
-                    ui: Vec::new(),
-                    changed: Changed::Nothing,
-                    preview: Dirty::default(),
-                }
+                Outcome::nothing()
             }
             Err(e) => {
                 let status = match &self.engine {
@@ -206,14 +258,11 @@ impl Session {
 
     /// Applies `intent` and everything it leads to.
     pub fn dispatch(&mut self, intent: Intent, now: Instant) -> Outcome {
-        let mut outcome = Outcome {
-            ui: Vec::new(),
-            changed: Changed::Nothing,
-            preview: Dirty::default(),
-        };
+        let mut outcome = Outcome::nothing();
         if self.shut_down {
             return outcome;
         }
+        let workspace = self.state.workspace();
         let mut pending = VecDeque::from([intent]);
         while let Some(intent) = pending.pop_front() {
             // Destinations are looked at before anything can start, but not
@@ -239,17 +288,119 @@ impl Session {
             let effects = self.preview.sync(preview::scene(&self.state));
             self.send_preview(effects);
         }
+        if self.state.workspace() != workspace {
+            // Playback stops and nothing is asked for while Encode is hidden.
+            let effects = self
+                .preview
+                .input(preview::Input::Visible(self.picture_visible()));
+            self.send_preview(effects);
+        }
         outcome.preview = self.preview.take_dirty();
         outcome
     }
 
+    const fn picture_visible(&self) -> bool {
+        self.window_visible && matches!(self.state.workspace(), Workspace::Encode)
+    }
+
+    /// The user did something in the Analyze workspace.
+    pub fn analysis_input(&mut self, input: analysis::Input) -> Outcome {
+        let mut outcome = Outcome::nothing();
+        if self.shut_down {
+            return outcome;
+        }
+        let effects = self.analysis.input(input);
+        self.send_inspect(effects);
+        outcome.analysis = self.analysis.take_dirty();
+        outcome
+    }
+
+    /// Open to Analyze: shows Analyze and its Open dialog.
+    pub fn analyze_open_requested(&mut self, now: Instant) -> Outcome {
+        let mut outcome = self.dispatch(Intent::WorkspaceRequested(Workspace::Analyze), now);
+        if !self.shut_down && !self.analyze_dialog {
+            self.analyze_dialog = true;
+            outcome.ui.push(UiEffect::ShowAnalyzeDialog);
+        }
+        outcome
+    }
+
+    /// The Analyze Open dialog closed; empty means it was cancelled.
+    pub fn analyze_picked(&mut self, paths: Vec<PathBuf>) -> Outcome {
+        self.analyze_dialog = false;
+        if paths.is_empty() {
+            return Outcome::nothing();
+        }
+        self.analysis_input(analysis::Input::Open(paths))
+    }
+
+    /// Open in Analyze: the shown file's converted result, as it was
+    /// verified. Nothing in the queue changes.
+    pub fn analyze_result(&mut self, now: Instant) -> Outcome {
+        let Some(result) = self.state.analyzable() else {
+            return Outcome::nothing();
+        };
+        let mut outcome = self.analysis_input(analysis::Input::OpenResult(result));
+        outcome.merge(self.dispatch(Intent::WorkspaceRequested(Workspace::Analyze), now));
+        outcome
+    }
+
+    /// Sends inspect commands, starting the inspect process first if none
+    /// runs. A process that cannot be written to ends by itself; its end of
+    /// stream is what reports it.
+    fn send_inspect(&mut self, effects: Vec<analysis::Effect>) {
+        for effect in effects {
+            if self.inspector.is_none() {
+                let spawn = self.inspectors_started;
+                self.inspectors_started += 1;
+                match self.spawn_as(Role::Inspect, Route::Inspect(spawn)) {
+                    Ok(worker) => self.inspector = Some((spawn, worker)),
+                    Err(why) => {
+                        self.analysis.process_ended(&why);
+                        return;
+                    }
+                }
+            }
+            if let Some((_, worker)) = &mut self.inspector
+                && worker.send(effect.request_id, effect.command).is_err()
+            {
+                worker.close_input();
+            }
+        }
+    }
+
+    /// One delivery from inspect process number `spawn`; older processes
+    /// are ignored.
+    fn deliver_inspect(&mut self, spawn: u64, delivery: Delivery) -> Outcome {
+        if self.inspector.as_ref().is_none_or(|(n, _)| *n != spawn) {
+            if let Delivery::Pictures(slot) = delivery {
+                let _ = slot.take();
+            }
+            return Outcome::nothing();
+        }
+        let effects = match delivery {
+            Delivery::Event(envelope) => self.analysis.event(envelope.request_id, envelope.body),
+            Delivery::Pictures(slot) => {
+                // The inspect process sends no pictures.
+                let _ = slot.take();
+                Vec::new()
+            }
+            Delivery::Ended(ending) => {
+                self.inspector = None;
+                self.analysis.process_ended(&ending_text(&ending));
+                Vec::new()
+            }
+        };
+        self.send_inspect(effects);
+        Outcome {
+            analysis: self.analysis.take_dirty(),
+            ..Outcome::nothing()
+        }
+    }
+
     /// Routes one worker delivery.
     pub fn deliver(&mut self, route: Route, delivery: Delivery, now: Instant) -> Outcome {
-        let nothing = Outcome {
-            ui: Vec::new(),
-            changed: Changed::Nothing,
-            preview: Dirty::default(),
-        };
+        let nothing = Outcome::nothing();
         if self.shut_down {
             return nothing;
         }
@@ -331,14 +482,14 @@ impl Session {
                 self.dispatch(Intent::Job { id, input }, now)
             }
             Route::Preview(spawn) => self.deliver_preview(spawn, delivery),
+            Route::Inspect(spawn) => self.deliver_inspect(spawn, delivery),
         }
     }
 
     fn preview_outcome(&mut self) -> Outcome {
         Outcome {
-            ui: Vec::new(),
-            changed: Changed::Nothing,
             preview: self.preview.take_dirty(),
+            ..Outcome::nothing()
         }
     }
 
@@ -545,6 +696,7 @@ impl Session {
             self.probe.take().map(|(_, w)| w),
             self.hello.take(),
             self.previewer.take().map(|(_, w)| w),
+            self.inspector.take().map(|(_, w)| w),
         ];
         for worker in workers.into_iter().flatten() {
             worker.shutdown(engine::EXIT_GRACE);

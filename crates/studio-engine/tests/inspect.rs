@@ -14,8 +14,8 @@ use std::process::{Child, ChildStdin, ChildStdout, Command as Process, Stdio};
 
 use common::{Clip, TestResult, run_job, spec};
 use studio_domain::analysis::{
-    AnalysisFailure, DocumentSummary, Element, Framing, MAX_PAGE_ELEMENTS, ObuFact, ScanOutcome,
-    Span,
+    AnalysisFailure, DocumentSummary, Element, Framing, KindFilter, LocateTarget,
+    MAX_PAGE_ELEMENTS, ObuFact, RowFilter, ScanOutcome, Span,
 };
 use studio_domain::job::WirePath;
 use studio_domain::protocol::{
@@ -101,14 +101,21 @@ impl Inspect {
             let first = elements.len() as u64;
             match self.ask(Command::AnalysisPage {
                 document,
+                filter: RowFilter::default(),
                 first,
                 count: MAX_PAGE_ELEMENTS,
             })? {
                 Event::AnalysisPage {
                     first: f,
-                    elements: page,
+                    total: t,
+                    rows,
                     ..
-                } if f == first && !page.is_empty() => elements.extend(page),
+                } if f == first && t == total && !rows.is_empty() => {
+                    for (row, index) in rows.into_iter().zip(first..) {
+                        assert_eq!(row.index, index);
+                        elements.push(row.element);
+                    }
+                }
                 other => return Err(format!("page answered {other:?}").into()),
             }
         }
@@ -199,6 +206,7 @@ fn real_outputs_in_both_framings_and_depths() -> TestResult {
         );
         assert_eq!(summary.packets, frames as u64);
         let ivf_elements = inspect.all(ivf_doc, summary.elements)?;
+        let ivf_summary = summary;
 
         document += 1;
         let obu_doc = document;
@@ -261,6 +269,72 @@ fn real_outputs_in_both_framings_and_depths() -> TestResult {
             inspect.bytes(obu_doc, span)?,
             file[start..start + usize::try_from(span.len)?]
         );
+
+        locate_and_filter(&mut inspect, ivf_doc, &ivf_summary, &ivf_elements, frames)?;
+    }
+    Ok(())
+}
+
+/// Every OBU header byte of a real IVF document locates that OBU, inside
+/// its packet; a type filter lists as many rows as the summary counts.
+fn locate_and_filter(
+    inspect: &mut Inspect,
+    ivf_doc: u64,
+    ivf_summary: &DocumentSummary,
+    ivf_elements: &[Element],
+    frames: usize,
+) -> TestResult {
+    let tiles = ivf_elements
+        .iter()
+        .enumerate()
+        .filter_map(|(at, e)| match e {
+            Element::Obu { obu } => Some((at as u64, obu)),
+            _ => None,
+        });
+    for (index, obu) in tiles {
+        match inspect.ask(Command::AnalysisLocate {
+            document: ivf_doc,
+            filter: RowFilter::default(),
+            target: LocateTarget::Offset {
+                offset: obu.header.offset,
+            },
+        })? {
+            Event::AnalysisLocated {
+                row: Some(row),
+                found,
+                ..
+            } => {
+                assert_eq!((row, found.index), (index, index));
+                let parent = found.parent.ok_or("an IVF OBU has a packet")?;
+                let packet = &ivf_elements[usize::try_from(parent)?];
+                assert!(
+                    matches!(packet, Element::Packet { packet } if Some(packet.index) == obu.packet)
+                );
+            }
+            other => return Err(format!("locate answered {other:?}").into()),
+        }
+    }
+    let counted = ivf_summary
+        .obu_types
+        .iter()
+        .find(|t| t.type_name == "OBU_TEMPORAL_DELIMITER")
+        .ok_or("no temporal delimiters counted")?;
+    assert_eq!(counted.count, frames as u64);
+    match inspect.ask(Command::AnalysisPage {
+        document: ivf_doc,
+        filter: RowFilter {
+            kind: KindFilter::Obu {
+                obu_type: counted.obu_type,
+            },
+            layer: None,
+        },
+        first: 0,
+        count: MAX_PAGE_ELEMENTS,
+    })? {
+        Event::AnalysisPage { total, rows, .. } => {
+            assert_eq!((total, rows.len() as u64), (counted.count, counted.count));
+        }
+        other => return Err(format!("page answered {other:?}").into()),
     }
     Ok(())
 }
@@ -323,6 +397,7 @@ fn a_cancel_and_the_open_it_cancels_agree() -> TestResult {
     };
     let page = inspect.ask(Command::AnalysisPage {
         document: 1,
+        filter: RowFilter::default(),
         first: 0,
         count: 1,
     })?;
@@ -361,6 +436,7 @@ fn a_cancel_and_the_open_it_cancels_agree() -> TestResult {
     for stale in [
         Command::AnalysisPage {
             document: 2,
+            filter: RowFilter::default(),
             first: 0,
             count: 1,
         },
@@ -513,6 +589,7 @@ fn a_changed_source_closes_its_document() -> TestResult {
         .write_all(&[0x01, 0x08])?;
     let page = || Command::AnalysisPage {
         document: 1,
+        filter: RowFilter::default(),
         first: 0,
         count: 1,
     };
@@ -522,6 +599,15 @@ fn a_changed_source_closes_its_document() -> TestResult {
     );
     assert_eq!(
         failure(&inspect.ask(page())?),
+        Some(AnalysisFailure::UnknownDocument)
+    );
+    let locate = Command::AnalysisLocate {
+        document: 1,
+        filter: RowFilter::default(),
+        target: LocateTarget::Offset { offset: 0 },
+    };
+    assert_eq!(
+        failure(&inspect.ask(locate)?),
         Some(AnalysisFailure::UnknownDocument)
     );
     let summary = inspect.open(2, &path)?;

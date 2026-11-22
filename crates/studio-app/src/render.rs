@@ -5,6 +5,8 @@
 //! display strings and plain flags; [`render`] is used for every change of
 //! phase, [`render_counters`] for progress ticks.
 
+mod analysis;
+
 use std::time::Instant;
 
 use slint::{Image, Model, ModelRc, SharedString, VecModel};
@@ -21,9 +23,11 @@ use crate::simple::{self, Priority, Quality};
 use crate::state::{AppState, Mode, Severity};
 use crate::ui::{
     AppWindow, CheckRow, Fact, JobView, Notice, QueueRow, RowState, SourceView, StageState, Tone,
-    ViewMode,
+    ViewMode, WorkspaceView,
 };
 use crate::workspace::Workspace;
+
+pub use analysis::render_analysis;
 
 /// How many files the confirmation names before "and N more files".
 const SHEET_FILES: usize = 5;
@@ -33,8 +37,19 @@ const SHEET_FILES: usize = 5;
 /// Public so renderer snapshots can show a state without running workers.
 pub fn render(window: &AppWindow, state: &AppState, now: Instant) {
     let workspace = state.workspace();
-    window.set_encode_shown(workspace == Workspace::Encode);
+    window.set_workspace(match workspace {
+        Workspace::Analyze => WorkspaceView::Analyze,
+        Workspace::Encode | Workspace::Compare => WorkspaceView::Encode,
+    });
     window.set_workspace_title(workspace.label().into());
+    window.set_workspace_index(
+        Workspace::OFFERED
+            .iter()
+            .position(|w| *w == workspace)
+            .and_then(|i| i32::try_from(i).ok())
+            .unwrap_or(0),
+    );
+    window.set_can_analyze_result(state.analyzable().is_some());
     let mode = state.mode();
     window.set_view_mode(match mode {
         Mode::Empty => ViewMode::Empty,

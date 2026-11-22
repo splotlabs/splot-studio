@@ -20,10 +20,11 @@ use studio_domain::settings::OutputKind;
 use crate::activity::{self, Changed};
 use crate::engine::{Delivery, EngineStatus};
 use crate::preview::{Dirty, Input};
-use crate::render::{render, render_counters, render_preview};
+use crate::render::{render, render_analysis, render_counters, render_preview};
 use crate::session::{Outcome, Post, Route, Session, UiEffect};
 use crate::state::Intent;
 use crate::ui::AppWindow;
+use crate::workspace::Workspace;
 use crate::{APP_NAME, present, reveal};
 
 /// The window's controller.
@@ -210,6 +211,7 @@ impl Controller {
             let _ = slint::quit_event_loop();
         });
         ctl.wire_preview(window);
+        ctl.wire_analysis(window);
 
         let client = BuildIdentity {
             name: APP_NAME.to_owned(),
@@ -228,6 +230,41 @@ impl Controller {
         self.check_visible();
         let outcome = self.session.borrow_mut().dispatch(intent, Instant::now());
         self.handle(outcome);
+    }
+
+    fn wire_analysis(self: &Rc<Self>, window: &AppWindow) {
+        let weak = Rc::downgrade(self);
+        crate::bind_analysis(window, move |input| {
+            with(&weak, |ctl| {
+                let outcome = ctl.session.borrow_mut().analysis_input(input);
+                ctl.handle(outcome);
+            });
+        });
+        let session = |act: fn(&mut Session, Instant) -> Outcome| {
+            let ctl = Rc::downgrade(self);
+            move || {
+                with(&ctl, |ctl| {
+                    ctl.check_visible();
+                    let outcome = act(&mut ctl.session.borrow_mut(), Instant::now());
+                    ctl.handle(outcome);
+                });
+            }
+        };
+        window.on_analyze_open_requested(session(Session::analyze_open_requested));
+        window
+            .global::<crate::ui::Analysis>()
+            .on_open(session(Session::analyze_open_requested));
+        window.on_analyze_result_requested(session(Session::analyze_result));
+        window.on_workspace_chosen({
+            let ctl = Rc::downgrade(self);
+            move |index| {
+                if let Some(workspace) = Workspace::offered(index) {
+                    with(&ctl, |ctl| {
+                        ctl.dispatch(Intent::WorkspaceRequested(workspace));
+                    });
+                }
+            }
+        });
     }
 
     /// Hands the picture area's input to the session.
@@ -309,6 +346,7 @@ impl Controller {
         for effect in outcome.ui {
             match effect {
                 UiEffect::ShowOpenDialog => self.show_open_dialog(&window),
+                UiEffect::ShowAnalyzeDialog => self.show_analyze_dialog(&window),
                 UiEffect::ShowSaveDialog {
                     directory,
                     file_name,
@@ -355,6 +393,9 @@ impl Controller {
         }
         if outcome.preview.any() {
             render_preview(&window, state, session.preview(), outcome.preview);
+        }
+        if outcome.analysis {
+            render_analysis(&window, session.analysis());
         }
     }
 
@@ -419,6 +460,35 @@ impl Controller {
         if spawned.is_err() {
             // No event loop to drive the dialog: treat it as cancelled.
             self.dispatch(Intent::PickFinished(Vec::new()));
+        }
+    }
+
+    /// Shows the native Open dialog for AV2 streams to analyze, as
+    /// [`Self::show_open_dialog`] does for files to convert.
+    fn show_analyze_dialog(self: &Rc<Self>, window: &AppWindow) {
+        let dialog = rfd::AsyncFileDialog::new()
+            .set_title("Open AV2 Streams to Analyze")
+            .set_parent(&window.window().window_handle());
+        // A convenience, not a capability claim: the engine identifies the
+        // framing from the contents. See `show_open_dialog` for macOS.
+        #[cfg(not(target_os = "macos"))]
+        let dialog = dialog
+            .add_filter("AV2 streams", &["ivf", "obu"])
+            .add_filter("All files", &["*"]);
+        let picked = dialog.pick_files();
+        let weak = Rc::downgrade(self);
+        let spawned = slint::spawn_local(async move {
+            let paths = picked.await.map_or_else(Vec::new, |files| {
+                files.iter().map(|f| f.path().to_path_buf()).collect()
+            });
+            with(&weak, |ctl| {
+                let outcome = ctl.session.borrow_mut().analyze_picked(paths);
+                ctl.handle(outcome);
+            });
+        });
+        if spawned.is_err() {
+            let outcome = self.session.borrow_mut().analyze_picked(Vec::new());
+            self.handle(outcome);
         }
     }
 

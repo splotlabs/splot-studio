@@ -2,8 +2,9 @@
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
 // The main window: one centred card, a thin workspace shell around the Encode
-// view. The shell's toolbar names the workspace and holds the reserved Jobs
-// entry; Rust owns which workspace is shown. In Encode, Source, Quality,
+// and Analyze views (analyze.slint). The shell's toolbar switches the
+// workspace and holds the reserved Jobs entry; Rust owns which workspace is
+// shown. In Encode, Source, Quality,
 // Priority and Convert are on the left; Advanced opens to the right. Values
 // come from Rust; every callback is an intent that Rust validates and answers
 // by setting properties back. Nothing here touches files, processes or the
@@ -12,11 +13,17 @@
 import { AboutSlint, Button, ComboBox, Palette, ScrollView, SpinBox } from "std-widgets.slint";
 import { Tokens } from "tokens.slint";
 import { FocusRing, KeyboardFocus } from "focus.slint";
+import { Caption, Label, LinkButton, SectionTitle, WorkspaceSwitch } from "controls.slint";
 import { IconButton, Scrubber, Stage, StageState, ToggleChip } from "stage.slint";
+import { AnalyzeView } from "analyze.slint";
 
 // Re-exported so Rust can pin the appearance for renderer snapshots, and the
 // picture area's state for Rust to set.
 export { Palette, StageState }
+export { Analysis, AnalysisState, ByteCell, ByteLine, ByteRegion, Legend, NavRow, NavStep, Property } from "analyze.slint";
+
+// Which workspace the shell shows.
+export enum WorkspaceView { encode, analyze }
 
 // How a status line should read; the text always says the same thing in words.
 export enum Tone { neutral, success, warning, error }
@@ -107,25 +114,6 @@ component Wordmark inherits HorizontalLayout {
     }
 }
 
-component Caption inherits Text {
-    color: Tokens.text-secondary;
-    font-size: Tokens.type-caption * 1rem;
-    wrap: word-wrap;
-}
-
-component Label inherits Text {
-    color: Tokens.text;
-    font-size: Tokens.type-body * 1rem;
-    font-weight: Tokens.weight-semibold;
-}
-
-component SectionTitle inherits Text {
-    color: Tokens.text-secondary;
-    font-size: Tokens.type-caption * 1rem;
-    font-weight: Tokens.weight-semibold;
-    accessible-role: none;
-}
-
 component StatusDot inherits Rectangle {
     in property <Tone> tone;
     width: 8px;
@@ -186,68 +174,6 @@ component PrimaryButton inherits KeyboardFocus {
             font-size: Tokens.type-body * 1rem;
             font-weight: Tokens.weight-semibold;
             horizontal-alignment: center;
-            vertical-alignment: center;
-            accessible-role: none;
-        }
-    }
-
-    touch := TouchArea {
-        enabled: root.enabled;
-        mouse-cursor: root.enabled ? pointer : default;
-        clicked => {
-            root.clicked();
-        }
-    }
-}
-
-// A quiet text action ("Change…", "Advanced"). Enter or Space activates it.
-// `quiet` makes it smaller and grey until pointed at, for the many rows of
-// the file list.
-component LinkButton inherits KeyboardFocus {
-    in property <string> text;
-    in property <string> description;
-    in property <bool> quiet;
-    // A quiet action in the accent colour: the selected row's.
-    in property <bool> highlighted;
-    callback clicked();
-
-    min-height: Tokens.control-height;
-    horizontal-stretch: 0;
-    accessible-role: button;
-    accessible-label: root.text;
-    accessible-description: root.description;
-    accessible-enabled: root.enabled;
-    accessible-action-default => {
-        if root.enabled {
-            root.clicked();
-        }
-    }
-    key-pressed(event) => {
-        if root.enabled && (event.text == Key.Return || event.text == " ") {
-            root.clicked();
-            return accept;
-        }
-        reject
-    }
-
-    FocusRing {
-        shown: root.ring;
-        x: -3px;
-        y: -3px;
-        width: root.width + 6px;
-        height: root.height + 6px;
-        radius: Tokens.radius-small;
-    }
-
-    HorizontalLayout {
-        Text {
-            text: root.text;
-            color: !root.enabled ? Tokens.text-disabled
-                : touch.has-hover ? Tokens.accent-hover
-                : root.quiet && !root.highlighted ? Tokens.text-secondary
-                : Tokens.accent;
-            font-size: (root.quiet ? Tokens.type-caption : Tokens.type-body) * 1rem;
-            font-weight: Tokens.weight-semibold;
             vertical-alignment: center;
             accessible-role: none;
         }
@@ -816,11 +742,15 @@ export component AppWindow inherits Window {
     // Identity
     in property <string> app-version;
 
-    // The workspace shell: Rust says which workspace is shown and names it.
-    // Encode is the only workspace with a view. It is shown by default so a
-    // window that Rust has not rendered yet still lays out.
-    in property <bool> encode-shown: true;
+    // The workspace shell: Rust says which workspace is shown, names it and
+    // lists the workspaces that can be chosen. Encode is shown by default so
+    // a window that Rust has not rendered yet still lays out.
+    in property <WorkspaceView> workspace: WorkspaceView.encode;
     in property <string> workspace-title;
+    in property <[string]> workspace-labels;
+    in property <int> workspace-index;
+    // The shown file has a converted result Analyze can open.
+    in property <bool> can-analyze-result;
 
     // Source. Paths are display strings; Rust keeps the real paths.
     in property <SourceView> source-view;
@@ -980,6 +910,9 @@ export component AppWindow inherits Window {
     out property <int> thumb-px-height: round(36px / 1phx);
 
     callback open-requested();
+    callback analyze-open-requested();
+    callback analyze-result-requested();
+    callback workspace-chosen(int);
     callback change-requested();
     callback row-selected(int);
     callback row-action(int);
@@ -1030,6 +963,7 @@ export component AppWindow inherits Window {
     }
 
     property <keys> open-keys: @keys(Control + O);
+    property <keys> analyze-keys: @keys(Control + Shift + O);
     property <bool> has-source: root.view-mode != ViewMode.empty;
     property <bool> job-active: root.job-view == JobView.running || root.job-view == JobView.cancelling;
     property <length> main-width: 416px;
@@ -1083,11 +1017,19 @@ export component AppWindow inherits Window {
         Menu {
             title: "File";
             MenuItem {
-                title: "Open…";
+                title: "Open to Convert…";
                 shortcut: root.open-keys;
                 enabled: root.can-add && !root.sheet-open;
                 activated => {
                     root.open-requested();
+                }
+            }
+            MenuItem {
+                title: "Open to Analyze…";
+                shortcut: root.analyze-keys;
+                enabled: !root.sheet-open;
+                activated => {
+                    root.analyze-open-requested();
                 }
             }
             MenuSeparator { }
@@ -1097,6 +1039,19 @@ export component AppWindow inherits Window {
                 shortcut: @keys(Control + Q);
                 activated => {
                     root.quit-requested();
+                }
+            }
+        }
+
+        Menu {
+            title: "View";
+            for label[i] in root.workspace-labels: MenuItem {
+                title: label;
+                checkable: true;
+                checked: i == root.workspace-index;
+                enabled: !root.sheet-open;
+                activated => {
+                    root.workspace-chosen(i);
                 }
             }
         }
@@ -1136,21 +1091,23 @@ export component AppWindow inherits Window {
                     padding-bottom: root.card-padding - Tokens.space-1;
                     spacing: Tokens.space-1;
 
-                    // The shell's toolbar: the workspace shown and the shared Jobs
+                    // The shell's toolbar: the workspace switch and the shared Jobs
                     // entry. Jobs is reserved until it lists real work from every
                     // workspace, so it is present but unavailable, and no Tab stop.
-                    // Only text: it takes no control height from the card.
+                    // Caption-sized: it takes no control height from the card.
                     HorizontalLayout {
                         spacing: Tokens.space-3;
 
-                        Text {
+                        WorkspaceSwitch {
+                            options: root.workspace-labels;
+                            selected: root.workspace-index;
+                            chosen(i) => {
+                                root.workspace-chosen(i);
+                            }
+                        }
+
+                        Rectangle {
                             horizontal-stretch: 1;
-                            text: root.workspace-title;
-                            color: Tokens.text-secondary;
-                            font-size: Tokens.type-caption * 1rem;
-                            font-weight: Tokens.weight-semibold;
-                            vertical-alignment: center;
-                            accessible-label: "Workspace: " + root.workspace-title;
                         }
 
                         LinkButton {
@@ -1162,8 +1119,39 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // The workspace shown: Encode, the only one with a view.
-                    if root.encode-shown: HorizontalLayout {
+                    // Both workspaces stay alive and only the shown one is
+                    // visible, so a switch keeps each one's scroll positions and
+                    // view state. A hidden one takes no room, receives no input
+                    // or focus and is not in the accessibility tree.
+                    workspaces := Rectangle {
+                        property <bool> analyze: root.workspace == WorkspaceView.analyze;
+                        property <length> shown-width: self.analyze ? analyze-view.preferred-width : encode-view.preferred-width;
+                        property <length> shown-height: self.analyze ? analyze-view.preferred-height : encode-view.preferred-height;
+                        min-width: self.shown-width;
+                        preferred-width: self.shown-width;
+                        max-width: self.shown-width;
+                        min-height: self.shown-height;
+                        preferred-height: self.shown-height;
+                        max-height: self.shown-height;
+
+                        analyze-view := AnalyzeView {
+                            x: 0;
+                            y: 0;
+                            width: self.preferred-width;
+                            height: self.preferred-height;
+                            visible: parent.analyze;
+                            open-shortcut: root.analyze-keys.to-string();
+                            copy(text) => {
+                                root.copy-text(text);
+                            }
+                        }
+
+                    encode-view := HorizontalLayout {
+                        x: 0;
+                        y: 0;
+                        width: self.preferred-width;
+                        height: self.preferred-height;
+                        visible: !parent.analyze;
                         alignment: start;
                         accessible-role: main;
                         accessible-label: root.workspace-title;
@@ -1825,6 +1813,14 @@ export component AppWindow inherits Window {
                                             }
                                         }
 
+                                        if root.can-analyze-result: Button {
+                                            text: "Open in Analyze";
+                                            accessible-description: "Inspect the converted file's OBUs and bytes, without reading it in again as a source";
+                                            clicked => {
+                                                root.analyze-result-requested();
+                                            }
+                                        }
+
                                         Button {
                                             text: "Convert Another";
                                             accessible-description: "Clear this result and choose another video";
@@ -2045,6 +2041,19 @@ export component AppWindow inherits Window {
                                                 accessible-role: none;
                                             }
                                         }
+
+                                        // The list's converted row; one file has a button.
+                                        if root.can-analyze-result && root.view-mode == ViewMode.list: HorizontalLayout {
+                                            alignment: start;
+
+                                            LinkButton {
+                                                text: "Open in Analyze";
+                                                description: "Inspect the converted file's OBUs and bytes, without reading it in again as a source";
+                                                clicked => {
+                                                    root.analyze-result-requested();
+                                                }
+                                            }
+                                        }
                                     }
 
                                     if root.has-track-picker: VerticalLayout {
@@ -2108,8 +2117,22 @@ export component AppWindow inherits Window {
                                 }
                         }
                     }
+                    }
                 }
         }
+    }
+
+    // Copies to the clipboard through a hidden text field: the platform
+    // clipboard is only reachable from a text element.
+    public function copy-text(text: string) {
+        clip.text = text;
+        clip.select-all();
+        clip.copy();
+    }
+
+    clip := TextInput {
+        visible: false;
+        read-only: true;
     }
 
     // The video-only confirmation. Modal: clicks outside it reach nothing,

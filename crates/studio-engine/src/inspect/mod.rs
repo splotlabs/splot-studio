@@ -29,7 +29,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 
-use studio_domain::analysis::AnalysisFailure;
+use studio_domain::analysis::{AnalysisFailure, LocateTarget, RowFilter};
 use studio_domain::job::WirePath;
 use studio_domain::protocol::{
     Command, Envelope, ErrorCode, Event, ProtocolError, decode, read_frame, write_message,
@@ -93,9 +93,22 @@ pub fn run(input: &mut impl Read, output: impl Write + Send) -> Result<(), Sessi
 /// One request for the work thread.
 #[derive(Debug)]
 enum Request {
-    Open { source: WirePath },
-    Page { first: u64, count: u32 },
-    Bytes { offset: u64, len: u32 },
+    Open {
+        source: WirePath,
+    },
+    Page {
+        filter: RowFilter,
+        first: u64,
+        count: u32,
+    },
+    Locate {
+        filter: RowFilter,
+        target: LocateTarget,
+    },
+    Bytes {
+        offset: u64,
+        len: u32,
+    },
     Close,
 }
 
@@ -278,9 +291,22 @@ fn serve<W: Write>(
             }
             Command::AnalysisPage {
                 document,
+                filter,
                 first,
                 count,
-            } => (document, Request::Page { first, count }),
+            } => (
+                document,
+                Request::Page {
+                    filter,
+                    first,
+                    count,
+                },
+            ),
+            Command::AnalysisLocate {
+                document,
+                filter,
+                target,
+            } => (document, Request::Locate { filter, target }),
             Command::AnalysisBytes {
                 document,
                 offset,
@@ -360,12 +386,28 @@ fn work<W: Write>(queue: &Receiver<Queued>, shared: &Shared<W>) {
                 continue;
             }
             (_, None) => failed(document, unknown()),
-            (Request::Page { first, count }, Some(at)) => {
-                match documents[at].1.page(first, count) {
-                    Ok(elements) => Event::AnalysisPage {
+            (
+                Request::Page {
+                    filter,
+                    first,
+                    count,
+                },
+                Some(at),
+            ) => match documents[at].1.page(filter, first, count) {
+                Ok((total, rows)) => Event::AnalysisPage {
+                    document,
+                    first,
+                    total,
+                    rows,
+                },
+                Err(refusal) => dropped(&mut documents, at, document, refusal),
+            },
+            (Request::Locate { filter, target }, Some(at)) => {
+                match documents[at].1.locate(filter, target) {
+                    Ok((row, found)) => Event::AnalysisLocated {
                         document,
-                        first,
-                        elements,
+                        row,
+                        found: Box::new(found),
                     },
                     Err(refusal) => dropped(&mut documents, at, document, refusal),
                 }
