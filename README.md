@@ -20,8 +20,8 @@ codec is young.
 
 - Converts ordinary local video files (MP4, MOV, MKV, WebM, MPEG-TS, AVI) and Y4M to
   video-only AV2, as IVF or an Annex B `.obu` stream. 8-bit and 10-bit SDR.
-- One compact window: pick Quality and Priority, press Convert, watch real progress, cancel.
-  Several files queue up, and the list survives restarts and crashes.
+- One compact window, the Encode workspace: pick Quality and Priority, press Convert, watch
+  real progress, cancel. Several files queue up, and the list survives restarts and crashes.
 - Preview: the real encoded picture while converting, press and hold to compare with the
   original, scrubbing and playback of source and result.
 - Every result is verified, then published without ever replacing an existing file. Source
@@ -34,6 +34,10 @@ rotation or cropping, RGB or alpha, encrypted streams, network and playlist inpu
 
 **What it does not do yet**
 
+- Analyze and Compare. The approved direction is one AV2 workbench with three workspaces
+  (Encode, Analyze for read-only stream and byte inspection, and Compare) and shared Jobs; see
+  the [roadmap](https://github.com/splotlabs/splot-studio/issues/33). Only Encode is built. The
+  Jobs entry in the toolbar is reserved and not available yet.
 - Audio, subtitles and chapters are not carried over; the app lists what a file would lose
   and asks before converting. Container output with audio is planned in
   [#12](https://github.com/splotlabs/splot-studio/issues/12).

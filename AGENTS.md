@@ -25,8 +25,19 @@ ratchets, command names, or documentation to justify a cleanup.
 
 ## Product boundaries
 
-Splot Studio is a Rust/Slint desktop AV2 encoder workbench for Windows, macOS, and
-Linux. No browser target. First product phase writes IVF and AV2 Annex B `.obu`.
+Splot Studio is a Rust/Slint desktop AV2 workbench for Windows, macOS, and Linux.
+No browser target.
+
+Approved direction (owner, November 2026; roadmap #33): one application with
+three task workspaces, Encode, Analyze and Compare, and shared Jobs. This is a
+roadmap, not shipped capability. Today only Encode exists. Do not show Analyze,
+Compare or Jobs as available, or describe them as working, until their flows
+land. Analyze starts read-only: no bitstream rewriting, repair or source
+mutation. AV2 parsing, validation and codec instrumentation belong in Splot,
+not in a second Studio implementation. The direction does not relax any rule
+below.
+
+Encode writes IVF and AV2 Annex B `.obu`.
 This is video-only output; nonvideo input tracks are inventoried and explicitly
 excluded with acknowledgement. MKV/audio/subtitle output is a later gated phase.
 Eight-bit and ten-bit SDR are equal targets. HDR/HLG, unproven VFR, live capture,

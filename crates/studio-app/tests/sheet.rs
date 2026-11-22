@@ -112,7 +112,7 @@ fn the_confirmation_defaults_to_cancel_and_keeps_the_keyboard() {
     assert_eq!(counts(), (2, 4), "Shift+Tab reaches Convert Video Only");
     // Clicks outside the card reach nothing behind it (the empty state's
     // Open zone is here).
-    click(&window, 232.0, 120.0);
+    click(&window, 232.0, 160.0);
     click(&window, 20.0, 620.0);
     assert_eq!(opened.get(), 0, "the window behind the sheet got a click");
     assert_eq!(counts(), (2, 4));

@@ -36,6 +36,7 @@ use crate::queue::{Acknowledgement, Item, ItemId, ItemState, PartialFate};
 use crate::recovery::{Disk, Recovered};
 use crate::simple::{Priority, Quality};
 use crate::source::{ProbeFailure, ProbeRequest, TrackPicker};
+use crate::workspace::Workspace;
 
 /// `splot_encode::Config::DEFAULT_CRF` at the pinned codec revision.
 const CODEC_DEFAULT_CRF: u8 = 20;
@@ -105,6 +106,8 @@ pub enum Intent {
     PrioritySelected(i32),
     /// Clear the one file to start over (Convert Another).
     ResetRequested,
+    /// Show another workspace. Refused while it has no flow in this build.
+    WorkspaceRequested(Workspace),
     /// The startup handshake finished: what the engine can do, or why it
     /// cannot be used.
     EngineAnswered(Result<Capabilities, String>),
@@ -349,6 +352,8 @@ pub struct AppState {
     journal_problem: Option<JournalProblem>,
     save_error: Option<String>,
     next_request: u64,
+    /// The workspace the window shows: view state, not journalled.
+    workspace: Workspace,
 }
 
 impl Default for AppState {
@@ -377,6 +382,7 @@ impl AppState {
             journal_problem: startup.problem,
             save_error: None,
             next_request: 1,
+            workspace: Workspace::Encode,
         };
         if let Some(recovered) = startup.recovered {
             let interrupted = recovered
@@ -498,6 +504,11 @@ impl AppState {
             Intent::ResetRequested => {
                 if self.items.len() == 1 && !self.items[0].state.is_active() {
                     self.remove(self.items[0].id);
+                }
+            }
+            Intent::WorkspaceRequested(workspace) => {
+                if workspace.available() {
+                    self.workspace = workspace;
                 }
             }
             Intent::EngineAnswered(answer) => self.engine = Some(answer),
@@ -638,6 +649,12 @@ impl AppState {
     pub fn chosen_index(&self) -> Option<usize> {
         let id = self.selected?;
         self.items.iter().position(|i| i.id == id)
+    }
+
+    /// The workspace the window shows.
+    #[must_use]
+    pub const fn workspace(&self) -> Workspace {
+        self.workspace
     }
 
     /// The converting item, if any.
