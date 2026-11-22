@@ -11,8 +11,8 @@
 //! Conversions are the queue items that have an attempt or are queued in
 //! the current run. Inspections are the documents' reads: the engine reads
 //! one file at a time, in the order asked, so of several pending reads the
-//! first runs and the others are queued. Unread and missing documents have
-//! no read, so no job.
+//! first runs and the others are queued. Unread, missing and changed
+//! documents have no read the engine holds, so no job.
 
 use studio_domain::analysis::{ProblemKind, ScanOutcome};
 
@@ -32,6 +32,9 @@ pub enum State {
     Cancelling,
     /// Finished.
     Completed,
+    /// A read that ended where the file stopped parsing: what came before
+    /// is kept, the rest is not read.
+    Stopped,
     /// Stopped on request. A read keeps what it read.
     Cancelled,
     /// Ended with a failure.
@@ -131,16 +134,12 @@ fn read(doc: &Document, first_read: Option<u64>) -> Option<State> {
         Phase::Opening if Some(doc.id()) == first_read => State::Running,
         Phase::Opening => State::Queued,
         Phase::Cancelling => State::Cancelling,
-        Phase::Open(summary)
-        | Phase::Changed {
-            read: Some(summary),
-            ..
-        } => match &summary.outcome {
+        Phase::Open(summary) => match &summary.outcome {
             ScanOutcome::Stopped { problem } => match problem.kind {
                 ProblemKind::Cancelled => State::Cancelled,
                 ProblemKind::Io | ProblemKind::LimitReached => State::Failed,
-                // The file itself ends the read: it was read as far as it goes.
-                ProblemKind::Malformed | ProblemKind::Unsupported => State::Completed,
+                // The file itself ends the read: kept up to there, not whole.
+                ProblemKind::Malformed | ProblemKind::Unsupported => State::Stopped,
             },
             ScanOutcome::Complete | ScanOutcome::Damaged { .. } => State::Completed,
         },
@@ -149,6 +148,7 @@ fn read(doc: &Document, first_read: Option<u64>) -> Option<State> {
             ReadEnd::Cancel => State::Cancelled,
             ReadEnd::EngineStopped => State::Interrupted,
         },
-        Phase::Unread | Phase::Missing | Phase::Changed { read: None, .. } => return None,
+        // No read, or none held: a changed file waits to be read as new.
+        Phase::Unread | Phase::Missing | Phase::Changed { .. } => return None,
     })
 }

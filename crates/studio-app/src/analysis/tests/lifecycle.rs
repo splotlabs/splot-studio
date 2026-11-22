@@ -119,22 +119,29 @@ fn a_changed_file_waits_until_it_is_read_as_new() {
     let mut analysis = restored(vec![saved(Some(old))], 0, 0);
     let effects = analysis.read_shown(&Everything(Kind::File));
     let after_open = engine.answer(&mut analysis, effects);
-    // Nothing of the new read is asked for or shown.
-    assert!(after_open.is_empty(), "{after_open:?}");
-    assert!(matches!(doc(&analysis).phase(), Phase::Changed { .. }));
+    // Nothing of the new read is asked for or shown: the engine gives it
+    // back.
+    assert!(
+        matches!(
+            commands(&after_open)[..],
+            [Command::AnalysisClose { document: 1 }]
+        ),
+        "{after_open:?}"
+    );
+    assert_eq!(
+        *doc(&analysis).phase(),
+        Phase::Changed {
+            now: fingerprint(200)
+        }
+    );
     assert!(doc(&analysis).summary().is_none());
     assert!(doc(&analysis).selected().is_none());
-    // The engine holds the read; the journal keeps the old view.
-    assert!(analysis.needs_engine());
+    assert!(!analysis.needs_engine());
+    // The journal keeps the old view, and Jobs has no read of it.
     assert_eq!(analysis.saved().0, [saved(Some(old))]);
-    // Jobs says nothing about the new facts either.
     let state = crate::state::AppState::default();
-    let jobs = crate::jobs::list(&state, &analysis);
-    let detail = crate::present::jobs::line(&jobs[0]).detail;
-    assert!(
-        detail.contains("changed") && !detail.contains("elements"),
-        "{detail}"
-    );
+    assert!(crate::jobs::list(&state, &analysis).is_empty());
+    engine.settle(&mut analysis, after_open);
 
     let effects = analysis.input(Input::Resolve);
     engine.settle(&mut analysis, effects);
@@ -160,7 +167,7 @@ fn a_changed_size_or_time_waits_without_a_read() {
     for now in [fingerprint(120), later] {
         let mut analysis = restored(vec![saved(Some(old))], 0, 0);
         assert_eq!(analysis.read_shown(&Stat(now)), []);
-        assert_eq!(*doc(&analysis).phase(), Phase::Changed { now, read: None });
+        assert_eq!(*doc(&analysis).phase(), Phase::Changed { now });
         assert!(!analysis.needs_engine());
         assert_eq!(analysis.saved().0, [saved(Some(old))]);
         // Closing it has no read to close.
@@ -226,18 +233,37 @@ fn closing_the_shown_document_reads_the_next_one() {
     assert_eq!(*analysis.documents()[1].phase(), Phase::Unread);
 }
 
+/// The engine stops while one document is read and another one waits as
+/// changed: only the read in the engine ends, as interrupted.
 #[test]
-fn closing_a_changed_document_closes_its_read() {
+fn an_engine_stop_ends_only_the_reads_it_held() {
+    use crate::jobs::{self, State};
     let engine = Engine { rows: stream(10) };
-    let mut analysis = restored(vec![saved(Some(restore(99, None, type_7())))], 0, 0);
+    let changed = saved(Some(restore(99, None, type_7())));
+    let mut analysis = restored(vec![changed.clone()], 0, 0);
     let effects = analysis.read_shown(&Everything(Kind::File));
     engine.settle(&mut analysis, effects);
-    let effects = analysis.input(Input::Close);
+    // Closing it has no read to close.
+    let mut closed = restored(vec![changed], 0, 0);
+    let effects = closed.read_shown(&Everything(Kind::File));
+    engine.settle(&mut closed, effects);
+    assert_eq!(closed.input(Input::Close), []);
+
+    analysis.input(Input::Open(vec![PathBuf::from("/media/b.obu")]));
+    let state = crate::state::AppState::default();
+    let states = |analysis: &Analysis| -> Vec<State> {
+        jobs::list(&state, analysis)
+            .iter()
+            .map(|j| j.state)
+            .collect()
+    };
+    assert_eq!(states(&analysis), [State::Running]);
+    analysis.process_ended("signal: 9");
+    assert_eq!(states(&analysis), [State::Interrupted]);
     assert!(matches!(
-        commands(&effects)[..],
-        [Command::AnalysisClose { document: 1 }]
+        analysis.documents()[0].phase(),
+        Phase::Changed { .. }
     ));
-    assert!(!analysis.needs_engine());
 }
 
 #[test]
@@ -554,9 +580,27 @@ fn jobs_list_each_read_with_its_own_state() {
         states(&analysis),
         [State::Interrupted, State::Interrupted, State::Interrupted]
     );
-    // A whole read is complete.
+    // A whole read is complete; one that stopped where the file does not
+    // parse is not, and says so in words as well as in its tone.
     let (analysis, _) = opened(3);
     assert_eq!(states(&analysis), [State::Completed]);
+    for kind in [ProblemKind::Malformed, ProblemKind::Unsupported] {
+        let mut analysis = Analysis::new();
+        let open = analysis.input(Input::Open(vec![PathBuf::from(PATH)]));
+        analysis.event(
+            open[0].request_id,
+            Event::AnalysisOpened {
+                document: 1,
+                summary: stopped(kind),
+            },
+        );
+        assert_eq!(states(&analysis), [State::Stopped]);
+        let state = crate::state::AppState::default();
+        let line = crate::present::jobs::line(&jobs::list(&state, &analysis)[0]);
+        assert_eq!(line.state, "Stopped");
+        assert_eq!(line.tone, crate::present::Tone::Warning);
+        assert!(line.detail.contains("stopped at byte 9"), "{}", line.detail);
+    }
 }
 
 /// A read again that stops before the restored selection keeps the whole
