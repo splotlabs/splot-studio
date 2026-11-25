@@ -35,8 +35,7 @@ and header facts and bytes) and shared Jobs exist. Do not show Compare as
 available, or describe it or deeper Analyze features as working, until their
 flows land.
 Analyze starts read-only: no bitstream rewriting, repair or source mutation.
-AV2 parsing, validation and codec instrumentation belong in Splot, not in a
-second Studio implementation. The direction does not relax any rule below.
+Splot owns AV2 parsing, validation, and codec instrumentation.
 
 Encode writes IVF and AV2 Annex B `.obu`.
 This is video-only output; nonvideo input tracks are inventoried and explicitly
@@ -44,9 +43,11 @@ excluded with acknowledgement. MKV/audio/subtitle output is a later gated phase.
 Eight-bit and ten-bit SDR are equal targets. HDR/HLG, unproven VFR, live capture,
 network sources, and partial-bitstream resume are not silently implemented.
 
-Planned work, known defects and release blockers are GitHub issues (label
-`release-blocker`). Do one issue per change. Do not reopen the
-Slint/toolkit choice.
+Track planned work in GitHub issues. Use the `release-blocker` label for release blockers.
+Keep one issue per change. Fix authorized defects during the session.
+For a deferred fix, open or update an issue in the owning repository before handover.
+Follow the [shared issue procedure](https://github.com/splotlabs/.github/blob/main/AGENTS.md#defects-found-during-work).
+Do not reopen the Slint/toolkit choice.
 
 ## Before editing
 
@@ -90,9 +91,12 @@ studio-media    audited FFmpeg input adapter -> studio-domain; added only when u
 xtask           standalone development automation
 ```
 
-Keep codec integration in the engine, not in UI callbacks. No package depends on
-the app executable or Splot CLI. No copy of codec algorithms, AV2 parsers/tables,
-Y4M reader, or IVF writer when a usable upstream API exists. Preview may be an app
+Keep codec integration in the engine. No package depends on the app executable or Splot CLI.
+Check the failure against Splot's public API at the revision in Cargo.lock.
+Fix incorrect API use, job handling, or presentation in the responsible Studio crate.
+If the API fails on valid use or lacks a required capability, fix or track it in Splot.
+Never add a local codec implementation or silently suppress a codec error.
+Use the upstream Y4M reader and IVF writer when available. Preview may be an app
 module; extract a crate only for a real boundary. No raw FFmpeg pointers outside
 its adapter and no Slint types in the media/job model.
 
@@ -103,8 +107,7 @@ Until Splot has releases,
 splot-* Git sources track `main` (owner decision, 2026-11-20): Cargo.lock holds the
 one exact commit for all of them, and it moves only by a deliberate `cargo update`
 with the full gate. No other moving branch dependency, uncommitted path patch,
-random prebuilt FFmpeg, or generated latest-version guess. Codec limitations are
-reported and fixed in the Splot repository, not worked around here.
+random prebuilt FFmpeg, or generated latest-version guess.
 
 Add only dependencies that are used. New dependencies or crate-graph changes
 require justification and maintainer approval. Candidate
@@ -197,8 +200,8 @@ errors, worker death, cancellation, file failures, and actual UI behaviour.
 Record host/target/renderer/build. Cross-compile is not runtime testing; configured
 CI is not executed CI; missing independent tests are not passes.
 
-Report exact checks and results in the pull request. File remaining risks as GitHub
-issues. Keep documentation for people: no agent plans, prompts, status reports,
+Report exact checks and results in the pull request. Track remaining risks in the
+appropriate issue. Keep documentation for people: no agent plans, prompts, status reports,
 generated matrices or evidence dumps in the repository, and no fake screenshots
 or unrun benchmark numbers.
 
