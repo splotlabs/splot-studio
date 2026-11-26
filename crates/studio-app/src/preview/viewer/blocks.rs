@@ -47,7 +47,7 @@ impl Preview {
     }
 
     fn block_picture_header(&self) -> Option<(&PictureHeader, u64, LayerDecodeSelection)> {
-        if !self.can_sample() {
+        if !self.can_inspect_stage() {
             return None;
         }
         let shown = self.shown.as_ref()?;

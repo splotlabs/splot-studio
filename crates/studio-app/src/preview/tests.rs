@@ -966,6 +966,7 @@ fn reference_preview_verifies_the_coded_source_without_replacing_the_main_pictur
         }
     ));
     assert_eq!(preview.document_request_generation(), None);
+    assert!(preview.block_picture().is_some());
     // The output uses a later temporal layer to display the coded reference.
     preview.picture(output_picture(request.request_id, 1, None));
     assert_eq!(
