@@ -1,0 +1,389 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+import { Button, CheckBox, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
+import { Caption, Label, LinkButton, SectionTitle } from "controls.slint";
+import { FocusRing, KeyboardFocus } from "focus.slint";
+import { Tokens } from "tokens.slint";
+
+export struct AdvancedOptionRow {
+    key: string,
+    label: string,
+    group: string,
+    modified: bool,
+}
+
+export struct FieldRow {
+    id: string,
+    label: string,
+    kind: string,
+    text: string,
+    choices: [string],
+    help: string,
+}
+
+component SettingRow inherits KeyboardFocus {
+    in property <AdvancedOptionRow> item;
+    in property <bool> selected;
+    callback chosen();
+
+    min-height: words.preferred-height + 2 * Tokens.space-1;
+    accessible-role: button;
+    accessible-label: root.item.label + ", " + root.item.key + (root.item.modified ? ", modified" : "") + (root.selected ? ", selected" : "");
+    accessible-action-default => { root.chosen(); }
+    key-pressed(event) => {
+        if event.text == Key.Return || event.text == " " {
+            root.chosen();
+            return accept;
+        }
+        reject
+    }
+
+    Rectangle {
+        background: root.selected ? Tokens.row-selected : touch.has-hover ? Tokens.row-hover : transparent;
+        border-radius: Tokens.radius-small;
+    }
+
+    words := VerticalLayout {
+        padding: Tokens.space-1;
+
+        Text {
+            text: root.item.label + (root.item.modified ? " •" : "");
+            color: Tokens.text;
+            font-size: Tokens.type-caption * 1rem;
+            font-weight: root.selected ? Tokens.weight-semibold : Tokens.weight-regular;
+            wrap: word-wrap;
+            accessible-role: none;
+        }
+
+        Text {
+            text: root.item.key;
+            color: Tokens.text-secondary;
+            font-size: Tokens.type-caption * 1rem;
+            wrap: char-wrap;
+            accessible-role: none;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.focus();
+            root.chosen();
+        }
+    }
+
+    FocusRing {
+        shown: root.ring;
+        radius: Tokens.radius-small;
+    }
+}
+
+component SettingField inherits VerticalLayout {
+    in property <FieldRow> item;
+    in property <string> option-key;
+    in property <bool> editable;
+    in property <int> focus-request;
+    callback committed(string);
+
+    property <string> draft;
+    property <string> draft-option;
+    property <string> draft-field;
+    property <bool> dirty;
+    property <bool> same-field: root.draft-option == root.option-key && root.draft-field == root.item.id;
+    function commit-draft() {
+        if root.dirty && root.same-field && root.draft != root.item.text {
+            root.dirty = false;
+            root.committed(root.draft);
+        }
+    }
+
+    spacing: Tokens.space-1;
+    changed focus-request => {
+        if root.focus-request > 0 {
+            if text-field.enabled { text-field.focus(); }
+            if choice-field.enabled { choice-field.focus(); }
+            if action-field.enabled { action-field.focus(); }
+        }
+    }
+
+    if root.item.kind != "action": Caption {
+        text: root.item.label;
+    }
+
+    text-field := LineEdit {
+        visible: root.item.kind == "text";
+        enabled: root.editable && self.visible;
+        height: self.visible ? max(self.preferred-height, Tokens.control-height) : 0px;
+        font-size: Tokens.type-caption * 1rem;
+        text: root.dirty && root.same-field ? root.draft : root.item.text;
+        accessible-label: root.item.label;
+        accessible-description: root.item.help;
+        edited(value) => {
+            root.draft = value;
+            root.draft-option = root.option-key;
+            root.draft-field = root.item.id;
+            root.dirty = true;
+        }
+        accepted => { root.commit-draft(); }
+        changed has-focus => {
+            if !self.has-focus {
+                root.commit-draft();
+                root.dirty = false;
+            }
+        }
+    }
+
+    choice-field := ComboBox {
+        visible: root.item.kind == "choice";
+        enabled: root.editable && self.visible;
+        height: self.visible ? max(self.preferred-height, Tokens.control-height) : 0px;
+        model: root.item.choices;
+        current-value: root.item.text;
+        accessible-label: root.item.label;
+        accessible-description: root.item.help;
+        selected(value) => { root.committed(value); }
+    }
+
+    action-field := Button {
+        visible: root.item.kind == "action";
+        enabled: root.editable && self.visible;
+        height: self.visible ? max(self.preferred-height, Tokens.control-height) : 0px;
+        text: root.item.label;
+        accessible-description: root.item.help;
+        clicked => { root.committed(root.item.text); }
+    }
+
+    if root.item.kind == "readonly": Caption {
+        text: root.item.text;
+    }
+
+    if root.item.help != "": Caption {
+        text: root.item.help;
+    }
+}
+
+export component AdvancedEditor inherits VerticalLayout {
+    in property <[AdvancedOptionRow]> options;
+    in property <[FieldRow]> fields;
+    in property <string> selected;
+    in property <string> label;
+    in property <string> help;
+    in property <string> effective;
+    in property <string> screen;
+    in property <string> origin;
+    in property <string> error;
+    in property <string> status;
+    in property <string> preset-preview;
+    in property <bool> can-undo;
+    in property <bool> can-redo;
+    in property <bool> can-apply-preset;
+    in property <bool> editable;
+    in property <int> focus-request;
+    in property <string> focus-field;
+    in-out property <string> query;
+    in-out property <bool> modified-only;
+    in-out property <bool> expert;
+    callback search(string);
+    callback modified(bool);
+    callback show-expert(bool);
+    callback select(string);
+    callback edit(string, string);
+    callback reset(string);
+    callback undo();
+    callback redo();
+    callback apply-preset();
+    callback cancel-preset();
+
+    spacing: Tokens.space-2;
+    accessible-role: groupbox;
+    accessible-label: "Encoder options";
+
+    HorizontalLayout {
+        spacing: Tokens.space-2;
+        Label {
+            text: "Encoder options";
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+        }
+
+        LinkButton {
+            quiet: true;
+            text: "Undo";
+            description: "Undo the last configuration change";
+            enabled: root.editable && root.can-undo;
+            clicked => { root.undo(); }
+        }
+
+        LinkButton {
+            quiet: true;
+            text: "Redo";
+            description: "Redo the last configuration change";
+            enabled: root.editable && root.can-redo;
+            clicked => { root.redo(); }
+        }
+
+        LinkButton {
+            quiet: true;
+            text: "Reset all";
+            description: "Remove all explicit overrides";
+            enabled: root.editable;
+            clicked => { root.reset("all"); }
+        }
+    }
+
+    LineEdit {
+        text <=> root.query;
+        placeholder-text: "Search settings or option keys";
+        accessible-label: "Search encoder options";
+        edited(value) => { root.search(value); }
+    }
+
+    HorizontalLayout {
+        spacing: Tokens.space-3;
+        alignment: start;
+
+        CheckBox {
+            text: "Modified only";
+            checked <=> root.modified-only;
+            toggled => { root.modified(self.checked); }
+        }
+
+        CheckBox {
+            text: "Expert";
+            checked <=> root.expert;
+            accessible-description: "Show research and unstable controls";
+            toggled => { root.show-expert(self.checked); }
+        }
+    }
+
+    if root.status != "": Caption {
+        text: root.status;
+    }
+
+    if root.preset-preview != "": VerticalLayout {
+        spacing: Tokens.space-1;
+        Label { text: "Preset differences"; }
+        Caption { text: root.preset-preview; }
+        HorizontalLayout {
+            spacing: Tokens.space-2;
+            alignment: start;
+            Button {
+                text: "Apply preset";
+                enabled: root.editable && root.can-apply-preset;
+                clicked => { root.apply-preset(); }
+            }
+            LinkButton {
+                text: "Cancel";
+                clicked => { root.cancel-preset(); }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        height: 348px;
+        spacing: Tokens.space-2;
+
+        Rectangle {
+            width: 164px;
+            background: Tokens.surface;
+            border-radius: Tokens.radius-medium;
+
+            ScrollView {
+                horizontal-scrollbar-policy: always-off;
+                content-height: index-layout.preferred-height;
+                index-layout := VerticalLayout {
+                    width: parent.width;
+                    height: self.preferred-height;
+                    alignment: start;
+                    padding: Tokens.space-2;
+                    spacing: Tokens.space-1;
+
+                    if root.options.length == 0: Caption {
+                        text: root.query != "" || root.modified-only ? "No matching options." : "No options available.";
+                    }
+
+                    for row[i] in root.options: VerticalLayout {
+                        spacing: Tokens.space-1;
+
+                        if i == 0 || row.group != root.options[i - 1].group: SectionTitle {
+                            text: row.group;
+                            wrap: word-wrap;
+                        }
+
+                        SettingRow {
+                            item: row;
+                            selected: row.key == root.selected;
+                            chosen => { root.select(row.key); }
+                        }
+                    }
+                }
+            }
+        }
+
+        ScrollView {
+            horizontal-stretch: 1;
+            horizontal-scrollbar-policy: always-off;
+            content-height: detail.preferred-height;
+
+            detail := VerticalLayout {
+                width: parent.width;
+                height: self.preferred-height;
+                padding-right: Tokens.space-2;
+                alignment: start;
+                spacing: Tokens.space-2;
+
+                if root.selected == "": Caption {
+                    text: "Select an option to review or edit its value.";
+                }
+
+                if root.selected != "": VerticalLayout {
+                    spacing: Tokens.space-1;
+                    Label {
+                        text: root.label;
+                        wrap: word-wrap;
+                    }
+                    Caption {
+                        text: root.selected;
+                        wrap: char-wrap;
+                    }
+                    if root.help != "": Caption { text: root.help; }
+                    if root.error != "": Caption {
+                        text: root.error;
+                        color: Tokens.error;
+                        accessible-label: "Error. " + root.error;
+                    }
+                    if root.effective != "": Caption { text: "Effective  " + root.effective; }
+                    if root.origin != "": Caption { text: "Origin  " + root.origin; }
+                    if root.screen != "": Caption { text: "Screen content  " + root.screen; }
+                    HorizontalLayout {
+                        spacing: Tokens.space-2;
+                        alignment: start;
+                        LinkButton {
+                            text: "Reset option";
+                            quiet: true;
+                            description: "Remove this option's explicit override";
+                            enabled: root.editable;
+                            clicked => { root.reset("selected"); }
+                        }
+                        LinkButton {
+                            text: "Reset group";
+                            quiet: true;
+                            description: "Remove explicit overrides in this group";
+                            enabled: root.editable;
+                            clicked => { root.reset("group"); }
+                        }
+                    }
+                }
+
+                for field[i] in root.fields: SettingField {
+                    item: field;
+                    option-key: root.selected;
+                    editable: root.editable;
+                    focus-request: (root.focus-field == "" ? i == 0 : field.id == root.focus-field) ? root.focus-request : 0;
+                    committed(value) => { root.edit(field.id, value); }
+                }
+            }
+        }
+    }
+}

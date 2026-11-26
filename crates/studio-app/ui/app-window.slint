@@ -16,6 +16,9 @@ import { FocusRing, KeyboardFocus } from "focus.slint";
 import { Caption, Label, LinkButton, SectionTitle, WorkspaceSwitch } from "controls.slint";
 import { IconButton, Scrubber, Stage, StageState, ToggleChip } from "stage.slint";
 import { AnalyzeView } from "analyze.slint";
+import { AdvancedEditor, AdvancedOptionRow, FieldRow } from "advanced.slint";
+
+export { AdvancedOptionRow, FieldRow }
 
 // Re-exported so Rust can pin the appearance for renderer snapshots, and the
 // picture area's state for Rust to set.
@@ -977,6 +980,51 @@ export component AppWindow inherits Window {
 
     // View state. In-out so renderer snapshots can open it.
     in-out property <bool> advanced-open;
+    in property <[AdvancedOptionRow]> advanced-options;
+    in property <[FieldRow]> advanced-fields;
+    in property <string> advanced-selected;
+    in property <string> advanced-label;
+    in property <string> advanced-help;
+    in property <string> advanced-effective;
+    in property <string> advanced-screen;
+    in property <string> advanced-origin;
+    in property <string> advanced-error;
+    in property <string> advanced-status;
+    in property <string> advanced-preset-preview;
+    in property <bool> advanced-can-undo;
+    in property <bool> advanced-can-redo;
+    in property <bool> advanced-can-apply-preset;
+    in property <bool> advanced-custom;
+    property <string> advanced-query;
+    property <bool> advanced-modified-only;
+    property <bool> advanced-expert-enabled;
+    property <int> advanced-focus-request;
+    property <string> advanced-focus-field;
+    property <int> advanced-preset-candidate: root.preset;
+
+    callback advanced-open-changed(bool);
+    callback advanced-search(string);
+    callback advanced-modified(bool);
+    callback advanced-expert(bool);
+    callback advanced-select(string);
+    callback advanced-edit(string, string);
+    callback advanced-reset(string);
+    callback advanced-undo();
+    callback advanced-redo();
+    callback advanced-preview-preset(int);
+    callback advanced-apply-preset();
+    changed advanced-open => {
+        if root.advanced-open {
+            root.advanced-preset-candidate = root.preset;
+        }
+        root.advanced-open-changed(root.advanced-open);
+    }
+    changed preset => { root.advanced-preset-candidate = root.preset; }
+
+    public function focus-advanced-error(field: string) {
+        root.advanced-focus-field = field;
+        root.advanced-focus-request += 1;
+    }
 
     // The picture area. Rust sets everything; only the slider position is
     // also moved here while dragging.
@@ -1083,7 +1131,7 @@ export component AppWindow inherits Window {
     property <bool> has-source: root.view-mode != ViewMode.empty;
     property <bool> job-active: root.job-view == JobView.running || root.job-view == JobView.cancelling;
     property <length> main-width: 416px;
-    property <length> advanced-width: 312px;
+    property <length> advanced-width: 470px;
     property <length> card-padding: Tokens.space-6;
     property <length> form-label-width: 64px;
     property <bool> show-settings: !(root.view-mode == ViewMode.single && root.job-view == JobView.completed);
@@ -1103,11 +1151,12 @@ export component AppWindow inherits Window {
     // 1366x768 display under a task bar and a title bar. Content taller than
     // that (several files, long messages, large text) scrolls inside the
     // card; Slint scrolls a control that receives focus into view.
-    property <length> max-window-height: 680px;
+    in property <length> max-window-width: 960px;
+    in property <length> max-window-height: 680px;
     property <length> visible-content-height: min(content.preferred-height, max(Tokens.space-8 * 4, root.max-window-height - root.fit-offset));
     property <length> fit-offset;
     out property <length> fitted-height: frame.absolute-position.y + min(content.preferred-height, max(Tokens.space-8 * 4, root.max-window-height - frame.absolute-position.y));
-    out property <length> fitted-width: content.preferred-width;
+    out property <length> fitted-width: min(content.preferred-width, root.max-window-width);
     property <length> fit-height;
     // Rust re-asserts the fitted size: a compositor may answer an earlier
     // request after a newer one and leave the window at the old size.
@@ -1124,8 +1173,8 @@ export component AppWindow inherits Window {
         self.fit-height = self.fitted-height;
         self.fit-offset = frame.absolute-position.y;
     }
-    min-width: content.preferred-width;
-    max-width: content.preferred-width;
+    min-width: root.fitted-width;
+    max-width: root.fitted-width;
     min-height: self.fit-height > 0 ? self.fit-height : content.preferred-height;
     max-height: self.fit-height > 0 ? self.fit-height : content.preferred-height;
 
@@ -1185,15 +1234,15 @@ export component AppWindow inherits Window {
     }
 
     frame := VerticalLayout {
-        min-width: content.preferred-width;
-        max-width: content.preferred-width;
+        min-width: root.fitted-width;
+        max-width: root.fitted-width;
         min-height: root.visible-content-height;
         max-height: root.visible-content-height;
 
         card-scroll := ScrollView {
             content-width: content.preferred-width;
             content-height: content.preferred-height;
-            horizontal-scrollbar-policy: always-off;
+            horizontal-scrollbar-policy: as-needed;
 
                 content := VerticalLayout {
                     width: self.preferred-width;
@@ -1958,12 +2007,16 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            if root.advanced-custom && root.show-settings: Caption {
+                                text: "Custom · based on speed preset " + root.preset;
+                            }
+
                             HorizontalLayout {
                                 alignment: start;
 
                                 LinkButton {
                                     text: root.advanced-open ? "Hide Advanced  ‹" : "Advanced  ›";
-                                    description: "Output format, raw rate factor and speed preset, destination, source details";
+                                    description: "Encoder options, output destination, and source details";
                                     accessible-expandable: true;
                                     accessible-expanded: root.advanced-open;
                                     clicked => {
@@ -2049,18 +2102,54 @@ export component AppWindow inherits Window {
                                             SpinBox {
                                                 minimum: root.preset-min;
                                                 maximum: root.preset-max;
-                                                value <=> root.preset;
+                                                value <=> root.advanced-preset-candidate;
                                                 enabled: !root.locked && root.advanced-open;
-                                                accessible-label: "Speed preset";
+                                                accessible-label: "Preview a speed preset";
                                                 accessible-description: root.preset-min + " to " + root.preset-max + ". Higher is faster.";
                                                 edited(value) => {
-                                                    root.preset-edited(value);
+                                                    root.advanced-preview-preset(value);
                                                 }
                                             }
 
                                             Caption {
                                                 text: root.preset-min + "–" + root.preset-max + ", higher is faster";
                                             }
+                                        }
+                                    }
+
+                                    AdvancedEditor {
+                                        options: root.advanced-options;
+                                        fields: root.advanced-fields;
+                                        selected: root.advanced-selected;
+                                        label: root.advanced-label;
+                                        help: root.advanced-help;
+                                        effective: root.advanced-effective;
+                                        origin: root.advanced-origin;
+                                        screen: root.advanced-screen;
+                                        error: root.advanced-error;
+                                        status: root.advanced-status;
+                                        preset-preview: root.advanced-preset-preview;
+                                        can-undo: root.advanced-can-undo;
+                                        can-redo: root.advanced-can-redo;
+                                        can-apply-preset: root.advanced-can-apply-preset;
+                                        editable: !root.locked && !root.sheet-open;
+                                        focus-request: root.advanced-focus-request;
+                                        focus-field: root.advanced-focus-field;
+                                        query <=> root.advanced-query;
+                                        modified-only <=> root.advanced-modified-only;
+                                        expert <=> root.advanced-expert-enabled;
+                                        search(query) => { root.advanced-search(query); }
+                                        modified(enabled) => { root.advanced-modified(enabled); }
+                                        show-expert(enabled) => { root.advanced-expert(enabled); }
+                                        select(key) => { root.advanced-select(key); }
+                                        edit(id, value) => { root.advanced-edit(id, value); }
+                                        reset(scope) => { root.advanced-reset(scope); }
+                                        undo => { root.advanced-undo(); }
+                                        redo => { root.advanced-redo(); }
+                                        apply-preset => { root.advanced-apply-preset(); }
+                                        cancel-preset => {
+                                            root.advanced-preset-candidate = root.preset;
+                                            root.advanced-preview-preset(root.preset);
                                         }
                                     }
 
