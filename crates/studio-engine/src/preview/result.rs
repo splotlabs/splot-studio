@@ -94,9 +94,8 @@ fn changed() -> Stopped {
 }
 
 impl ResultPictures {
-    /// Opens and indexes `path`. The source, when given and still the file
-    /// it names, supplies the colour basis and, for `.obu`, the timing;
-    /// otherwise neither is known.
+    /// Opens the file for preview. Verifies document bytes or indexes Studio
+    /// encoder output. A matching source supplies colour and Annex B timing.
     pub fn open(
         path: &WirePath,
         reference: Option<&SourceRef>,
@@ -176,7 +175,7 @@ impl ResultPictures {
                 .filter(|(num, den)| *num != 0 && *den != 0);
             ((Vec::new(), None, time_base), Some(id), digest.bytes)
         } else {
-            (index(reader)?, None, fingerprint.len)
+            (index(reader), None, fingerprint.len)
         };
         let (units, damaged, ivf_time_base) = indexed;
         let (matrix, source_rate) = reference.map_or((None, None), facts_of);
@@ -441,6 +440,9 @@ impl ResultPictures {
         let decoded = self.decode_next(context);
         if matches!(decoded, Err(Stopped::Unavailable(..))) {
             self.session = None;
+            if self.is_document() {
+                self.check()?;
+            }
         }
         decoded
     }
@@ -639,7 +641,7 @@ fn annex_b_fault(unit: &[u8]) -> Result<(), String> {
 
 /// Reads the file's framing: the temporal units, why reading stopped early
 /// (if it did), and the IVF time base.
-fn index(file: impl Read) -> Outcome<Index> {
+fn index(file: impl Read) -> Index {
     let mut reader = TemporalUnitReader::with_max_unit_bytes(BufReader::new(file), MAX_UNIT_BYTES);
     let mut units: Vec<Unit> = Vec::new();
     let damaged = loop {
@@ -652,7 +654,7 @@ fn index(file: impl Read) -> Outcome<Index> {
         let unit = match reader.next_temporal_unit() {
             Ok(Some(unit)) => unit,
             Ok(None) => break ivf_damage(&reader),
-            Err(e) => break Some(framing_damage(e)),
+            Err(e) => break Some(framing_damage(&e)),
         };
         if unit.pts.is_none()
             && let Err(fault) = annex_b_fault(unit.bytes)
@@ -673,7 +675,7 @@ fn index(file: impl Read) -> Outcome<Index> {
         .ivf_header()
         .map(|header| (header.timebase_numerator, header.timebase_denominator));
     let damaged = damaged.or_else(|| units.is_empty().then(empty_stream));
-    Ok((units, damaged, time_base))
+    (units, damaged, time_base)
 }
 
 fn empty_stream() -> Damage {
@@ -690,7 +692,7 @@ fn ivf_damage(reader: &TemporalUnitReader<impl Read>) -> Option<Damage> {
     })
 }
 
-fn framing_damage(error: ReaderError) -> Damage {
+fn framing_damage(error: &ReaderError) -> Damage {
     Damage {
         code: match error {
             ReaderError::UnitTooLarge { .. } => PictureFailure::Unsupported,
@@ -790,7 +792,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         for kind in [OutputKind::Ivf, OutputKind::Av2AnnexB] {
             let (bytes, _) = encoded(kind);
-            let (units, _, _) = index(bytes.as_slice()).map_err(|e| format!("{e:?}"))?;
+            let (units, _, _) = index(bytes.as_slice());
             let fourth = units.get(3).ok_or("Missing fourth temporal unit.")?;
             let end = usize::try_from(fourth.offset)? + fourth.len;
             let mut source = tempfile::NamedTempFile::new()?;
@@ -824,8 +826,8 @@ mod tests {
 
             // The fourth IVF unit has a complete record. For Annex B the
             // prefix does not establish the boundary of its last unit.
-            let covered = if kind == OutputKind::Ivf { 4 } else { 3 };
-            for ordinal in 0..covered as u64 {
+            let covered: u64 = if kind == OutputKind::Ivf { 4 } else { 3 };
+            for ordinal in 0..covered {
                 let output = pictures
                     .decode_next(&context)
                     .map_err(|e| format!("{e:?}"))?;
@@ -908,7 +910,7 @@ mod tests {
             let mut file = tempfile::tempfile()?;
             file.write_all(&bytes)?;
             file.seek(SeekFrom::Start(0))?;
-            let (units, damaged, time_base) = index(file).map_err(|e| format!("{e:?}"))?;
+            let (units, damaged, time_base) = index(file);
             assert!(damaged.is_none());
             assert_eq!(units.len(), 9);
             let found: Vec<u64> = (0_u64..)

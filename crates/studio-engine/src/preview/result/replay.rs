@@ -33,10 +33,18 @@ impl Read for DocumentReader {
         if self.serial.load(Ordering::SeqCst) != self.request.get() {
             return Err(io::Error::other("Preview request ended."));
         }
-        let max = bytes.len().min(READ_CHUNK_BYTES);
         let remaining = self.end.saturating_sub(self.offset);
-        let max = remaining.min(max as u64) as usize;
+        let max = usize::try_from(remaining)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len())
+            .min(READ_CHUNK_BYTES);
         let count = self.file.read(&mut bytes[..max])?;
+        if count == 0 && max != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "The file ended before the verified boundary.",
+            ));
+        }
         self.offset += count as u64;
         Ok(count)
     }
@@ -104,10 +112,12 @@ impl DocumentInput {
                 } else {
                     // DataProps uses signed ticks. Preserve all IVF timestamp bits.
                     let pts = i64::from_ne_bytes(unit.pts.unwrap_or(0).to_ne_bytes());
+                    let duration = i64::try_from(len)
+                        .map_err(|_| unreadable("The temporal unit is too large."))?;
                     let props = DataProps::default()
                         .with_user_data(offset)
                         .with_pts(pts)
-                        .with_duration(len as i64);
+                        .with_duration(duration);
                     context.check()?;
                     let position = unit.position();
                     let status = decoder.send_data(unit.bytes, props).map_err(|e| {
@@ -132,7 +142,7 @@ impl DocumentInput {
             }
             Err(e) => {
                 context.check()?;
-                Some(framing_damage(e))
+                Some(framing_damage(&e))
             }
         };
         self.damage = damage.or_else(|| match self.prefix_end {
