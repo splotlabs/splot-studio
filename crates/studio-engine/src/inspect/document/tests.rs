@@ -1334,3 +1334,63 @@ fn a_fifo_is_refused_without_waiting() -> Result<(), Box<dyn std::error::Error>>
     );
     Ok(())
 }
+
+#[test]
+fn progressive_pages_keep_packet_links_and_source_coordinates()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("paged.ivf");
+    let mut bytes = ivf_header(*b"AV02", 32);
+    let payload = TD_TG.repeat(280);
+    bytes.extend(record(0, &payload));
+    bytes.extend(record(1, &TD_SH));
+    std::fs::write(&path, &bytes)?;
+    let mut doc = Document::open_progressive(&WirePath::from_path(&path), &never)
+        .map_err(|reason| reason.message)?;
+    assert_eq!(doc.summary().outcome, ScanOutcome::Scanning);
+    assert_eq!(doc.summary().elements, 1);
+    assert_eq!(doc.bytes(0, 4).map_err(|reason| reason.message)?, *b"DKIF");
+    while !doc.advance(&never).map_err(|reason| reason.message)? {}
+    assert_eq!(doc.summary().outcome, ScanOutcome::Complete);
+    let reference = scanned(&bytes).map_err(|reason| reason.message)?;
+    assert_eq!(doc.summary().elements, reference.items.len() as u64);
+    let filter = RowFilter {
+        kind: KindFilter::All,
+        layer: Some(LayerFilter {
+            temporal: 1,
+            embedded: 2,
+        }),
+    };
+    for first in [0, 127, 128, 255, 279] {
+        let expected = page(&reference.items, filter, first, 1).map_err(|reason| reason.message)?;
+        let actual = doc
+            .page(filter, first, 1)
+            .map_err(|reason| reason.message)?;
+        assert_eq!(actual, expected);
+        let row = &actual.1[0];
+        assert_eq!(row.parent, Some(1));
+        let index = usize::try_from(row.index)?;
+        let target = LocateTarget::Offset {
+            offset: reference.items[index].start(),
+        };
+        assert_eq!(
+            doc.locate(filter, target)
+                .map_err(|reason| reason.message)?,
+            locate(&reference.items, filter, target).map_err(|reason| reason.message)?,
+        );
+    }
+    let export = doc.index().map_err(|reason| reason.message)?.export()?;
+    let mut cached = tempfile::tempfile()?;
+    cached.write_all(b"external header")?;
+    let start = cached.stream_position()?;
+    let end = start + export.len();
+    export.write(&mut cached)?;
+    assert_eq!(cached.stream_position()?, end);
+    cached.seek(SeekFrom::Start(start))?;
+    let warm = Index::open_cache(cached, doc.summary(), end)?;
+    assert_eq!(
+        warm.page(filter, 128, 4).map_err(|reason| reason.message)?,
+        doc.page(filter, 128, 4).map_err(|reason| reason.message)?,
+    );
+    Ok(())
+}

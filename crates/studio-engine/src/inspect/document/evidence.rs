@@ -44,10 +44,9 @@ impl Document {
                 "Use a request ID greater than the last syntax request ID.",
             ));
         }
-        let entry = usize::try_from(element)
-            .ok()
-            .and_then(|index| self.items.get(index));
-        let Some(Element::Obu { obu }) = entry.map(super::Item::element) else {
+        let index = usize::try_from(element).unwrap_or(usize::MAX);
+        let entry = self.index()?.item(index)?;
+        let Some(Element::Obu { obu }) = entry.as_ref().map(Item::element) else {
             return Err(invalid("Select an indexed OBU for syntax observation."));
         };
         let len = if obu.obu.len <= syntax::MAX_OBU_BYTES {
@@ -205,7 +204,12 @@ impl Document {
         }
         for finding in &mut report.findings {
             if let Some(byte) = finding.file_offset {
-                let (stream, layer) = indexed_location(&self.items, byte);
+                let index = self.index()?;
+                let item = match index.preceding(byte)? {
+                    Some(at) => index.item(at)?,
+                    None => None,
+                };
+                let (stream, layer) = item_location(item.as_ref(), byte);
                 finding.stream_offset = if self.summary.framing == Framing::AnnexB {
                     (byte < self.summary.fingerprint.len).then_some(byte)
                 } else {
@@ -236,9 +240,14 @@ impl Document {
     }
 }
 
+#[cfg(test)]
 fn indexed_location(items: &[Item], byte: u64) -> (Option<u64>, Option<u8>) {
     let end = items.partition_point(|item| item.start() <= byte);
-    let Some(item) = items[..end].last().filter(|item| byte < item.end()) else {
+    item_location(items[..end].last(), byte)
+}
+
+fn item_location(item: Option<&Item>, byte: u64) -> (Option<u64>, Option<u8>) {
+    let Some(item) = item.filter(|item| byte < item.end()) else {
         return (None, None);
     };
     match item {
