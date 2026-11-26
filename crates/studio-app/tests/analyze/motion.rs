@@ -21,6 +21,11 @@ const CROSS_LAYER: &[u8] =
     include_bytes!("../../../studio-engine/tests/preview/fixtures/syn-mlayer2-crossref-10bit.obu");
 
 pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch) {
+    translation(rig, scratch);
+    cross_layer(rig, scratch);
+}
+
+fn translation(rig: &mut Rig, scratch: &Scratch) {
     open(rig, scratch, "subpixel motion.ivf", TRANSLATION, 11269);
     pick(rig, 84, 24, 200, 104);
     let motion = view(rig);
@@ -110,7 +115,9 @@ pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch) {
             .iter()
             .any(|fact| fact.value == "NEWMV")
     );
+}
 
+fn cross_layer(rig: &mut Rig, scratch: &Scratch) {
     open(rig, scratch, "cross-layer motion.obu", CROSS_LAYER, 1370);
     pick(rig, 24, 24, 160, 160);
     assert!(
