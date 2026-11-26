@@ -1000,7 +1000,7 @@ export component AppWindow inherits Window {
     property <bool> advanced-expert-enabled;
     property <int> advanced-focus-request;
     property <string> advanced-focus-field;
-    property <int> advanced-preset-candidate: root.preset;
+    in-out property <int> advanced-preset-candidate: root.preset;
 
     callback advanced-open-changed(bool);
     callback advanced-search(string);
@@ -1014,7 +1014,7 @@ export component AppWindow inherits Window {
     callback advanced-preview-preset(int);
     callback advanced-apply-preset();
     changed advanced-open => {
-        if root.advanced-open {
+        if !root.advanced-open {
             root.advanced-preset-candidate = root.preset;
         }
         root.advanced-open-changed(root.advanced-open);
@@ -2008,7 +2008,7 @@ export component AppWindow inherits Window {
                             }
 
                             if root.advanced-custom && root.show-settings: Caption {
-                                text: "Custom · based on speed preset " + root.preset;
+                                text: "Custom — based on speed preset " + root.preset;
                             }
 
                             HorizontalLayout {

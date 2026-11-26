@@ -237,6 +237,9 @@ impl Controller {
     /// Applies an intent and handles what it leads to.
     pub fn dispatch(self: &Rc<Self>, intent: Intent) {
         self.check_visible();
+        if self.preview_simple_preset(&intent) {
+            return;
+        }
         let outcome = self.session.borrow_mut().dispatch(intent, Instant::now());
         self.handle(outcome);
     }
@@ -427,6 +430,10 @@ impl Controller {
         }
         if outcome.analysis || outcome.changed != Changed::Nothing {
             render_jobs(&window, &session.jobs());
+        }
+        drop(session);
+        if outcome.advanced || outcome.changed == Changed::Phase {
+            self.check_preset_preview();
         }
     }
 

@@ -13,7 +13,7 @@ use crate::advanced::{self, Reset};
 use crate::queue::Item;
 use crate::render::model;
 use crate::session::Session;
-use crate::state::Intent;
+use crate::state::{AppState, Intent};
 use crate::ui::{AdvancedOptionRow, AppWindow, FieldRow};
 use crate::workspace::Workspace;
 
@@ -39,6 +39,7 @@ pub(super) struct Editor {
     edit_error: Option<String>,
     engine_error: Option<FieldError>,
     candidate: Option<OptionRequest>,
+    preview_started: bool,
     rows: Vec<AdvancedOptionRow>,
     fields: Vec<FieldRow>,
     fields_key: String,
@@ -58,16 +59,16 @@ impl Controller {
             let ctl = Rc::downgrade(self);
             move |modified| {
                 with(&ctl, |ctl| {
-                    ctl.view_advanced(|editor| editor.modified = modified)
-                })
+                    ctl.view_advanced(|editor| editor.modified = modified);
+                });
             }
         });
         window.on_advanced_expert({
             let ctl = Rc::downgrade(self);
             move |expert| {
                 with(&ctl, |ctl| {
-                    ctl.view_advanced(|editor| editor.expert = expert)
-                })
+                    ctl.view_advanced(|editor| editor.expert = expert);
+                });
             }
         });
         window.on_advanced_select({
@@ -113,7 +114,10 @@ impl Controller {
         self.advanced_settle.stop();
         let mut editor = self.advanced.borrow_mut();
         editor.inputs = None;
-        editor.candidate = None;
+        if !open {
+            editor.candidate = None;
+            editor.preview_started = false;
+        }
         editor.edit_error = None;
         editor.engine_error = None;
         drop(editor);
@@ -150,8 +154,11 @@ impl Controller {
         let mut editor = self.advanced.borrow_mut();
         if editor.inputs.as_ref() != Some(&inputs) {
             let refresh = editor.inputs.is_some() && !locked;
+            if editor.inputs.is_some() {
+                editor.candidate = None;
+                editor.preview_started = false;
+            }
             editor.inputs = Some(inputs);
-            editor.candidate = None;
             editor.edit_error = None;
             if refresh {
                 let weak = Rc::downgrade(self);
@@ -285,27 +292,63 @@ impl Controller {
         self.dispatch(Intent::ReplaceOptions(proposed));
     }
 
+    pub(super) fn preview_simple_preset(self: &Rc<Self>, intent: &Intent) -> bool {
+        let Some(candidate) = simple_preset_candidate(self.session.borrow().state(), intent) else {
+            return false;
+        };
+        let Some(window) = self.window.upgrade() else {
+            return true;
+        };
+        window.set_advanced_open(true);
+        window.set_advanced_preset_candidate(i32::from(candidate.base.preset.get()));
+        self.queue_preset(Some(candidate));
+        true
+    }
+
     fn preview_preset(self: &Rc<Self>, preset: i32) {
         let proposed = self
             .session
             .borrow()
             .state()
             .proposed_options(&Intent::PresetEdited(preset));
-        self.advanced.borrow_mut().candidate = proposed.clone();
-        let outcome = if let Some(proposed) = proposed {
-            self.session.borrow_mut().advanced_preview(&proposed)
-        } else {
-            self.session.borrow_mut().advanced_cancel_preview()
-        };
+        self.queue_preset(proposed);
+    }
+
+    fn queue_preset(self: &Rc<Self>, candidate: Option<OptionRequest>) {
+        let mut editor = self.advanced.borrow_mut();
+        editor.candidate = candidate;
+        editor.preview_started = false;
+        drop(editor);
+        let outcome = self.session.borrow_mut().advanced_cancel_preview();
         self.handle(outcome);
         self.view_advanced(|_| {});
+        self.check_preset_preview();
+    }
+
+    pub(super) fn check_preset_preview(self: &Rc<Self>) {
+        let mut session = self.session.borrow_mut();
+        if !has_source(session.state())
+            || session.advanced_pending()
+            || session.advanced_policy().is_empty()
+        {
+            return;
+        }
+        let mut editor = self.advanced.borrow_mut();
+        if editor.preview_started {
+            return;
+        }
+        let Some(candidate) = editor.candidate.clone() else {
+            return;
+        };
+        editor.preview_started = true;
+        drop(editor);
+        let outcome = session.advanced_preview(&candidate);
+        drop(session);
+        self.handle(outcome);
     }
 
     fn apply_preset(self: &Rc<Self>) {
-        let ready = {
-            let session = self.session.borrow();
-            !session.advanced_policy().is_empty() && !session.advanced_preview_policy().is_empty()
-        };
+        let ready = can_apply_preset(&self.session.borrow());
         let candidate = self.advanced.borrow_mut().candidate.take_if(|_| ready);
         if let Some(candidate) = candidate {
             self.dispatch(Intent::ReplaceOptions(candidate));
@@ -362,16 +405,16 @@ impl Editor {
 
     fn render_preset(&self, window: &AppWindow, session: &Session, baseline: &[EffectiveOption]) {
         let candidate = session.advanced_preview_policy();
-        window.set_advanced_can_apply_preset(
-            self.candidate.is_some() && !baseline.is_empty() && !candidate.is_empty(),
-        );
+        window.set_advanced_can_apply_preset(self.candidate.is_some() && can_apply_preset(session));
         let text = self.candidate.as_ref().map_or_else(String::new, |request| {
-            if let Some(error) = session.advanced_preview_error() {
+            if !has_source(session.state()) {
+                "Open a source to compare encoder policy. You can apply this preset now.".into()
+            } else if let Some(error) = session.advanced_preview_error() {
                 error.message.clone()
-            } else if session.advanced_preview_pending() {
+            } else if session.advanced_pending() || session.advanced_preview_pending() {
                 format!("Resolving preset {}…", request.base.preset.get())
-            } else if candidate.is_empty() || baseline.is_empty() {
-                "Add a source and resolve its current settings to compare presets.".into()
+            } else if baseline.is_empty() || candidate.is_empty() {
+                "Check the current settings to compare presets.".into()
             } else {
                 advanced::differences(baseline, candidate)
             }
@@ -411,6 +454,29 @@ impl Editor {
     }
 }
 
+fn simple_preset_candidate(state: &AppState, intent: &Intent) -> Option<OptionRequest> {
+    if matches!(
+        intent,
+        Intent::PrioritySelected(_) | Intent::PresetEdited(_)
+    ) && !state.option_request().values.is_empty()
+    {
+        state.proposed_options(intent)
+    } else {
+        None
+    }
+}
+
+fn has_source(state: &AppState) -> bool {
+    state.selected().and_then(Item::facts).is_some()
+}
+
+fn can_apply_preset(session: &Session) -> bool {
+    !session.state().settings_view().read_only
+        && (!has_source(session.state())
+            || (!session.advanced_policy().is_empty()
+                && !session.advanced_preview_policy().is_empty()))
+}
+
 fn selected<'a>(catalog: &'a [OptionDescriptor], key: &str) -> Option<&'a OptionDescriptor> {
     catalog.iter().find(|d| d.key == key)
 }
@@ -426,4 +492,55 @@ fn same_fields(new: &[FieldRow], previous: &[FieldRow]) -> bool {
                 && a.help == b.help
                 && a.choices.iter().eq(b.choices.iter())
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use studio_domain::options::OptionValue;
+
+    use crate::recovery::RealDisk;
+    use crate::session::Session;
+    use crate::simple::Priority;
+    use crate::state::Startup;
+
+    use super::*;
+
+    #[test]
+    fn simple_preview_keeps_any_override_and_can_apply_without_a_source() {
+        let now = Instant::now();
+        let mut state = AppState::new(Startup::default());
+        let intent = Intent::PrioritySelected(0);
+        assert!(simple_preset_candidate(&state, &intent).is_none());
+        let override_value = OptionValue::Integer(96);
+        state.apply(
+            Intent::OptionEdited {
+                key: "keyint".into(),
+                value: Some(override_value.clone()),
+            },
+            now,
+            &RealDisk,
+        );
+        let proposal = simple_preset_candidate(&state, &intent);
+        assert!(proposal.is_some());
+        assert_eq!(
+            proposal.as_ref().map(|request| request.base.preset),
+            Some(Priority::Fast.preset())
+        );
+        assert_eq!(
+            proposal
+                .as_ref()
+                .and_then(|request| request.values.get("keyint")),
+            Some(&override_value)
+        );
+        assert_ne!(state.option_request().base.preset, Priority::Fast.preset());
+        let session = Session::new(
+            state,
+            Err(String::new()),
+            std::sync::Arc::new(|_, _| {}),
+            None,
+        );
+        assert!(can_apply_preset(&session));
+    }
 }
