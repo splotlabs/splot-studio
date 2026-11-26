@@ -6,6 +6,8 @@
 //! Worker events and journal results reach this thread through
 //! [`slint::invoke_from_event_loop`].
 
+mod advanced;
+
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
@@ -37,6 +39,8 @@ pub struct Controller {
     cancel_deadline: Timer,
     /// Fires [`RESIZE_SETTLE`] after the picture area's size last changed.
     resize_settle: Timer,
+    advanced: RefCell<advanced::Editor>,
+    advanced_settle: Timer,
     /// The window was not minimized when last looked at.
     visible: Cell<bool>,
 }
@@ -137,6 +141,8 @@ impl Controller {
             clock: Timer::default(),
             cancel_deadline: Timer::default(),
             resize_settle: Timer::default(),
+            advanced: RefCell::default(),
+            advanced_settle: Timer::default(),
             visible: Cell::new(true),
         });
         CONTROLLER.with(|c| *c.borrow_mut() = Rc::downgrade(&ctl));
@@ -212,6 +218,7 @@ impl Controller {
             // Only fails when no event loop is running, so there is nothing to quit.
             let _ = slint::quit_event_loop();
         });
+        ctl.wire_advanced(window);
         ctl.wire_preview(window);
         ctl.wire_analysis(window);
 
@@ -408,6 +415,9 @@ impl Controller {
             Changed::Nothing => {}
             Changed::Counters => render_counters(&window, state, now),
             Changed::Phase => render(&window, state, now),
+        }
+        if outcome.advanced || outcome.changed == Changed::Phase {
+            self.render_advanced(&window, &session);
         }
         if outcome.preview.any() {
             render_preview(&window, state, session.preview(), outcome.preview);

@@ -95,14 +95,16 @@ fn render_settings(window: &AppWindow, state: &AppState) {
     window.set_output_index(AppState::output_index(settings.output));
     window.set_preset(i32::from(settings.preset.get()));
     window.set_crf(i32::from(settings.crf.get()));
-    window.set_quality_index(simple::index(&Quality::ALL, Quality::of(settings.crf)));
-    let priority = Priority::of(settings.preset);
+    window.set_quality_index(simple::index(&Quality::ALL, view.quality()));
+    let priority = view.priority();
     window.set_priority_index(simple::index(&Priority::ALL, priority));
-    window.set_priority_caption(
-        priority
-            .map_or("A speed preset set in Advanced.", Priority::description)
-            .into(),
-    );
+    let priority_caption = if view.priority_is_overridden() {
+        "Custom settings from Advanced."
+    } else {
+        priority.map_or("A speed preset set in Advanced.", Priority::description)
+    };
+    window.set_priority_caption(priority_caption.into());
+    window.set_advanced_custom(!state.visible_option_request().values.is_empty());
     window.set_locked(view.read_only);
     let note = match (state.mode(), view.read_only, state.selected()) {
         (Mode::List, true, Some(item)) => text::settings_note(item),
