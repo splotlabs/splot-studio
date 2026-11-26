@@ -686,20 +686,7 @@ fn index(
         .map(|header| (header.timebase_numerator, header.timebase_denominator))
         .filter(|(num, den)| !document || (*num != 0 && *den != 0));
     let damaged = if let Some(end) = prefix_end {
-        let reason =
-            format!("Analyze verified only the first {end} bytes. Preview stops at that boundary.");
-        match damaged {
-            Some(mut damage) => {
-                if damage.code == PictureFailure::Unreadable {
-                    damage.message = format!("{reason} {}", damage.message);
-                }
-                Some(damage)
-            }
-            None => Some(Damage {
-                code: PictureFailure::Unreadable,
-                message: reason,
-            }),
-        }
+        Some(partial_index(end, damaged))
     } else {
         damaged.or_else(|| {
             units.is_empty().then(|| Damage {
@@ -709,6 +696,24 @@ fn index(
         })
     };
     Ok((units, damaged, time_base))
+}
+
+/// Preserve the first framing error when the verified prefix ends within a unit.
+fn partial_index(end: u64, damage: Option<Damage>) -> Damage {
+    let message =
+        format!("Analyze verified only the first {end} bytes. Preview stops at that boundary.");
+    match damage {
+        Some(mut damage) => {
+            if damage.code == PictureFailure::Unreadable {
+                damage.message = format!("{message} {}", damage.message);
+            }
+            damage
+        }
+        None => Damage {
+            code: PictureFailure::Unreadable,
+            message,
+        },
+    }
 }
 
 #[cfg(test)]
