@@ -13,7 +13,8 @@
 //! Version 2 adds the workspace and Analyze view. Version 3 adds typed
 //! settings, frozen submissions and effective attempt policies. Legacy
 //! journals keep their items and reports. Legacy settings become Simple
-//! requests, and unavailable policy and view data use their defaults.
+//! requests, and unavailable policy and view data use their defaults. Waiting
+//! items with incomplete source facts need a new probe before preflight.
 //!
 //! Load rules: a missing file is an empty queue; a newer [`VERSION`] (or a
 //! file that cannot be read at all) is left untouched and this session does
@@ -33,6 +34,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use studio_domain::analysis::RowFilter;
 use studio_domain::job::{
@@ -634,12 +636,7 @@ pub fn load(path: &Path) -> Loaded {
         }
         // Serde supplies additions and converts legacy Simple requests.
         Ok(_) => match serde_json::from_slice::<Journal>(&bytes) {
-            Ok(journal) => {
-                return Loaded::Found(Journal {
-                    version: VERSION,
-                    ..journal
-                });
-            }
+            Ok(journal) => return Loaded::Found(migrate(journal, &bytes)),
             Err(e) => match without_view(&bytes) {
                 Some(journal) => {
                     // The copy is synced before any save can replace the file.
@@ -650,10 +647,7 @@ pub fn load(path: &Path) -> Loaded {
                         Ok(copy)
                     }) {
                         Ok(copy) => Loaded::ViewUnreadable {
-                            journal: Journal {
-                                version: VERSION,
-                                ..journal
-                            },
+                            journal: migrate(journal, &bytes),
                             copy,
                             error: e.to_string(),
                         },
@@ -673,6 +667,44 @@ pub fn load(path: &Path) -> Loaded {
             error: format!("{error}; it could not be moved aside: {e}"),
         },
     }
+}
+
+#[derive(Deserialize)]
+struct LegacySources {
+    items: Vec<LegacySource>,
+}
+
+#[derive(Deserialize)]
+struct LegacySource {
+    facts: Option<LegacyColor>,
+}
+
+#[derive(Deserialize)]
+struct LegacyColor {
+    color: Option<IgnoredAny>,
+}
+
+fn migrate(mut journal: Journal, bytes: &[u8]) -> Journal {
+    if journal.version < VERSION {
+        // SourceFacts defaults an absent colour record. Check the original
+        // journal so explicitly unknown values from newer probes stay valid.
+        let sources = serde_json::from_slice::<LegacySources>(bytes).ok();
+        for (index, item) in journal.items.iter_mut().enumerate() {
+            let has_color = sources
+                .as_ref()
+                .and_then(|sources| sources.items.get(index))
+                .and_then(|item| item.facts.as_ref())
+                .is_some_and(|facts| facts.color.is_some());
+            if matches!(item.state, JournalState::Waiting) && !has_color {
+                if let Some(facts) = &item.facts {
+                    item.video_stream = item.video_stream.or(Some(facts.video_stream));
+                }
+                item.state = JournalState::Probing;
+            }
+        }
+    }
+    journal.version = VERSION;
+    journal
 }
 
 /// The journal in `bytes` with its view left out, when the rest parses.
@@ -1141,6 +1173,73 @@ mod tests {
             assert_eq!(expected, actual);
             assert!(write_atomically(&path, &bytes).is_ok());
             assert_eq!(load(&path), Loaded::Found(migrated));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_waiting_jobs_refresh_only_incomplete_source_facts() -> serde_json::Result<()> {
+        use serde_json::{Value, json};
+
+        let dir = Scratch::new("refresh-legacy");
+        let path = dir.path(FILE_NAME);
+        let mut legacy: Value = serde_json::from_str(VERSION_1)?;
+        let mut waiting = legacy["items"][0].clone();
+        waiting["state"] = json!({"kind": "waiting"});
+        waiting["video_stream"] = Value::Null;
+        waiting["facts"] = json!({
+            "reader": "ffmpeg",
+            "fingerprint": {"len": 4096, "modified": [1795352441, 421141523]},
+            "video_stream": 1,
+            "video_tracks": [],
+            "omissions": {"other_video": 0, "audio": 2, "subtitles": 1, "attachments": 0, "other": 0, "chapters": 3},
+            "width": 64,
+            "height": 36,
+            "frame_rate": {"num": 25, "den": 1},
+            "pixel_aspect": null,
+            "bit_depth": 8,
+            "chroma": "yuv420",
+            "frame_count": null,
+            "disclosures": []
+        });
+        let mut with_color = waiting.clone();
+        with_color["id"] = json!(7);
+        with_color["facts"]["color"] = json!({});
+        legacy["items"] = json!([waiting, with_color]);
+        for version in [1, 2, VERSION] {
+            legacy["version"] = json!(version);
+            assert!(fs::write(&path, serde_json::to_vec(&legacy)?).is_ok());
+            let Loaded::Found(loaded) = load(&path) else {
+                unreachable!("expected a readable journal");
+            };
+            let first = &loaded.items[0];
+            let second = &loaded.items[1];
+            if version == VERSION {
+                assert_eq!(first.state, JournalState::Waiting);
+                assert_eq!(first.video_stream, None);
+            } else {
+                assert_eq!(first.state, JournalState::Probing);
+                assert_eq!(first.video_stream, Some(1));
+            }
+            assert_eq!(second.state, JournalState::Waiting);
+            assert_eq!(second.video_stream, None);
+            assert_eq!(first.destination, second.destination);
+            assert!(first.destination_chosen);
+            assert!(first.acknowledgement.is_some());
+            assert_eq!(first.acknowledgement, second.acknowledgement);
+            assert_eq!(first.facts, second.facts);
+            assert_eq!(loaded.settings, INITIAL_SETTINGS.into());
+            let restored = crate::recovery::recover(loaded, &crate::recovery::RealDisk);
+            assert_eq!(
+                restored.items[0].state(),
+                if version == VERSION {
+                    ItemState::Waiting
+                } else {
+                    ItemState::Probing
+                }
+            );
+            assert_eq!(restored.items[1].state(), ItemState::Waiting);
+            assert!(restored.items.iter().all(|item| item.attempt().is_none()));
         }
         Ok(())
     }
