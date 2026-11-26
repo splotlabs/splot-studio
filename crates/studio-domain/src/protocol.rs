@@ -310,6 +310,9 @@ pub enum Command {
         /// The source file.
         source: WirePath,
     },
+    /// Inspect process only. Removes persistent index data owned by the engine.
+    /// Answered by [`Event::AnalysisCacheCleared`] or [`Event::Error`].
+    AnalysisClearCache,
     /// Inspect process only. Stops the [`Command::AnalysisOpen`] of
     /// `document` if it is not answered yet; other documents are not
     /// affected. Answered by [`Event::CancelRequested`], after which reading
@@ -659,6 +662,8 @@ pub enum Event {
         /// What reading the file found.
         summary: DocumentSummary,
     },
+    /// Answers [`Command::AnalysisClearCache`].
+    AnalysisCacheCleared,
     /// Answers [`Command::AnalysisPage`].
     AnalysisPage {
         /// The document.

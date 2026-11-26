@@ -97,6 +97,7 @@ enum Request {
     Inspect(Query),
     Batch(batch::Request),
     Close,
+    ClearCache,
 }
 
 /// Reads the selected document on the work thread.
@@ -298,6 +299,14 @@ fn serve<W: Write>(
                         },
                     },
                 );
+            }
+            Command::AnalysisClearCache => {
+                if requests.try_send((id, 0, Request::ClearCache)).is_err() {
+                    shared.send(
+                        id,
+                        refusal(ErrorCode::Busy, "The inspection queue is full."),
+                    );
+                }
             }
             Command::AnalysisCancel { document } => {
                 shared.cancel(id, Pending::Open(document));
@@ -586,6 +595,10 @@ fn work<W: Write>(queue: &Receiver<Queued>, shared: &Shared<W>) {
                 drop(ledger);
                 continue;
             }
+            Request::ClearCache => match document::clear_cache() {
+                Ok(()) => Event::AnalysisCacheCleared,
+                Err(error) => refusal(ErrorCode::WrongState, error.message),
+            },
             Request::Close => match open {
                 Some(at) => {
                     documents.remove(at);
