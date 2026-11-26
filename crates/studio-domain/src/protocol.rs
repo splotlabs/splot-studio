@@ -26,8 +26,8 @@ use crate::analysis::{AnalysisFailure, DocumentSummary, Framing, LocateTarget, R
 use crate::job::{Failure, JobReport, JobSpec, Progress, SourceFacts, Stage, WirePath};
 use crate::options::{EffectiveOption, FieldError, OptionDescriptor, OptionRequest};
 use crate::preview::{
-    MAX_PICTURE_BYTES, PictureBox, PictureFailure, PictureFrame, PictureHeader, PictureStage,
-    PictureTarget, PictureView,
+    GrainPolicy, MAX_PICTURE_BYTES, PictureBox, PictureFailure, PictureFrame, PictureHeader,
+    PictureOptions, PictureStage, PictureTarget, PictureView, SamplePoint,
 };
 use crate::settings::OutputKind;
 use crate::syntax::{SyntaxEvent, SyntaxSummary};
@@ -36,7 +36,7 @@ use crate::validation::{
 };
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -225,6 +225,9 @@ pub enum Command {
         frame: PictureFrame,
         /// Which part of it.
         view: PictureView,
+        /// Display surface and film grain policy.
+        #[serde(default)]
+        options: PictureOptions,
         /// The largest picture wanted.
         size: PictureBox,
     },
@@ -243,8 +246,24 @@ pub enum Command {
         from: u64,
         /// Which part of each frame.
         view: PictureView,
+        /// Display surface and film grain policy.
+        #[serde(default)]
+        options: PictureOptions,
         /// The largest picture wanted.
         size: PictureBox,
+    },
+    /// Preview process only. Reads one document sample. Stops playback.
+    PictureSample {
+        /// Chosen by the app and echoed on the answer.
+        generation: u64,
+        /// The inspected document.
+        target: PictureTarget,
+        /// The decoder output ordinal.
+        ordinal: u64,
+        /// The same film grain policy as the displayed picture.
+        grain: GrainPolicy,
+        /// The visible coordinate to inspect.
+        point: SamplePoint,
     },
     /// Preview process only. Stops playback; answered by
     /// [`Event::PlaybackEnded`] when something was playing.
@@ -511,6 +530,19 @@ pub enum Event {
     Picture {
         /// What the pixels are.
         picture: PictureHeader,
+    },
+    /// One exact value from a decoded plane.
+    PictureSample {
+        /// The generation of the sample request.
+        generation: u64,
+        /// The decoder output ordinal.
+        ordinal: u64,
+        /// The film grain policy used for this sample.
+        grain: GrainPolicy,
+        /// The visible coordinate sampled.
+        point: SamplePoint,
+        /// The decoded sample value.
+        value: u16,
     },
     /// Progress while the preview worker prepares a document picture.
     PictureProgress {

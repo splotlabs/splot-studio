@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::analysis::SourceDigest;
-use crate::job::{SourceFingerprint, WirePath};
+use crate::job::{ChromaLayout, SourceFingerprint, WirePath};
 
 /// The widest picture the engine sends, in pixels.
 pub const MAX_PICTURE_WIDTH: u16 = 1280;
@@ -23,6 +23,9 @@ pub const MAX_PICTURE_WIDTH: u16 = 1280;
 pub const MAX_PICTURE_HEIGHT: u16 = 720;
 /// Bytes per pixel of a picture payload: 8-bit R, G, B.
 pub const PICTURE_BYTES_PER_PIXEL: u32 = 3;
+/// The largest supported integer zoom.
+pub const MAX_PICTURE_ZOOM: u8 = 16;
+
 /// The largest picture payload.
 pub const MAX_PICTURE_BYTES: u32 =
     MAX_PICTURE_WIDTH as u32 * MAX_PICTURE_HEIGHT as u32 * PICTURE_BYTES_PER_PIXEL;
@@ -69,11 +72,138 @@ pub enum PictureView {
     /// at `x`, `y` in luma pixels. The engine moves an origin that would leave
     /// the frame back inside it and reports the origin it used.
     Native {
-        /// Left edge in luma pixels.
+        /// Left edge in the visible grid of the selected surface.
         x: u32,
-        /// Top edge in luma pixels.
+        /// Top edge in the visible grid of the selected surface.
         y: u32,
     },
+    /// A crop for nearest-neighbor display at an integer scale.
+    Zoom {
+        /// Left edge in the visible grid of the selected surface.
+        x: u32,
+        /// Top edge in the visible grid of the selected surface.
+        y: u32,
+        /// Physical pixels per sample, from 2 through [`MAX_PICTURE_ZOOM`].
+        factor: u8,
+    },
+}
+
+/// The surface to display in the picture.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PictureSurface {
+    /// The RGB presentation of the full picture.
+    #[default]
+    Rgb,
+    /// Diagnostic grayscale of the Y plane.
+    Y,
+    /// Diagnostic grayscale of the U plane.
+    U,
+    /// Diagnostic grayscale of the V plane.
+    V,
+}
+
+/// Whether the decoder applies film grain if the stream signals it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrainPolicy {
+    /// Apply film grain.
+    #[default]
+    Apply,
+    /// Inspect reconstructed samples before film grain.
+    Skip,
+}
+
+/// The display surface and film grain policy for a request.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PictureOptions {
+    /// Which surface to display.
+    pub surface: PictureSurface,
+    /// Which sample variant to use.
+    pub grain: GrainPolicy,
+}
+
+/// A plane to inspect for its exact sample values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SamplePlane {
+    /// Luma.
+    Y,
+    /// Blue-difference chroma.
+    U,
+    /// Red-difference chroma.
+    V,
+}
+
+/// A zero-based sample coordinate relative to its plane's visible rectangle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SamplePoint {
+    /// The plane that contains the sample.
+    pub plane: SamplePlane,
+    /// The sample's column.
+    pub x: u32,
+    /// The sample's row.
+    pub y: u32,
+}
+
+/// A visible rectangle in the plane's decoded sample grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SampleRect {
+    /// The column of the first visible sample.
+    pub x: u32,
+    /// The row of the first visible sample.
+    pub y: u32,
+    /// The visible width in samples.
+    pub width: u32,
+    /// The visible height in samples.
+    pub height: u32,
+}
+
+/// Signaled color information for a decoded picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PictureColor {
+    /// H.273 color primaries.
+    pub primaries: u8,
+    /// H.273 transfer characteristics.
+    pub transfer: u8,
+    /// H.273 matrix coefficients.
+    pub matrix: u8,
+    /// The stream signals full range when true and limited range when false.
+    pub full_range: bool,
+}
+
+/// Signaled AV2 chroma sample positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PictureChromaPosition {
+    /// Position code for the top field or progressive picture.
+    pub top: u32,
+    /// Position code for the bottom field.
+    pub bottom: u32,
+}
+
+/// Geometry and signaled presentation metadata of a decoder output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DocumentPictureInfo {
+    /// Number of bits per sample.
+    pub bit_depth: u8,
+    /// The picture's chroma layout.
+    pub chroma: ChromaLayout,
+    /// Coded luma width before output crop or scaling.
+    pub coded_width: u32,
+    /// Coded luma height before output crop or scaling.
+    pub coded_height: u32,
+    /// Visible luma rectangle.
+    pub y: SampleRect,
+    /// Visible U rectangle, if the picture has a U plane.
+    pub u: Option<SampleRect>,
+    /// Visible V rectangle, if the picture has a V plane.
+    pub v: Option<SampleRect>,
+    /// The signaled color description.
+    pub color: Option<PictureColor>,
+    /// The signaled AV2 chroma positions.
+    pub chroma_position: Option<PictureChromaPosition>,
+    /// Whether the bitstream signals film grain for the picture.
+    pub film_grain: bool,
 }
 
 /// The source a picture is read from: the same identity a job carries.
@@ -228,6 +358,10 @@ pub struct PictureHeader {
     pub origin: PictureOrigin,
     /// Decoder evidence for a document output.
     pub output: Option<OutputEvent>,
+    /// The display surface and film grain policy in use.
+    pub options: PictureOptions,
+    /// Geometry and color information for a document output.
+    pub document_info: Option<DocumentPictureInfo>,
     /// The zero-based display index of the frame.
     pub frame: u64,
     /// The frame's presentation time; `None` when the stream has no timing.
@@ -238,9 +372,9 @@ pub struct PictureHeader {
     pub width: u16,
     /// Picture height in pixels.
     pub height: u16,
-    /// The full frame's width in luma pixels.
+    /// The full visible surface width in samples.
     pub frame_width: u32,
-    /// The full frame's height in luma pixels.
+    /// The full visible surface height in samples.
     pub frame_height: u32,
     /// The view that was produced, with the origin actually used.
     pub view: PictureView,
@@ -292,6 +426,8 @@ mod tests {
             generation: 1,
             origin: PictureOrigin::Source,
             output: None,
+            options: PictureOptions::default(),
+            document_info: None,
             frame: 0,
             time: None,
             frame_count: None,
