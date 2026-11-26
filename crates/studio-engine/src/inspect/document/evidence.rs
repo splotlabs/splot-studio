@@ -110,7 +110,7 @@ impl Document {
     pub(in crate::inspect) fn open_evidence_source(&self) -> Result<File, Refusal> {
         self.check()?;
         self.require_av2()?;
-        let opened = File::open(&self.path);
+        let opened = crate::source::open_verified(&self.path);
         self.check()?;
         let file = opened.map_err(|error| {
             Refusal::new(
