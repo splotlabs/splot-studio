@@ -19,7 +19,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use studio_domain::job::{JobSpec, SourceFingerprint, WirePath};
-use studio_domain::settings::EncoderSettings;
+use studio_domain::options::OptionRequest;
 
 use crate::analysis::Saved;
 use crate::journal::{self, Journal, JournalItem, JournalState, JournalView};
@@ -174,7 +174,7 @@ pub struct Recovered {
     /// The next item id.
     pub next_id: ItemId,
     /// The settings.
-    pub settings: EncoderSettings,
+    pub settings: OptionRequest,
     /// Temporary files to remove now.
     pub cleanups: Vec<Cleanup>,
     /// Items that could not be restored: a duplicate id, or a path written
@@ -295,7 +295,8 @@ fn item(dto: JournalItem, disk: &dyn Disk) -> Option<Item> {
         exists: false,
     };
     item.ack = dto.acknowledgement.as_ref().map(journal::acknowledgement);
-    let (state, attempt) = match dto.state {
+    item.submitted = dto.submitted;
+    let (state, mut attempt) = match dto.state {
         // A waiting item is only ever made from facts; without them, read it.
         JournalState::Waiting if item.facts.is_some() => (ItemState::Waiting, None),
         JournalState::Probing | JournalState::Waiting => (ItemState::Probing, None),
@@ -366,6 +367,9 @@ fn item(dto: JournalItem, disk: &dyn Disk) -> Option<Item> {
             )
         }
     };
+    if let Some(attempt) = &mut attempt {
+        attempt.policy = dto.attempt_policy;
+    }
     item.state = state;
     item.attempt = attempt;
     Some(item)
@@ -380,6 +384,7 @@ fn ended(state: ItemState, job: JobSpec, ending: Ending) -> (ItemState, Option<A
             activity: None,
             partial: None,
             ending: Some(ending),
+            policy: Vec::new(),
         }),
     )
 }
@@ -408,16 +413,7 @@ fn interrupted(
         disk.exists(&destination),
         fate,
     ));
-    Some((
-        ItemState::Interrupted,
-        Some(Attempt {
-            job,
-            request: 0,
-            activity: None,
-            partial: None,
-            ending: Some(ending),
-        }),
-    ))
+    Some(ended(ItemState::Interrupted, job, ending))
 }
 
 #[cfg(test)]
@@ -463,7 +459,9 @@ mod tests {
             video_stream: 0,
             omissions_acknowledged: false,
             destination: WirePath::from_path(&destination_path()),
-            settings: INITIAL_SETTINGS,
+            settings: INITIAL_SETTINGS.into(),
+            identity: None,
+            pass_artifact: None,
         }
     }
 
@@ -493,7 +491,7 @@ mod tests {
         Journal {
             version: VERSION,
             next_id: 2,
-            settings: INITIAL_SETTINGS,
+            settings: INITIAL_SETTINGS.into(),
             view: JournalView::default(),
             items: vec![JournalItem {
                 id: 1,
@@ -504,6 +502,8 @@ mod tests {
                 destination: WirePath::from_path(&destination_path()),
                 destination_chosen: false,
                 acknowledgement: None,
+                submitted: None,
+                attempt_policy: Vec::new(),
                 state,
             }],
         }
@@ -735,6 +735,74 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[test]
+    fn frozen_submission_and_interrupted_policy_survive_recovery() -> serde_json::Result<()> {
+        use studio_domain::options::{EffectiveOption, OPTIONS_SCHEMA_VERSION, OptionValue};
+        use studio_domain::protocol::OptionsIdentity;
+
+        use crate::queue::Submission;
+
+        let mut frozen = job();
+        frozen
+            .settings
+            .values
+            .insert("fast_decode".into(), OptionValue::Bool(false));
+        frozen.identity = Some(OptionsIdentity {
+            schema: OPTIONS_SCHEMA_VERSION,
+            codec_revision: "0".repeat(40),
+        });
+        frozen.pass_artifact = Some(WirePath::from_path(&abs("/in/clip.pass")));
+        let policy = vec![EffectiveOption {
+            key: "fast_decode".into(),
+            requested: Some(OptionValue::Bool(false)),
+            value: OptionValue::Bool(false),
+            origin: OptionValue::Choice("explicit".into()),
+            screen: None,
+            screen_origin: None,
+        }];
+
+        let mut stored = journal(JournalState::Waiting);
+        stored.items[0].submitted = Some(Submission {
+            job: frozen.clone(),
+            policy: policy.clone(),
+        });
+        let mut running = stored.items[0].clone();
+        running.id = 2;
+        running.submitted = None;
+        running.state = JournalState::Running {
+            job: frozen.clone(),
+            partial: None,
+        };
+        running.attempt_policy = policy.clone();
+        stored.items.push(running);
+        let bytes = journal::encode(&stored)?;
+        let restored = recover(serde_json::from_slice(&bytes)?, &FakeDisk::default());
+        assert_eq!(restored.items[0].state(), ItemState::Waiting);
+        assert!(restored.items[0].attempt().is_none());
+        assert_eq!(restored.items[0].submitted, stored.items[0].submitted);
+        assert_eq!(restored.items[1].state(), ItemState::Interrupted);
+        assert!(restored.cleanups.is_empty());
+        let attempt = restored.items[1]
+            .attempt()
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(attempt.job, frozen);
+        assert_eq!(attempt.policy, policy);
+        assert_eq!(attempt.request, 0);
+
+        let saved = journal::snapshot(
+            restored.next_id,
+            restored.settings,
+            &restored.items,
+            JournalView::default(),
+        );
+        assert_eq!(saved.items[0].submitted, stored.items[0].submitted);
+        assert_eq!(saved.items[1].attempt_policy, policy);
+        assert!(
+            matches!(&saved.items[1].state, JournalState::Interrupted { job, .. } if job == &frozen)
+        );
+        Ok(())
     }
 
     #[test]
