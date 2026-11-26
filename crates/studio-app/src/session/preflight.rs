@@ -171,7 +171,7 @@ impl Session {
                     .state
                     .items()
                     .iter()
-                    .filter(|item| item.state() == crate::queue::ItemState::Waiting)
+                    .filter(|item| self.state.queued(item))
                     .filter_map(|item| {
                         let submission = item.submitted.as_ref()?;
                         let source = item.facts()?;

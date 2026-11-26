@@ -1765,3 +1765,74 @@ fn related_replay_checks_the_current_engine_and_keeps_the_original_record() {
     let attempt = app.state.items()[1].attempt();
     assert_eq!(attempt.map(|a| a.policy.as_slice()), Some(&[policy(4)][..]));
 }
+
+#[test]
+fn final_pass_uses_its_completed_artifact_and_starts_no_other_job() {
+    use studio_domain::job::JobPurpose;
+    use studio_domain::protocol::OptionsIdentity;
+
+    let mut app = App::new();
+    app.apply(Intent::EngineAnswered(Ok(Capabilities {
+        options: Some(OptionsIdentity {
+            schema: 1,
+            codec_revision: "current".into(),
+        }),
+        ..capabilities(true)
+    })));
+    app.add(&["/m/pass.y4m", "/m/other.y4m"], ready);
+    app.apply(Intent::OptionEdited {
+        key: "rate_control".into(),
+        value: Some(OptionValue::Record(
+            [
+                ("mode".into(), OptionValue::Choice("vbr".into())),
+                ("bitrate_kbps".into(), OptionValue::Integer(300)),
+            ]
+            .into(),
+        )),
+    });
+    let original = app.state.items().to_vec();
+    let prepare = |app: &mut App, item, action| {
+        let update = app.apply(Intent::PrepareRelated { item, action });
+        let [Effect::PrepareRelated { request, job }] = update.effects.as_slice() else {
+            unreachable!("Expected one preflight request.");
+        };
+        assert_eq!(job.fingerprint, PRINT);
+        app.apply(Intent::RelatedPrepared {
+            request: *request,
+            result: Ok((Box::new(facts(None)), Vec::new())),
+        });
+        only_start(&app.apply(Intent::RelatedApproved).effects)
+    };
+    let (request, first) = prepare(&mut app, original[0].id(), RelatedAction::FirstPass);
+    assert_eq!(first.purpose, JobPurpose::FirstPass);
+    assert!(first.pass_artifact.is_none());
+    let digest = "f".repeat(64);
+    app.event(
+        request,
+        Event::Stage {
+            stage: Stage::Publishing,
+        },
+    );
+    app.event(
+        request,
+        Event::Completed {
+            report: JobReport {
+                destination: first.destination.clone(),
+                frames: 3,
+                bytes: 100,
+                checks: Vec::new(),
+                disclosures: Vec::new(),
+                pass_digest: Some(digest.clone()),
+            },
+        },
+    );
+    assert!(app.state.analyzable().is_none());
+    let pass_item = app.state.items()[2].clone();
+    let (_, final_job) = prepare(&mut app, pass_item.id(), RelatedAction::FinalPass);
+    assert_eq!(final_job.purpose, JobPurpose::Encode);
+    assert_eq!(final_job.pass_artifact, Some(first.destination));
+    assert_eq!(final_job.pass_digest, Some(digest));
+    assert_eq!(final_job.settings, first.settings);
+    assert_eq!(app.state.items()[..2], original);
+    assert_eq!(app.state.items()[2], pass_item);
+}
