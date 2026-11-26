@@ -528,6 +528,21 @@ impl Analysis {
         let index = match (step, current) {
             (Step::End, _) => last,
             (Step::Home, _) => 0,
+            (Step::Left | Step::Right, Some(position)) if evidence.tab == 1 => {
+                let depth = evidence.events[matches[position]].0;
+                let related = if step == Step::Left {
+                    (0..position)
+                        .rev()
+                        .find(|&i| evidence.events[matches[i]].0 < depth)
+                } else {
+                    let next = position + 1;
+                    (next <= last && evidence.events[matches[next]].0 > depth).then_some(next)
+                };
+                let Some(related) = related else {
+                    return;
+                };
+                related
+            }
             (Step::Left | Step::Right, _) => return,
             (_, None) => evidence.first.min(last),
             (Step::Up, Some(i)) => i.saturating_sub(1),
@@ -565,6 +580,7 @@ impl Analysis {
                     out,
                 );
             } else {
+                self.documents[at].locating = None;
                 self.documents[at].evidence.selected = Some(pick);
             }
         } else if evidence.tab == 1

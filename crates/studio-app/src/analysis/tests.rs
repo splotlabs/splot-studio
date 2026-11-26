@@ -1076,3 +1076,54 @@ fn a_key_press_restarts_paging_that_failed() {
 }
 
 mod lifecycle;
+
+#[test]
+fn old_syntax_and_validation_replies_cannot_cross_document_generations() {
+    use studio_domain::syntax::{SYNTAX_SCHEMA, SyntaxStatus, SyntaxSummary};
+
+    let (mut analysis, engine) = opened(4);
+    let old = doc(&analysis).id();
+    let effects = analysis.input(Input::RowClicked(0));
+    engine.settle(&mut analysis, effects);
+    let effects = analysis.input(Input::EvidenceView(1));
+    let syntax = effects.first().map_or(0, |effect| effect.request_id);
+    assert_ne!(syntax, 0);
+    let effects = analysis.input(Input::Validate);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect.command, Command::AnalysisValidate { .. }))
+    );
+    let effects = analysis.input(Input::Close);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect.command, Command::AnalysisCancelValidation { .. }))
+    );
+    engine.settle(&mut analysis, effects);
+    let effects = analysis.input(Input::Open(vec![PathBuf::from("/media/clip.obu")]));
+    engine.settle(&mut analysis, effects);
+    assert_ne!(old, doc(&analysis).id());
+
+    let effects = analysis.event(
+        syntax,
+        Event::AnalysisSyntaxReady {
+            document: old,
+            element: 0,
+            summary: Box::new(SyntaxSummary {
+                schema_version: SYNTAX_SCHEMA,
+                spec_revision: "AV2 v1.0.0".to_owned(),
+                status: SyntaxStatus::Parsed,
+                error: None,
+                retained_events: 0,
+                observed_elements: 0,
+                elements_truncated: false,
+                depth_truncated: false,
+            }),
+            total: 0,
+        },
+    );
+    assert!(effects.is_empty());
+    assert!(doc(&analysis).evidence.syntax.is_none());
+    assert!(doc(&analysis).evidence.validation.is_none());
+}
