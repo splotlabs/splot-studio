@@ -70,6 +70,15 @@ const TRUNCATED: [u8; 11] = [
     0x01, 0x08, 0x04, 0x04, 0xAA, 0xBB, 0xCC, 0x83, 0x01, 0x64, 0x5A,
 ];
 
+fn overlay_mode(name: &str) -> Option<i32> {
+    match name {
+        "analyze-overlay" => Some(1),
+        "analyze-transforms" => Some(2),
+        "analyze-quantizer" => Some(3),
+        _ => None,
+    }
+}
+
 /// A session over the real inspect engine, and the folder of its files.
 pub struct Scenario {
     pub session: Session,
@@ -117,27 +126,20 @@ impl Scenario {
         window: &studio_app::AppWindow,
         name: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if matches!(
-            name,
-            "analyze-playback"
-                | "analyze-sample"
-                | "analyze-export-setup"
-                | "analyze-overlay"
-                | "analyze-transforms"
-                | "analyze-quantizer"
-        ) {
+        let mode = overlay_mode(name);
+        if mode.is_some()
+            || matches!(
+                name,
+                "analyze-playback" | "analyze-sample" | "analyze-export-setup"
+            )
+        {
             window.show()?;
             let stage = PictureBox::clamped(
                 u32::try_from(window.get_stage_px_width()).unwrap_or(1),
                 u32::try_from(window.get_stage_px_height()).unwrap_or(1),
             );
             self.playback(stage, name == "analyze-sample")?;
-            if let Some(mode) = match name {
-                "analyze-overlay" => Some(1),
-                "analyze-transforms" => Some(2),
-                "analyze-quantizer" => Some(3),
-                _ => None,
-            } {
+            if let Some(mode) = mode {
                 self.session
                     .block_overlay_input(BlockOverlayInput::Mode(mode));
                 self.settle()?;
@@ -327,6 +329,7 @@ pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
     );
     match name {
         "analyze-empty" | "analyze-playback" | "analyze-sample" | "analyze-export-setup" => {}
+        name if overlay_mode(name).is_some() => {}
         "analyze-layers" => layer_evidence(&mut scenario)?,
         "analyze-blocks-8bit" | "analyze-blocks-10bit" => block_evidence(&mut scenario, name)?,
         "analyze-opening" => {
