@@ -634,50 +634,61 @@ fn an_acknowledgement_holds_for_its_file_while_nothing_changes() {
 }
 
 #[test]
-fn any_change_to_what_was_acknowledged_discards_it() {
-    type Change = fn(&mut App);
-    let changes: [(&str, Change); 5] = [
-        ("quality", |app| {
-            app.apply(Intent::QualitySelected(0));
-        }),
-        ("speed preset", |app| {
-            app.apply(Intent::PresetEdited(1));
-        }),
-        ("output kind", |app| {
-            app.apply(Intent::OutputSelected(1));
-        }),
-        ("video track", |app| {
-            let update = app.apply(Intent::VideoTrackSelected(1));
-            app.answer(update, |_| Ok(rich(1)));
-        }),
-        ("the file", |app| {
-            // Read again (by a retry) and found changed.
-            let update = app.apply(Intent::RowAction(0));
-            app.answer(update, |_| {
-                Ok(SourceFacts {
-                    fingerprint: SourceFingerprint { len: 7, ..PRINT },
-                    ..rich(0)
-                })
-            });
-        }),
-    ];
-    for (what, change) in changes {
-        let mut app = App::new();
-        app.add(&["/media/trip.mp4"], with_audio);
-        app.apply(Intent::ConvertRequested);
-        let (id, _) = only_start(&app.apply(Intent::OmissionsConfirmed).effects);
-        app.apply(Intent::CancelRequested);
-        app.event(id, Event::Cancelled);
-        assert!(app.state.items()[0].acknowledgement().is_some(), "{what}");
-        change(&mut app);
-        assert_eq!(app.state.items()[0].acknowledgement(), None, "{what}");
-        if app.state.items()[0].state() == ItemState::Cancelled {
-            let update = app.apply(Intent::RowAction(0));
-            app.answer(update, with_audio);
-        }
-        assert_eq!(app.apply(Intent::ConvertRequested).effects, [], "{what}");
-        assert!(app.state.confirmation().is_some(), "{what}: must ask again");
-    }
+fn changing_track_requires_a_new_omissions_acknowledgement() {
+    let mut app = App::new();
+    app.add(&["/media/trip.mp4"], with_audio);
+    app.apply(Intent::ConvertRequested);
+    let (id, _) = only_start(&app.apply(Intent::OmissionsConfirmed).effects);
+    app.apply(Intent::CancelRequested);
+    app.event(id, Event::Cancelled);
+    assert!(app.state.items()[0].acknowledgement().is_some());
+    let update = app.apply(Intent::VideoTrackSelected(1));
+    app.answer(update, |_| Ok(rich(1)));
+    assert_eq!(app.state.items()[0].acknowledgement(), None);
+    assert_eq!(app.apply(Intent::ConvertRequested).effects, []);
+    assert!(app.state.confirmation().is_some());
+}
+
+#[test]
+fn retry_uses_the_original_acknowledged_settings() {
+    let mut app = App::new();
+    app.add(&["/media/trip.mp4"], with_audio);
+    app.apply(Intent::ConvertRequested);
+    let (id, original) = only_start(&app.apply(Intent::OmissionsConfirmed).effects);
+    app.apply(Intent::CancelRequested);
+    app.event(id, Event::Cancelled);
+    app.apply(Intent::QualitySelected(0));
+    app.apply(Intent::PresetEdited(1));
+    app.apply(Intent::OutputSelected(1));
+    let retry = app.apply(Intent::RowAction(0));
+    app.answer(retry, with_audio);
+    let (_, job) = only_start(&app.apply(Intent::ConvertRequested).effects);
+    assert_eq!(job.settings, original.settings);
+    assert!(job.omissions_acknowledged);
+}
+
+#[test]
+fn retry_cannot_start_after_its_source_changed() {
+    let mut app = App::new();
+    app.add(&["/media/trip.mp4"], with_audio);
+    app.apply(Intent::ConvertRequested);
+    let (id, _) = only_start(&app.apply(Intent::OmissionsConfirmed).effects);
+    app.apply(Intent::CancelRequested);
+    app.event(id, Event::Cancelled);
+    let retry = app.apply(Intent::RowAction(0));
+    app.answer(retry, |_| {
+        Ok(SourceFacts {
+            fingerprint: SourceFingerprint { len: 7, ..PRINT },
+            ..rich(0)
+        })
+    });
+    assert_eq!(app.state.items()[0].acknowledgement(), None);
+    assert_eq!(app.apply(Intent::ConvertRequested).effects, []);
+    assert!(
+        app.state
+            .blocker()
+            .is_some_and(|blocker| blocker.text.contains("Add the source again."))
+    );
 }
 
 #[test]

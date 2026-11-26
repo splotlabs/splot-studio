@@ -6,7 +6,8 @@
 
 use std::time::Instant;
 
-use studio_domain::job::{FailureCode, JobSpec, SourceReader, Stage, WirePath};
+use studio_domain::job::{Failure, FailureCode, JobSpec, SourceReader, Stage, WirePath};
+use studio_domain::options::EffectiveOption;
 use studio_domain::protocol::Event;
 
 use super::{AppState, Asked, Confirmation, Effect, Run, Update};
@@ -24,6 +25,7 @@ impl AppState {
         item.state == ItemState::Waiting
             && item.facts.is_some()
             && !item.destination.exists
+            && !item.source_changed()
             && self.capabilities().is_some_and(|c| {
                 c.encode_outputs.contains(
                     &item
@@ -166,6 +168,9 @@ impl AppState {
             return;
         }
         let fresh = |i: &Item| !run.attempted.contains(&i.id);
+        if run.attempted.is_empty() && self.items.iter().any(|i| i.state == ItemState::Probing) {
+            return;
+        }
         if let Some(id) = self
             .items
             .iter()
@@ -273,6 +278,51 @@ impl AppState {
         update.effects.push(Effect::Start { id: request, job });
     }
 
+    pub(super) fn queued_policy(
+        &mut self,
+        id: ItemId,
+        result: Result<Vec<EffectiveOption>, Failure>,
+    ) {
+        let Some(item) = self
+            .item_mut(id)
+            .filter(|item| item.state == ItemState::Waiting)
+        else {
+            return;
+        };
+        let Some(submission) = item.submitted.as_mut() else {
+            return;
+        };
+        match result {
+            Ok(values) => submission.policy = values,
+            Err(failure) => {
+                let Some(Submission { job, policy }) = item.submitted.take() else {
+                    return;
+                };
+                if item.transition(Transition::Start).is_ok()
+                    && item.transition(Transition::Fail).is_ok()
+                {
+                    item.attempt = Some(Attempt {
+                        job,
+                        policy,
+                        request: 0,
+                        activity: None,
+                        partial: None,
+                        ending: Some(Ending::Failed(failure)),
+                    });
+                }
+                if let Some(run) = &mut self.run {
+                    run.attempted.push(id);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn pause_after_current(&mut self) {
+        if let Some(run) = &mut self.run {
+            run.stop_after_current = true;
+        }
+    }
+
     /// Cancel: the converting file stops, and the run with it.
     pub(super) fn cancel(&mut self, now: Instant, update: &mut Update) {
         let Some(attempt) = self
@@ -294,9 +344,7 @@ impl AppState {
                 effect: step.effect,
             });
         }
-        if let Some(run) = &mut self.run {
-            run.stop_after_current = true;
-        }
+        self.pause_after_current();
     }
 
     /// Hands `input` to the job of request `id`, then moves its item through

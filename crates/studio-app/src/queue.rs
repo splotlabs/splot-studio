@@ -462,6 +462,21 @@ impl Item {
         self.ack.as_ref()
     }
 
+    /// The frozen job waiting to start, if there is one.
+    #[must_use]
+    pub const fn submission(&self) -> Option<&Submission> {
+        self.submitted.as_ref()
+    }
+
+    pub(crate) fn source_changed(&self) -> bool {
+        self.submitted.as_ref().is_some_and(|submitted| {
+            self.facts.as_ref().is_some_and(|facts| {
+                facts.fingerprint != submitted.job.fingerprint
+                    || facts.video_stream != submitted.job.video_stream
+            })
+        })
+    }
+
     /// The current or last attempt.
     #[must_use]
     pub const fn attempt(&self) -> Option<&Attempt> {

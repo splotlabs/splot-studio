@@ -1,19 +1,32 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
+use std::{collections::VecDeque, sync::Arc, time::Instant};
+
 use studio_domain::job::{Failure, FailureCode, JobSpec, SourceFacts};
 use studio_domain::options::{EffectiveOption, MAX_OPTIONS_PAGE_ITEMS};
-use studio_domain::protocol::{Command, Event};
+use studio_domain::protocol::{BuildIdentity, Command, Event};
 
+use crate::activity;
 use crate::engine::Delivery;
+use crate::journal;
+use crate::state::Intent;
+
+use super::{HELLO_ID, Outcome, Route, Session};
+use crate::queue::ItemId;
 
 // A reply can carry four rows. Limit the total across all pages too.
 const MAX_POLICY_OPTIONS: u32 = 512;
 
+pub(super) struct Request {
+    pub(super) item: Option<ItemId>,
+    pub(super) job: JobSpec,
+    pub(super) source: SourceFacts,
+}
+
 pub(super) struct Preflight {
     pub(super) id: u64,
-    pub(super) job: JobSpec,
-    source: SourceFacts,
+    pub(super) request: Request,
     policy: Vec<EffectiveOption>,
     total: Option<u32>,
 }
@@ -26,11 +39,10 @@ pub(super) enum Next {
 }
 
 impl Preflight {
-    pub(super) fn new(id: u64, job: JobSpec, source: SourceFacts) -> Self {
+    pub(super) const fn new(id: u64, request: Request) -> Self {
         Self {
             id,
-            job,
-            source,
+            request,
             policy: Vec::new(),
             total: None,
         }
@@ -41,7 +53,7 @@ impl Preflight {
             Delivery::Event(reply) if reply.request_id == super::HELLO_ID => match reply.body {
                 Event::Hello { capabilities, .. }
                     if capabilities.options.is_some()
-                        && capabilities.options == self.job.identity =>
+                        && capabilities.options == self.request.job.identity =>
                 {
                     self.query()
                 }
@@ -89,17 +101,22 @@ impl Preflight {
         }
     }
 
-    fn query(&self) -> Next {
-        let Some(identity) = &self.job.identity else {
+    pub(super) fn query(&self) -> Next {
+        let Some(identity) = &self.request.job.identity else {
             return failure("The engine does not report an encoder option schema.");
         };
+        if self.request.source.fingerprint != self.request.job.fingerprint
+            || self.request.source.video_stream != self.request.job.video_stream
+        {
+            return failure("The source changed after submission. Add the source again.");
+        }
         let Ok(first) = u32::try_from(self.policy.len()) else {
             return failure("The engine option policy exceeds the supported size.");
         };
         Next::Send(Box::new(Command::ResolveOptions {
             schema: identity.schema,
-            source: Box::new(self.source.clone()),
-            settings: self.job.settings.clone(),
+            source: Box::new(self.request.source.clone()),
+            settings: self.request.job.settings.clone(),
             first,
             count: MAX_OPTIONS_PAGE_ITEMS,
         }))
@@ -111,4 +128,255 @@ fn failure(message: impl Into<String>) -> Next {
         code: FailureCode::InvalidSettings,
         message: message.into(),
     })
+}
+
+impl Session {
+    pub(super) fn begin_preflight(
+        &mut self,
+        id: u64,
+        job: JobSpec,
+        pending: &mut VecDeque<Intent>,
+    ) {
+        let source = self
+            .state
+            .items()
+            .iter()
+            .find(|item| item.attempt().is_some_and(|attempt| attempt.request == id))
+            .and_then(crate::queue::Item::facts)
+            .cloned();
+        let started = source
+            .ok_or_else(|| "The submitted source has no probe result.".to_owned())
+            .and_then(|source| {
+                if source.fingerprint != job.fingerprint || source.video_stream != job.video_stream
+                {
+                    return Err("The source changed after submission. Add the source again.".into());
+                }
+                let mut worker = self.spawn(Route::Job(id))?;
+                worker
+                    .send(
+                        HELLO_ID,
+                        Command::Hello {
+                            client: BuildIdentity {
+                                name: crate::APP_NAME.to_owned(),
+                                version: env!("CARGO_PKG_VERSION").to_owned(),
+                            },
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok((worker, source))
+            });
+        match started {
+            Ok((worker, source)) => {
+                self.preflight_queue = self
+                    .state
+                    .items()
+                    .iter()
+                    .filter(|item| item.state() == crate::queue::ItemState::Waiting)
+                    .filter_map(|item| {
+                        let submission = item.submitted.as_ref()?;
+                        let source = item.facts()?;
+                        (submission.policy.is_empty()).then(|| Request {
+                            item: Some(item.id()),
+                            job: submission.job.clone(),
+                            source: source.clone(),
+                        })
+                    })
+                    .collect();
+                self.preflight = Some(Preflight::new(
+                    id,
+                    Request {
+                        item: None,
+                        job,
+                        source,
+                    },
+                ));
+                self.job = Some((id, worker));
+            }
+            Err(detail) => pending.push_back(Intent::Job {
+                id,
+                input: activity::Input::WorkerEnded { detail },
+            }),
+        }
+    }
+
+    pub(super) fn deliver_preflight(
+        &mut self,
+        id: u64,
+        delivery: Delivery,
+        now: Instant,
+    ) -> Outcome {
+        let disconnected = matches!(delivery, Delivery::Ended(_));
+        let Some(preflight) = self.preflight.as_mut() else {
+            return Outcome::nothing();
+        };
+        let next = preflight.handle(delivery);
+        self.preflight_next(id, next, disconnected, now)
+    }
+
+    fn preflight_next(&mut self, id: u64, next: Next, disconnected: bool, now: Instant) -> Outcome {
+        let result = match next {
+            Next::Ignore => return Outcome::nothing(),
+            Next::Send(command) => {
+                return match self.send_job(id, *command) {
+                    Ok(()) => Outcome::nothing(),
+                    Err(message) => self.preflight_failed(
+                        id,
+                        Failure {
+                            code: FailureCode::InvalidSettings,
+                            message,
+                        },
+                        now,
+                    ),
+                };
+            }
+            Next::Ready(values) => Ok(values),
+            Next::Failed(failure) if disconnected => {
+                return self.preflight_failed(id, failure, now);
+            }
+            Next::Failed(failure) => Err(failure),
+        };
+        let Some(preflight) = self.preflight.take() else {
+            return Outcome::nothing();
+        };
+        let mut outcome = if let Some(item) = preflight.request.item {
+            self.dispatch(Intent::QueuedPolicy { item, result }, now)
+        } else {
+            let values = match result {
+                Ok(values) => values,
+                Err(failure) => return self.preflight_failed(id, failure, now),
+            };
+            let changed = self
+                .state
+                .items()
+                .iter()
+                .filter_map(crate::queue::Item::attempt)
+                .find(|attempt| attempt.request == id)
+                .is_some_and(|attempt| !attempt.policy.is_empty() && attempt.policy != values);
+            if changed {
+                return self.preflight_failed(id, Failure {
+                    code: FailureCode::InvalidSettings,
+                    message: "The effective encoder policy changed. Add the source again to make a new submission.".into(),
+                }, now);
+            }
+            self.prepared = Some((id, preflight.request.job));
+            self.dispatch(Intent::JobPolicy { id, values }, now)
+        };
+        outcome.merge(self.continue_preflight(id, now));
+        outcome
+    }
+
+    fn continue_preflight(&mut self, id: u64, now: Instant) -> Outcome {
+        let mut outcome = Outcome::nothing();
+        while let Some(request) = self.preflight_queue.pop_front() {
+            let preflight = Preflight::new(id, request);
+            let next = if self
+                .prepared
+                .as_ref()
+                .is_some_and(|(_, active)| active.identity == preflight.request.job.identity)
+            {
+                preflight.query()
+            } else {
+                Next::Failed(Failure {
+                    code: FailureCode::InvalidSettings,
+                    message: "The engine or encoder option schema changed. Refresh the submission."
+                        .into(),
+                })
+            };
+            if let Next::Failed(failure) = next {
+                if let Some(item) = preflight.request.item {
+                    outcome.merge(self.dispatch(
+                        Intent::QueuedPolicy {
+                            item,
+                            result: Err(failure),
+                        },
+                        now,
+                    ));
+                }
+                continue;
+            }
+            self.preflight = Some(preflight);
+            outcome.merge(self.preflight_next(id, next, false, now));
+            return outcome;
+        }
+        outcome.merge(self.save_prepared(id, now));
+        outcome
+    }
+
+    fn save_prepared(&mut self, id: u64, now: Instant) -> Outcome {
+        let Some(writer) = &self.journal else {
+            if self.state.journal_problem().is_some() || self.state.save_error().is_some() {
+                return self.journal_failed(id, "The queue journal is unavailable.".into(), now);
+            }
+            return self.start_prepared(id, now);
+        };
+        let journal = journal::snapshot(
+            self.state.next_id(),
+            self.state.option_request().clone(),
+            self.state.items(),
+            self.view(),
+        );
+        let bytes = match journal::encode(&journal) {
+            Ok(bytes) => bytes,
+            Err(error) => return self.journal_failed(id, error.to_string(), now),
+        };
+        let post = Arc::clone(&self.post);
+        writer.submit_confirmed(bytes, move |result| {
+            post(Route::Journal(id), Delivery::JournalSaved(result));
+        });
+        Outcome::nothing()
+    }
+
+    pub(super) fn journal_failed(&mut self, id: u64, message: String, now: Instant) -> Outcome {
+        self.state.pause_after_current();
+        self.preflight_failed(
+            id,
+            Failure {
+                code: FailureCode::Output,
+                message: format!("Cannot save the submitted encoder policy. {message}"),
+            },
+            now,
+        )
+    }
+
+    pub(super) fn start_prepared(&mut self, id: u64, now: Instant) -> Outcome {
+        let Some((_, job)) = self.prepared.take_if(|(current, _)| *current == id) else {
+            return Outcome::nothing();
+        };
+        let live = Some(self.preview.live_box());
+        if let Err(detail) = self.send_job(id, Command::Start { job, live }) {
+            return self.dispatch(
+                Intent::Job {
+                    id,
+                    input: activity::Input::WorkerEnded { detail },
+                },
+                now,
+            );
+        }
+        Outcome::nothing()
+    }
+
+    pub(super) fn clear_preflight(&mut self) {
+        self.preflight = None;
+        self.preflight_queue.clear();
+        self.prepared = None;
+    }
+
+    fn send_job(&mut self, id: u64, command: Command) -> Result<(), String> {
+        let Some((_, worker)) = self.job.as_mut().filter(|(current, _)| *current == id) else {
+            return Err("The job worker stopped.".into());
+        };
+        worker.send(id, command).map_err(|error| error.to_string())
+    }
+
+    fn preflight_failed(&mut self, id: u64, failure: Failure, now: Instant) -> Outcome {
+        self.preflight = None;
+        self.job.take();
+        self.dispatch(
+            Intent::Job {
+                id,
+                input: activity::Input::Event(Event::Failed { failure }),
+            },
+            now,
+        )
+    }
 }

@@ -24,10 +24,11 @@ mod run;
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use studio_domain::job::{FailureCode, JobSpec, Omissions, SourceFacts};
+use studio_domain::job::{Failure, FailureCode, JobSpec, Omissions, SourceFacts};
 use studio_domain::options::{EffectiveOption, OptionRequest, OptionValue};
 use studio_domain::protocol::Capabilities;
 use studio_domain::settings::{Crf, EncoderSettings, OutputKind, SpeedPreset};
@@ -143,6 +144,13 @@ pub enum Intent {
         id: u64,
         /// The policy in codec schema order.
         values: Vec<EffectiveOption>,
+    },
+    /// Preflight finished for a waiting submission.
+    QueuedPolicy {
+        /// The queue item.
+        item: ItemId,
+        /// The full policy, or why the worker refused the submission.
+        result: Result<Vec<EffectiveOption>, Failure>,
     },
     /// [`Effect::CleanPartial`] was carried out.
     PartialCleaned {
@@ -398,7 +406,7 @@ impl AppState {
             next_id: 1,
             settings: OptionRequest {
                 base: INITIAL_SETTINGS,
-                values: Default::default(),
+                values: BTreeMap::new(),
             },
             engine: None,
             selected: None,
@@ -525,14 +533,7 @@ impl AppState {
                     update.effects.push(effect);
                 }
             }
-            Intent::DestinationPicked(path) => {
-                if let Some(Dialog::Save(id)) = self.dialog {
-                    self.dialog = None;
-                    if let Some(path) = path {
-                        self.choose_destination(id, path);
-                    }
-                }
-            }
+            Intent::DestinationPicked(path) => self.destination_picked(path),
             Intent::OutputSelected(_)
             | Intent::PresetEdited(_)
             | Intent::CrfEdited(_)
@@ -543,21 +544,7 @@ impl AppState {
                 }
             }
             Intent::OptionEdited { key, value } if !self.settings_view().read_only && !modal => {
-                let changed = match value {
-                    Some(value) if self.settings.values.get(&key) == Some(&value) => false,
-                    Some(value) => {
-                        self.settings.values.insert(key, value);
-                        true
-                    }
-                    None => self.settings.values.remove(&key).is_some(),
-                };
-                if changed {
-                    for item in &mut self.items {
-                        if item.submitted.is_none() {
-                            item.ack = None;
-                        }
-                    }
-                }
+                self.edit_option(key, value);
             }
             Intent::OptionEdited { .. } => {}
             Intent::ResetRequested => {
@@ -576,19 +563,49 @@ impl AppState {
             Intent::OmissionsDeclined => self.decline(),
             Intent::CancelRequested => self.cancel(now, update),
             Intent::Job { id, input } => self.job_input(id, input, now, disk, update),
-            Intent::JobPolicy { id, values } => {
-                if let Some(attempt) = self
-                    .items
-                    .iter_mut()
-                    .filter(|item| item.state.is_active())
-                    .filter_map(|item| item.attempt.as_mut())
-                    .find(|attempt| attempt.request == id)
-                {
-                    attempt.policy = values;
-                }
-            }
+            Intent::JobPolicy { id, values } => self.record_policy(id, values),
+            Intent::QueuedPolicy { item, result } => self.queued_policy(item, result),
             Intent::PartialCleaned { item, fate } => self.partial_cleaned(item, fate),
             Intent::JournalSaved(result) => self.save_error = result.err(),
+        }
+    }
+
+    fn destination_picked(&mut self, path: Option<PathBuf>) {
+        if let Some(Dialog::Save(id)) = self.dialog {
+            self.dialog = None;
+            if let Some(path) = path {
+                self.choose_destination(id, path);
+            }
+        }
+    }
+
+    fn edit_option(&mut self, key: String, value: Option<OptionValue>) {
+        let changed = match value {
+            Some(value) if self.settings.values.get(&key) == Some(&value) => false,
+            Some(value) => {
+                self.settings.values.insert(key, value);
+                true
+            }
+            None => self.settings.values.remove(&key).is_some(),
+        };
+        if changed {
+            for item in &mut self.items {
+                if item.submitted.is_none() {
+                    item.ack = None;
+                }
+            }
+        }
+    }
+
+    fn record_policy(&mut self, id: u64, values: Vec<EffectiveOption>) {
+        if let Some(attempt) = self
+            .items
+            .iter_mut()
+            .filter(|item| item.state.is_active())
+            .filter_map(|item| item.attempt.as_mut())
+            .find(|attempt| attempt.request == id)
+        {
+            attempt.policy = values;
         }
     }
 
@@ -975,6 +992,10 @@ impl AppState {
                 blocker("This build converts Y4M files only.", Severity::Problem)
             }
             ItemState::Unreadable => blocker("This file cannot be converted.", Severity::Problem),
+            ItemState::Waiting if item.source_changed() => blocker(
+                "The source changed after submission. Add the source again.",
+                Severity::Warning,
+            ),
             ItemState::Waiting if item.destination.exists => {
                 blocker("The output file already exists.", Severity::Warning)
             }
@@ -1000,6 +1021,16 @@ impl AppState {
         }
         if self.items.iter().any(|i| i.state == ItemState::Probing) {
             return blocker("Reading the files…", Severity::Info);
+        }
+        if self
+            .items
+            .iter()
+            .any(|i| i.state == ItemState::Waiting && i.source_changed())
+        {
+            return blocker(
+                "A source changed after submission. Add it again.",
+                Severity::Warning,
+            );
         }
         let taken = self
             .items

@@ -386,6 +386,24 @@ fn concurrent_encode_and_inspection(rig: &mut Rig, scratch: &Scratch) {
             .all(|i| i.state() == ItemState::Waiting)
     });
     rig.dispatch(Intent::ConvertRequested);
+    rig.settle("the first file working", |s| {
+        s.state().items()[0]
+            .attempt()
+            .is_some_and(|attempt| attempt.partial.is_some())
+            || s.state().items()[0].state() == ItemState::Completed
+    });
+    let journal::Loaded::Found(saved) = journal::load(&scratch.journal()) else {
+        unreachable!("the submitted batch was not saved");
+    };
+    assert!(!saved.items[0].attempt_policy.is_empty());
+    let next_policy = saved.items[1]
+        .submitted
+        .as_ref()
+        .map(|submission| &submission.policy);
+    assert!(
+        next_policy.is_some_and(|policy| !policy.is_empty())
+            || !saved.items[1].attempt_policy.is_empty()
+    );
     rig.settle("the second file converting", |s| {
         s.state().items()[0].state() == ItemState::Completed
             && s.state().items()[1].state().is_active()
