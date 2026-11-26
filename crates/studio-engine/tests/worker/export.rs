@@ -223,6 +223,8 @@ fn check_hashes<'a>(
     expected: impl IntoIterator<Item = (usize, &'a [u8])>,
 ) -> TestResult {
     let report: serde_json::Value = serde_json::from_reader(fs::File::open(path)?)?;
+    assert_eq!(report["contract"], "splot.decoded_frame_hash");
+    assert_eq!(report["version"], 1);
     assert_eq!(report["algorithm"], "splot-dfh-sha256-v1");
     assert_eq!(report["byte_stream"], "av2-output-samples-v1");
     assert_eq!(report["variant"], "raw_intermediate_output");
@@ -418,6 +420,11 @@ fn raw_ranges_follow_avm_output_order_without_extra_decode_prerequisites() -> Te
             reference[frame_bytes..frame_bytes * (usize::try_from(last)? + 1)]
         );
         let layout: serde_json::Value = serde_json::from_reader(fs::File::open(layout)?)?;
+        assert_eq!(layout["sample_layout"], "av2-output-samples-v1");
+        assert_eq!(layout["source_digest"]["bytes"], bytes.len());
+        assert_eq!(layout["source_digest"]["sha256"], sha(&bytes));
+        assert_eq!(layout["sample_format"]["bit_depth"], depth);
+        assert_eq!(layout["sample_format"]["chroma"], "yuv420");
         assert_eq!(layout["frames"], last);
         assert_eq!(
             (layout["width"].as_u64(), layout["height"].as_u64()),
@@ -448,6 +455,15 @@ fn raw_ranges_follow_avm_output_order_without_extra_decode_prerequisites() -> Te
         assert_eq!(u64::try_from(outputs.len())?, last);
         for (output, ordinal) in outputs.iter().zip(1..=last) {
             assert_eq!(output["ordinal"], ordinal);
+            match timing {
+                Some("variable") => {
+                    let ivf = &output["timing"]["ivf"];
+                    assert_eq!(ivf["pts"], [0, 1, 3, 4][usize::try_from(ordinal)?]);
+                    assert_eq!(ivf["time_base"], serde_json::json!({"num": 1, "den": 30}));
+                }
+                Some("unknown") => assert!(output["timing"]["ivf"].is_null()),
+                _ => {}
+            }
         }
         assert_eq!(fs::read(source)?, bytes);
     }
