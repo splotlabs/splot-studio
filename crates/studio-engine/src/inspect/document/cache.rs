@@ -20,7 +20,7 @@ const DIRECTORY: &str = "analysis-index";
 const ENTRY_PREFIX: &str = "index-";
 const STAGING_PREFIX: &str = ".stage-";
 const RANDOM_LEN: usize = 16;
-const MAGIC: &[u8] = b"SplotStudio/index\0";
+const MAGIC: &[u8; 18] = b"SplotStudio/index\0";
 // Increase this version when the structure or meaning of an index changes.
 const SCHEMA: u32 = 1;
 const SPEC: &str = "AV2 v1.0.0";
@@ -247,7 +247,7 @@ impl Cache {
     }
 
     fn header(&self) -> Vec<u8> {
-        [MAGIC, &self.compatibility].concat()
+        [MAGIC.as_slice(), &self.compatibility].concat()
     }
 
     fn path(&self, framing: Framing, digest: &SourceDigest) -> io::Result<PathBuf> {
@@ -298,7 +298,7 @@ impl Cache {
                 continue;
             }
             let metadata = fs::symlink_metadata(item.path())?;
-            if owned_regular(&metadata) {
+            if owned_regular(&metadata) && has_magic(&item.path())? {
                 entries.push(Entry {
                     path: item.path(),
                     bytes: metadata.len(),
@@ -320,7 +320,14 @@ impl Cache {
                     tail.len() == RANDOM_LEN && tail.bytes().all(|b| b.is_ascii_alphanumeric())
                 });
             if matches && owned_regular(&fs::symlink_metadata(item.path())?) {
-                fs::remove_file(item.path())?;
+                // A killed process may leave a short header, including an empty file.
+                let mut prefix = Vec::new();
+                File::open(item.path())?
+                    .take(MAGIC.len() as u64)
+                    .read_to_end(&mut prefix)?;
+                if MAGIC.starts_with(&prefix) {
+                    fs::remove_file(item.path())?;
+                }
             }
         }
         Ok(())
@@ -436,6 +443,15 @@ fn entry_name(name: &str) -> bool {
     name.strip_prefix(ENTRY_PREFIX)
         .and_then(|tail| tail.split_once('-'))
         .is_some_and(|(len, digest)| lower_hex(len, 16) && lower_hex(digest, 64))
+}
+
+fn has_magic(path: &Path) -> io::Result<bool> {
+    let mut bytes = [0; MAGIC.len()];
+    match File::open(path)?.read_exact(&mut bytes) {
+        Ok(()) => Ok(&bytes == MAGIC),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 fn check_directory(root: &Path) -> io::Result<()> {
@@ -624,10 +640,14 @@ mod tests {
         cache.max_bytes = cache.entries()?[0].bytes;
         let unrelated = cache.root.join("source.obu");
         let outside = dir.path().join("output.obu");
+        let looks_owned = cache
+            .root
+            .join(format!("{ENTRY_PREFIX}{:016x}-{}", 1, "a".repeat(64)));
+        fs::write(&looks_owned, b"media")?;
         let stale = cache.root.join(".stage-0123456789abcdef");
         fs::write(&unrelated, b"source")?;
         fs::write(&outside, b"output")?;
-        fs::write(&stale, b"interrupted index")?;
+        fs::write(&stale, &MAGIC[..6])?;
         store(&cache, &second)?;
         assert!(!stale.exists());
         assert!(
@@ -645,6 +665,45 @@ mod tests {
         assert!(cache.entries()?.is_empty());
         assert_eq!(fs::read(unrelated)?, b"source");
         assert_eq!(fs::read(outside)?, b"output");
+        assert_eq!(fs::read(looks_owned)?, b"media");
+        Ok(())
+    }
+
+    #[test]
+    fn verification_yields_between_chunks_and_clear_refuses_active_writer() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let cache = Cache::new(dir.path())?;
+        let summary = summary(b"media");
+        let digest = summary.digest.as_deref().unwrap();
+        let bytes = [0; 16 * 1024];
+        let copies = VERIFY_BYTES / bytes.len() as u64 + 1;
+        cache.store(
+            &summary,
+            copies * bytes.len() as u64,
+            |writer| {
+                assert_eq!(cache.clear().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+                for _ in 0..copies {
+                    writer.write_all(&bytes)?;
+                }
+                Ok(())
+            },
+            &|| false,
+        )?;
+        let mut pending = cache.open_entry(summary.framing, digest.clone())?.unwrap();
+        assert!(matches!(
+            pending.advance(&|| false)?,
+            VerifiedEntry::Reading
+        ));
+        assert!(pending.advance(&|| true).is_err());
+        let mut pending = cache.open_entry(summary.framing, digest.clone())?.unwrap();
+        assert!(matches!(
+            pending.advance(&|| false)?,
+            VerifiedEntry::Reading
+        ));
+        assert!(matches!(
+            pending.advance(&|| false)?,
+            VerifiedEntry::Complete(_, _, _)
+        ));
         Ok(())
     }
 

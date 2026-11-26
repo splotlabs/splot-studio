@@ -18,7 +18,7 @@ use super::index::Index;
 use super::{FileId, HashReader, Refusal};
 
 const SOURCE_STEP_BYTES: u64 = 4 << 20;
-static PUBLISHING: AtomicBool = AtomicBool::new(false);
+static CACHE_MUTATION: AtomicBool = AtomicBool::new(false);
 
 pub(super) struct CacheSession {
     cache: Arc<Cache>,
@@ -126,7 +126,7 @@ impl CacheSession {
     /// Publish an optional index without occupying the request loop.
     pub(super) fn publish(&self, summary: &DocumentSummary, index: &Index) {
         if !matches!(summary.outcome, ScanOutcome::Complete)
-            || PUBLISHING
+            || CACHE_MUTATION
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_err()
         {
@@ -165,7 +165,7 @@ struct PublishPermission;
 
 impl Drop for PublishPermission {
     fn drop(&mut self) {
-        PUBLISHING.store(false, Ordering::Release);
+        CACHE_MUTATION.store(false, Ordering::Release);
     }
 }
 
@@ -194,6 +194,10 @@ fn source_candidate(
 
 pub(crate) fn clear_cache() -> Result<(), Refusal> {
     let operation = || {
+        CACHE_MUTATION
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "The cache is busy."))?;
+        let _permission = PublishPermission;
         if let Some(cache) = Cache::from_env()? {
             cache.clear()?;
         }
