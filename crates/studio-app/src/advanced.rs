@@ -57,6 +57,21 @@ pub(crate) fn options(
             })
         })
         .collect();
+    // A saved draft can contain a key that this engine cannot describe.
+    // Keep the key selectable so the user can remove that override alone.
+    if !catalog.is_empty() {
+        let query = query.to_lowercase();
+        for key in request.values.keys() {
+            if !catalog.iter().any(|d| d.key == *key) && key.to_lowercase().contains(&query) {
+                rows.push(OptionRow {
+                    key: key.clone(),
+                    title: key.clone(),
+                    group: "Unavailable".into(),
+                    modified: true,
+                });
+            }
+        }
+    }
     rows.sort_by_cached_key(|row| {
         (
             catalog::GROUPS
