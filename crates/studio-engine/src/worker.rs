@@ -176,18 +176,15 @@ fn serve<'scope>(
                 first,
                 count,
             } => {
-                queue_resolution(
-                    requests,
-                    outbox,
-                    Resolution {
-                        id,
-                        schema,
-                        source,
-                        settings,
-                        first,
-                        count,
-                    },
-                );
+                let request = Resolution {
+                    id,
+                    schema,
+                    source,
+                    settings,
+                    first,
+                    count,
+                };
+                queue_resolution(requests, outbox, request);
             }
             // A probe runs here, in order with the other replies, bounded by
             // the media tools' timeout; the end of input is seen after it.
