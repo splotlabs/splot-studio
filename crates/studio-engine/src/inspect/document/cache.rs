@@ -516,7 +516,12 @@ impl Cache {
         #[cfg(unix)]
         let file = self.directory.lock_file(entry_name_of(&path)?)?;
         #[cfg(not(unix))]
-        let file = self.open_lock(&path)?;
+        let file = self.open_lock(&path).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("Cannot open the cache lock file. {error}"),
+            )
+        })?;
         file.try_lock().map_err(io::Error::from)?;
         let file = FileLease::leased(file);
         #[cfg(windows)]
@@ -762,21 +767,30 @@ fn pin_directories(path: &Path) -> io::Result<Vec<File>> {
 
     const FILE_LIST_DIRECTORY: u32 = 0x0001;
     const FILE_READ_ATTRIBUTES: u32 = 0x0080;
-    const FILE_SHARE_READ: u32 = 0x0001;
+    const FILE_SHARE_READ_WRITE: u32 = 0x0003;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
-    // Hold the path from the volume root. The handles deny rename and keep
-    // its ancestors nonempty, which prevents conversion to reparse points.
+    // Keep each ancestor in place and nonempty. A nonempty directory cannot
+    // become a reparse point. Allow other handles to share read and write access.
     let mut directories = Vec::new();
     let mut ancestry: Vec<_> = path.ancestors().filter(|part| part.is_absolute()).collect();
     ancestry.reverse();
     for dir in ancestry {
         let file = OpenOptions::new()
             .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)
-            .share_mode(FILE_SHARE_READ)
+            .share_mode(FILE_SHARE_READ_WRITE)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(dir)?;
+            .open(dir)
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!(
+                        "Cannot hold cache directory {} in place. {error}",
+                        dir.display()
+                    ),
+                )
+            })?;
         let metadata = file.metadata()?;
         if !metadata.is_dir() || is_link(&metadata) {
             return Err(invalid(
@@ -1105,12 +1119,20 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn an_active_cache_operation_pins_its_windows_ancestors() -> io::Result<()> {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        const FILE_ADD_FILE: u32 = 0x0002;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
         let dir = tempfile::tempdir()?;
         let app_data = dir.path().join("app");
         let moved_app_data = dir.path().join("app-moved");
         fs::create_dir(&app_data)?;
         let cache = Cache::new(&app_data)?;
         let summary = summary(b"media");
+        let writer = OpenOptions::new()
+            .access_mode(FILE_ADD_FILE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(&app_data)?;
         let lock = cache.lock()?;
         assert!(fs::rename(&app_data, &moved_app_data).is_err());
         drop(lock);
@@ -1125,6 +1147,7 @@ mod tests {
             &|| false,
         )?;
         assert_eq!(cache.entries()?.len(), 1);
+        drop(writer);
         fs::rename(&app_data, &moved_app_data)?;
         assert!(cache.clear().is_err());
         assert!(moved_app_data.join(DIRECTORY).is_dir());
