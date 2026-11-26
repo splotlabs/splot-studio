@@ -8,7 +8,7 @@ use studio_domain::analysis::{AnalysisFailure, Element, MAX_PAGE_ELEMENTS};
 use studio_domain::syntax::{SyntaxEvent, SyntaxSummary};
 use studio_domain::validation::{Finding, ValidationSettings, ValidationSummary};
 
-use super::{Document, PAGE_BUDGET, Refusal, Seek, SeekFrom, read_file_range};
+use super::{Document, Item, PAGE_BUDGET, Refusal, Seek, SeekFrom, read_file_range};
 use crate::inspect::{syntax, validation};
 
 #[derive(Debug, Default)]
@@ -124,7 +124,12 @@ impl Document {
             })
             .and_then(|_| validation::validate(&mut self.file, settings, cancelled));
         self.check()?;
-        let report = result?;
+        let mut report = result?;
+        for finding in &mut report.findings {
+            finding.extended_layer_id = finding
+                .file_offset
+                .and_then(|offset| indexed_extended_layer(&self.items, offset));
+        }
         let total = report.findings.len() as u64;
         self.evidence.report = Some((request, report.findings));
         Ok((report.summary, total))
@@ -146,6 +151,19 @@ impl Document {
             ));
         }
         page(findings, first, count)
+    }
+}
+
+fn indexed_extended_layer(items: &[Item], byte: u64) -> Option<u8> {
+    let at = items
+        .partition_point(|item| item.start() <= byte)
+        .checked_sub(1)?;
+    let item = &items[at];
+    match item {
+        Item::Obu { offset, header, .. } if (*offset..item.end()).contains(&byte) => {
+            Some(header.extended_layer_id.get())
+        }
+        _ => None,
     }
 }
 
@@ -203,9 +221,28 @@ fn page<T: Clone + Serialize>(
 
 #[cfg(test)]
 mod tests {
-    use super::{PAGE_BUDGET, page};
+    use super::{PAGE_BUDGET, indexed_extended_layer, page};
     use crate::inspect::document::Refusal;
     use studio_domain::analysis::{AnalysisFailure, MAX_PAGE_ELEMENTS};
+
+    #[test]
+    fn finding_layer_requires_a_byte_in_an_indexed_obu() -> Result<(), Refusal> {
+        let mut stream = b"DKIF\x00\x00\x20\x00AV02".to_vec();
+        stream.resize(32, 0);
+        // One IVF record: an extended OBU on layer 5, then unparsed bytes.
+        stream.extend_from_slice(&5_u32.to_le_bytes());
+        stream.extend_from_slice(&0_u64.to_le_bytes());
+        stream.extend_from_slice(&[3, 0x9D, 0x45, 0x11, 0x80]);
+        let scanned = super::super::scan(stream.as_slice(), stream.len() as u64, &|| false)?;
+
+        for byte in [45, 46, 47] {
+            assert_eq!(indexed_extended_layer(&scanned.items, byte), Some(5));
+        }
+        for byte in [0, 32, 44, 48, 49] {
+            assert_eq!(indexed_extended_layer(&scanned.items, byte), None);
+        }
+        Ok(())
+    }
 
     #[test]
     fn pages_limit_bytes_after_json_escaping() -> Result<(), Refusal> {

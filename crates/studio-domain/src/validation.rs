@@ -57,6 +57,8 @@ pub struct Finding {
     pub file_offset: Option<u64>,
     /// Bit index in the indicated byte, most significant bit first.
     pub bit_offset: Option<u8>,
+    /// Extended layer ID of the indexed OBU that contains the finding's byte.
+    pub extended_layer_id: Option<u8>,
 }
 
 /// Why validation ended.
