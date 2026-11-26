@@ -1057,8 +1057,18 @@ fn filter_to_bridge_type(rig: &mut Rig) {
 }
 
 fn activate_reference_key(rig: &mut Rig, expected: &Input) {
-    rig.tab_to(Key::Return, |input| input == expected);
-    rig.inputs.borrow_mut().retain(|input| input == expected);
+    for _ in 0..64 {
+        rig.press(Key::Tab);
+        rig.press(Key::Return);
+        rig.inputs.borrow_mut().retain(|input| input == expected);
+        if !rig.inputs.borrow().is_empty() {
+            return;
+        }
+        // Return can open a combo box while searching for the link.
+        rig.press(Key::Escape);
+        rig.inputs.borrow_mut().clear();
+    }
+    unreachable!("no Tab stop activated {expected:?}");
 }
 
 fn reference_selection(
