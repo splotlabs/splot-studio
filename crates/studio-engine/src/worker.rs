@@ -207,6 +207,7 @@ fn serve<'scope>(
                 export::start(scope, outbox, id, *export, &mut job);
             }
             Command::ExportProceed => export::proceed(outbox, id),
+            Command::ExportPublish => export::permit(outbox, id),
             Command::Cancel => {
                 if cancel_job(outbox, id) {
                     return (Ok(()), true);

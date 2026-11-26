@@ -217,6 +217,9 @@ pub enum Command {
     /// Worker only. Call after saving the paths from [`Event::ExportPrepared`].
     /// Use the request ID of [`Self::ExportPrepare`].
     ExportProceed,
+    /// Worker only. Permit the verified export to publish its files.
+    /// Use the request ID from [`Event::ExportPublishReady`].
+    ExportPublish,
     /// Asks the running job to stop. Use the export request ID to cancel an export.
     /// [`Event::CancelRequested`] acknowledges
     /// the request; only [`Event::Cancelled`] means the job has stopped.
@@ -532,6 +535,11 @@ pub enum Event {
     ExportProgress {
         /// The measured counts.
         progress: ExportProgress,
+    },
+    /// Verification completed. The worker waits for [`Command::ExportPublish`].
+    ExportPublishReady {
+        /// The number of verified output pictures.
+        frames: u64,
     },
     /// One file reached its destination.
     ExportPublished {

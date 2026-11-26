@@ -6,8 +6,8 @@
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Component, Path, PathBuf};
-use std::sync::PoisonError;
 use std::sync::atomic::Ordering;
+use std::sync::{MutexGuard, PoisonError};
 use std::thread::{self, Scope, ScopedJoinHandle};
 use std::time::SystemTime;
 
@@ -28,6 +28,7 @@ enum Phase {
     Preparing,
     Waiting,
     Ready,
+    AwaitingPublish(u64),
     Publishing(u64),
 }
 
@@ -340,10 +341,8 @@ pub(super) fn start<'scope>(
 
 pub(super) fn proceed(outbox: &Outbox, id: u64) {
     let mut state = outbox.lock();
-    if state.job == JobState::Running
-        && state.job_id == id
-        && !outbox.cancel.load(Ordering::Relaxed)
-        && let Some(export) = &mut state.export
+    let worker = Worker { outbox, id };
+    if let Ok(export) = worker.active(&mut state)
         && export.phase == Phase::Waiting
     {
         export.phase = Phase::Ready;
@@ -358,6 +357,34 @@ pub(super) fn proceed(outbox: &Outbox, id: u64) {
     );
 }
 
+pub(super) fn permit(outbox: &Outbox, id: u64) {
+    let mut state = outbox.lock();
+    let worker = Worker { outbox, id };
+    if let Ok(export) = worker.active(&mut state)
+        && let Phase::AwaitingPublish(frames) = export.phase
+    {
+        export.phase = Phase::Publishing(frames);
+        state.publishing = true;
+        state.push(Envelope::new(
+            id,
+            Event::ExportStage {
+                stage: ExportStage::Publishing,
+            },
+        ));
+        drop(state);
+        outbox.changed.notify_all();
+        return;
+    }
+    drop(state);
+    outbox.reply(
+        id,
+        refusal(
+            ErrorCode::WrongState,
+            "Wait for the verified export before publishing.",
+        ),
+    );
+}
+
 struct Worker<'a> {
     outbox: &'a Outbox,
     id: u64,
@@ -369,6 +396,17 @@ impl Worker<'_> {
             return Err(Stop::Cancelled);
         }
         state.export.as_mut().ok_or(Stop::Cancelled)
+    }
+
+    fn wait(&self, mut state: MutexGuard<'_, State>, pending: Phase) -> Result<(), Stop> {
+        while self.active(&mut state)?.phase == pending {
+            state = self
+                .outbox
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        Ok(())
     }
 
     fn finish(&self, result: Result<u64, Stop>) {
@@ -444,14 +482,7 @@ impl ExportControl for Worker<'_> {
         export.phase = Phase::Waiting;
         state.push(Envelope::new(self.id, Event::ExportPrepared { files }));
         self.outbox.changed.notify_all();
-        while self.active(&mut state)?.phase == Phase::Waiting {
-            state = self
-                .outbox
-                .changed
-                .wait(state)
-                .unwrap_or_else(PoisonError::into_inner);
-        }
-        Ok(())
+        self.wait(state, Phase::Waiting)
     }
 
     fn stage(&self, stage: ExportStage) {
@@ -471,18 +502,12 @@ impl ExportControl for Worker<'_> {
                 "Verify at least one selected frame before publishing.",
             ));
         }
-        export.phase = Phase::Publishing(frames);
-        state.publishing = true;
+        let pending = Phase::AwaitingPublish(frames);
+        export.phase = pending;
         state.flush_progress();
-        state.push(Envelope::new(
-            self.id,
-            Event::ExportStage {
-                stage: ExportStage::Publishing,
-            },
-        ));
-        drop(state);
+        state.push(Envelope::new(self.id, Event::ExportPublishReady { frames }));
         self.outbox.changed.notify_all();
-        Ok(())
+        self.wait(state, pending)
     }
 
     fn publish(
@@ -614,6 +639,73 @@ mod tests {
         });
     }
 
+    fn after_verified(
+        control: &Worker<'_>,
+        frames: u64,
+        action: impl FnOnce(),
+    ) -> Result<(), Stop> {
+        thread::scope(|scope| {
+            let waiting = scope.spawn(|| control.claim_publish(frames));
+            let mut state = control.outbox.lock();
+            while !matches!(state.queue.back().map(|envelope| &envelope.body),
+                Some(Event::ExportPublishReady { frames: count }) if *count == frames)
+            {
+                state = control.outbox.changed.wait(state).unwrap();
+            }
+            assert!(!state.publishing);
+            assert!(
+                state
+                    .export
+                    .as_ref()
+                    .unwrap()
+                    .destinations
+                    .iter()
+                    .all(|plan| !plan.path.exists())
+            );
+            drop(state);
+            action();
+            waiting.join().unwrap()
+        })
+    }
+
+    fn permit_after_verified(control: &Worker<'_>, frames: u64) {
+        after_verified(control, frames, || {
+            permit(control.outbox, ID + 1);
+            assert!(!control.outbox.lock().publishing);
+            permit(control.outbox, ID);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn cancellation_at_publish_barrier_never_renames() {
+        let fixture = Fixture::new();
+        let outbox = Outbox::default();
+        let control = fixture.control(&outbox);
+        let mut layout = fixture.stage(&control, ExportArtifactKind::Layout, "layout.json");
+        let mut samples = fixture.stage(&control, ExportArtifactKind::Samples, "samples.yuv");
+        proceed_after_registration(&control);
+        fill(&mut layout);
+        fill(&mut samples);
+        let result = after_verified(&control, 6, || {
+            assert!(matches!(outbox.cancel(ID), Cancel::Accepted));
+            permit(&outbox, ID);
+            assert!(!outbox.lock().publishing);
+        });
+        assert!(matches!(result, Err(Stop::Cancelled)));
+        drop(layout);
+        drop(samples);
+        control.finish(result);
+        assert!(!fixture.path("samples.yuv").exists());
+        assert!(!fixture.path("layout.json").exists());
+        assert!(matches!(
+            outbox.lock().queue.back().map(|envelope| &envelope.body),
+            Some(Event::ExportFinished {
+                outcome: ExportOutcome::Cancelled
+            })
+        ));
+    }
+
     #[test]
     fn second_output_collision_reports_the_published_first_file() {
         let fixture = Fixture::new();
@@ -625,7 +717,7 @@ mod tests {
         proceed_after_registration(&control);
         fill(&mut layout);
         fill(&mut samples);
-        control.claim_publish(6).unwrap();
+        permit_after_verified(&control, 6);
         assert!(matches!(outbox.cancel(ID), Cancel::Publishing));
         outbox.stop(&outbox.lock());
         assert!(!control.cancelled());
@@ -666,7 +758,7 @@ mod tests {
         proceed_after_registration(&control);
         fill(&mut layout);
         fill(&mut samples);
-        control.claim_publish(6).unwrap();
+        permit_after_verified(&control, 6);
         let path = fixture.path("layout.json");
         let published = output::publish_recorded(layout, &path).unwrap();
         let result = control.record(
