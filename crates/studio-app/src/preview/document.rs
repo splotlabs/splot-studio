@@ -150,7 +150,12 @@ impl Preview {
     pub(super) fn partial_coverage(&mut self, message: String) {
         self.playing = false;
         self.document_progress.clear();
-        self.document_notice = message;
+        if self.shown.is_some() {
+            self.document_notice = message;
+        } else {
+            self.stage_failure = Some(message);
+            self.dirty.picture = true;
+        }
         if let Some(Want::Picture(key)) = self.want() {
             self.failed = Some(key);
         }

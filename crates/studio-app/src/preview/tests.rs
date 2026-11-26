@@ -862,6 +862,19 @@ fn output_picture(generation: u64, frame: u64, interval: Option<MediaTime>) -> P
 }
 
 #[test]
+fn next_at_a_partial_boundary_preserves_the_picture_with_no_frame_count() {
+    let (mut preview, opening) = shown(document_subject(7));
+    preview.picture(output_picture(only(&opening).request_id, 0, None));
+    let next = only(&preview.input(Input::Step(1))).request_id;
+    none(preview.unavailable(next, PictureFailure::PartialCoverage, "Partial index."));
+    let view = preview.view();
+    assert_eq!(view.frame_text, "Output 1");
+    assert!(view.picture.is_some());
+    assert_eq!(view.frames, 0);
+    assert_eq!(view.seek_error, "Partial index.");
+}
+
+#[test]
 fn rapid_document_seeks_and_cancel_discard_old_work() {
     use studio_domain::preview::PictureStage;
 
