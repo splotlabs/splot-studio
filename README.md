@@ -63,6 +63,11 @@ codec is young.
   seek can require decoding from the start of the stream. You can cancel the seek.
   When timing is unavailable, playback uses a labeled 30 fps assumption.
   A decode error leaves the navigator, syntax, and bytes available.
+- Inspect a decoded picture in RGB or select its Y, U, or V plane. Fit shows the whole
+  picture. Use integer zoom to inspect individual samples. Select a sample with the pointer
+  or enter its coordinates to read and copy its original integer value. The viewer shows
+  plane dimensions, bit depth, and available color and chroma information. The grain control
+  selects which decoded samples the viewer shows.
 - Open a validation result in Analyze to inspect its findings without running validation
   again. From Jobs, export the complete retained report as JSON or plain text. The report
   records scope, interruptions, and omitted findings. When validation runs, the report
