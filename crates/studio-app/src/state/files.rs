@@ -28,7 +28,7 @@ impl AppState {
             }
             let id = self.next_id;
             self.next_id += 1;
-            let wanted = default_destination(&path, self.settings.output);
+            let wanted = default_destination(&path, self.draft_settings().base.output);
             let destination = self.unique(wanted, id, Some(disk));
             self.items.push(Item::new(id, path, destination));
         }
@@ -166,6 +166,15 @@ impl AppState {
         let Some(item) = self.item_mut(id) else {
             return false;
         };
+        let replay = item
+            .attempt
+            .as_ref()
+            .filter(|_| by_user)
+            .filter(|attempt| stream.is_none_or(|stream| stream == attempt.job.video_stream))
+            .map(|attempt| crate::queue::Submission {
+                job: attempt.job.clone(),
+                policy: attempt.policy.clone(),
+            });
         let stream = stream
             .or(item.stream)
             .or_else(|| item.facts.as_ref().map(|f| f.video_stream));
@@ -180,6 +189,11 @@ impl AppState {
         if let Some(item) = self.item_mut(id) {
             item.destination.path = path;
             item.destination.exists = false;
+            item.submitted = replay.map(|mut submission| {
+                submission.job.destination =
+                    studio_domain::job::WirePath::from_path(&item.destination.path);
+                submission
+            });
         }
         if by_user && let Some(run) = &mut self.run {
             run.attempted.retain(|a| *a != id);
@@ -219,7 +233,7 @@ impl AppState {
             file_name: path
                 .file_name()
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
-            output: self.settings.output,
+            output: self.draft_settings().base.output,
         };
         self.dialog = Some(Dialog::Save(id));
         Some(effect)
@@ -251,7 +265,7 @@ impl AppState {
             let Some(item) = self.item(id) else {
                 continue;
             };
-            let wanted = default_destination(&item.source, self.settings.output);
+            let wanted = default_destination(&item.source, self.draft_settings().base.output);
             let path = self.unique(wanted, id, Some(disk));
             if let Some(item) = self.item_mut(id) {
                 item.destination.path = path;

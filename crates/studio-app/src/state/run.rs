@@ -12,7 +12,7 @@ use studio_domain::protocol::Event;
 use super::{AppState, Asked, Confirmation, Effect, Run, Update};
 use crate::activity::{self, Activity, Changed, Phase};
 use crate::queue::{
-    Acknowledgement, Attempt, Ending, Item, ItemId, ItemState, PartialFate, Transition,
+    Acknowledgement, Attempt, Ending, Item, ItemId, ItemState, PartialFate, Submission, Transition,
 };
 use crate::recovery::Disk;
 use crate::source::attached_pictures;
@@ -24,16 +24,25 @@ impl AppState {
         item.state == ItemState::Waiting
             && item.facts.is_some()
             && !item.destination.exists
-            && self
-                .capabilities()
-                .is_some_and(|c| c.encode_outputs.contains(&self.settings.output))
+            && self.capabilities().is_some_and(|c| {
+                c.encode_outputs.contains(
+                    &item
+                        .submitted
+                        .as_ref()
+                        .map_or(self.draft_settings().base.output, |submission| {
+                            submission.job.settings.base.output
+                        }),
+                )
+            })
     }
 
     /// A file the run may start now: startable and, if its output leaves
     /// something out, acknowledged for the current settings.
     fn runnable(&self, item: &Item) -> bool {
         self.startable(item)
-            && (!item.leaves_out_something() || item.acknowledged_for(self.settings))
+            && (item.submitted.is_some()
+                || !item.leaves_out_something()
+                || item.acknowledged_for(self.draft_settings().base))
     }
 
     /// Convert, Convert N Files or Continue.
@@ -52,7 +61,7 @@ impl AppState {
         if !asked.is_empty() {
             self.confirmation = Some(Confirmation {
                 asked,
-                output: self.settings.output,
+                output: self.draft_settings().base.output,
             });
             return;
         }
@@ -64,7 +73,11 @@ impl AppState {
     }
 
     fn begin_run(&mut self) {
-        self.run = Some(Run::default());
+        self.run = Some(Run {
+            settings: self.settings.clone(),
+            attempted: Vec::new(),
+            stop_after_current: false,
+        });
         self.paused = false;
         self.restored = None;
     }
@@ -75,13 +88,13 @@ impl AppState {
         self.items
             .iter()
             .filter(|i| self.startable(i) && i.leaves_out_something())
-            .filter(|i| !i.acknowledged_for(self.settings))
+            .filter(|i| i.submitted.is_none() && !i.acknowledged_for(self.draft_settings().base))
             .filter(|i| run.is_none_or(|r| !r.attempted.contains(&i.id)))
             .filter_map(|i| {
                 let facts = i.facts.as_ref()?;
                 Some(Asked {
                     item: i.id,
-                    ack: Acknowledgement::new(facts, self.settings),
+                    ack: Acknowledgement::new(facts, self.draft_settings().base),
                     source: i.source.clone(),
                     omissions: facts.omissions,
                     attached_pictures: attached_pictures(facts),
@@ -93,14 +106,14 @@ impl AppState {
     /// Whether `confirmation` still describes exactly what confirming would
     /// acknowledge.
     pub(super) fn still_confirms(&self, confirmation: &Confirmation) -> bool {
-        confirmation.output == self.settings.output
+        confirmation.output == self.draft_settings().base.output
             && confirmation.asked.iter().all(|asked| {
                 self.item(asked.item).is_some_and(|item| {
                     self.startable(item)
                         && item
                             .facts
                             .as_ref()
-                            .is_some_and(|f| asked.ack.holds_for(f, self.settings))
+                            .is_some_and(|f| asked.ack.holds_for(f, self.draft_settings().base))
                 })
             })
     }
@@ -137,6 +150,10 @@ impl AppState {
     /// Starts the next file of the run, waits for files still being read,
     /// asks about files that joined the run unacknowledged, or ends the run.
     pub(super) fn advance(&mut self, now: Instant, update: &mut Update) {
+        if self.run.is_none() {
+            return;
+        }
+        self.freeze_ready();
         let Some(run) = &self.run else {
             return;
         };
@@ -171,30 +188,68 @@ impl AppState {
         } else {
             self.confirmation = Some(Confirmation {
                 asked,
-                output: self.settings.output,
+                output: self.draft_settings().base.output,
             });
         }
     }
 
-    /// Starts `id` with a snapshot of the current settings.
+    /// Freeze each ready job before the first job starts.
+    fn freeze_ready(&mut self) {
+        let Some(run) = &self.run else {
+            return;
+        };
+        let settings = self.draft_settings().clone();
+        let identity = self
+            .capabilities()
+            .and_then(|capabilities| capabilities.options.clone());
+        let ready: Vec<_> = self
+            .items
+            .iter()
+            .filter(|item| {
+                !run.attempted.contains(&item.id) && item.submitted.is_none() && self.runnable(item)
+            })
+            .map(|item| item.id)
+            .collect();
+        for id in ready {
+            if let Some(item) = self.item_mut(id)
+                && let Some(facts) = &item.facts
+            {
+                item.submitted = Some(Submission {
+                    job: JobSpec {
+                        source: WirePath::from_path(&item.source),
+                        fingerprint: facts.fingerprint,
+                        video_stream: facts.video_stream,
+                        omissions_acknowledged: facts.omissions.any()
+                            && item.acknowledged_for(settings.base),
+                        destination: WirePath::from_path(&item.destination.path),
+                        settings: settings.clone(),
+                        identity: identity.clone(),
+                        pass_artifact: None,
+                    },
+                    policy: Vec::new(),
+                });
+            }
+        }
+    }
+
+    /// Starts the frozen submission for `id`.
     fn start(&mut self, id: ItemId, now: Instant, update: &mut Update) {
         let request = self.take_request();
-        let settings = self.settings;
-        let acknowledged = self.item(id).is_some_and(|i| i.acknowledged_for(settings));
+        let identity = self
+            .capabilities()
+            .and_then(|capabilities| capabilities.options.clone());
         let Some(item) = self.item_mut(id) else {
             return;
         };
         let Some(facts) = &item.facts else {
             return;
         };
-        let job = JobSpec {
-            source: WirePath::from_path(&item.source),
-            fingerprint: facts.fingerprint,
-            video_stream: facts.video_stream,
-            omissions_acknowledged: facts.omissions.any() && acknowledged,
-            destination: WirePath::from_path(&item.destination.path),
-            settings,
+        let Some(Submission { mut job, policy }) = item.submitted.take() else {
+            return;
         };
+        if job.identity.is_none() {
+            job.identity = identity;
+        }
         let activity = Activity::new(
             item.destination.path.clone(),
             facts.frame_count,
@@ -206,6 +261,7 @@ impl AppState {
         }
         item.attempt = Some(Attempt {
             job: job.clone(),
+            policy,
             request,
             activity: Some(activity),
             partial: None,

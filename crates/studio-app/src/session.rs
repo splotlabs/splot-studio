@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use studio_domain::analysis::RowFilter;
-use studio_domain::job::WirePath;
+use studio_domain::job::{Failure, FailureCode, WirePath};
 use studio_domain::protocol::{BuildIdentity, Command, Envelope, Event, ProtocolError};
 use studio_domain::settings::OutputKind;
 
@@ -40,6 +40,8 @@ use crate::recovery::{self, RealDisk};
 use crate::source::ProbeFailure;
 use crate::state::{AppState, Effect, Intent, JournalProblem};
 use crate::workspace::Workspace;
+
+mod preflight;
 
 /// The request id of the startup `Hello`; probes and jobs count from 1.
 const HELLO_ID: u64 = 0;
@@ -136,6 +138,7 @@ pub struct Session {
     hello: Option<Worker>,
     probe: Option<(u64, Worker)>,
     job: Option<(u64, Worker)>,
+    preflight: Option<preflight::Preflight>,
     preview: Preview,
     /// The preview process, started on first need, with its spawn number.
     previewer: Option<(u64, Worker)>,
@@ -177,6 +180,7 @@ impl Session {
             hello: None,
             probe: None,
             job: None,
+            preflight: None,
             preview: Preview::new(),
             previewer: None,
             previewers_started: 0,
@@ -588,6 +592,13 @@ impl Session {
                 self.dispatch(Intent::ProbeAnswered { id, result }, now)
             }
             Route::Job(id) => {
+                if self
+                    .preflight
+                    .as_ref()
+                    .is_some_and(|preflight| preflight.id == id)
+                {
+                    return self.deliver_preflight(id, delivery, now);
+                }
                 let input = match delivery {
                     Delivery::Event(e) if e.request_id != id => {
                         eprintln!(
@@ -741,17 +752,42 @@ impl Session {
                 }
             }
             Effect::Start { id, job } => {
-                let started = self.spawn(Route::Job(id)).and_then(|mut worker| {
-                    let live = Some(self.preview.live_box());
-                    worker
-                        .send(id, Command::Start { job, live })
-                        .map_err(|e| format!("could not send the job: {e}"))?;
-                    Ok(worker)
-                });
+                let source = self
+                    .state
+                    .items()
+                    .iter()
+                    .find(|item| item.attempt().is_some_and(|attempt| attempt.request == id))
+                    .and_then(crate::queue::Item::facts)
+                    .cloned();
+                let started = source
+                    .ok_or_else(|| "The submitted source has no probe result.".to_owned())
+                    .and_then(|source| {
+                        if source.fingerprint != job.fingerprint
+                            || source.video_stream != job.video_stream
+                        {
+                            return Err(
+                                "The source changed after submission. Add the source again.".into(),
+                            );
+                        }
+                        let mut worker = self.spawn(Route::Job(id))?;
+                        worker
+                            .send(
+                                HELLO_ID,
+                                Command::Hello {
+                                    client: BuildIdentity {
+                                        name: crate::APP_NAME.to_owned(),
+                                        version: env!("CARGO_PKG_VERSION").to_owned(),
+                                    },
+                                },
+                            )
+                            .map_err(|error| error.to_string())?;
+                        Ok((worker, source))
+                    });
                 match started {
-                    // The previous job's worker, already told to exit, is
-                    // dropped here and reaped by its watchdog.
-                    Ok(worker) => self.job = Some((id, worker)),
+                    Ok((worker, source)) => {
+                        self.preflight = Some(preflight::Preflight::new(id, job, source));
+                        self.job = Some((id, worker));
+                    }
                     Err(detail) => pending.push_back(Intent::Job {
                         id,
                         input: activity::Input::WorkerEnded { detail },
@@ -759,6 +795,20 @@ impl Session {
                 }
             }
             Effect::Worker { id, effect } => {
+                if effect == activity::Effect::SendCancel
+                    && self
+                        .preflight
+                        .as_ref()
+                        .is_some_and(|preflight| preflight.id == id)
+                {
+                    self.preflight = None;
+                    self.job.take();
+                    pending.push_back(Intent::Job {
+                        id,
+                        input: activity::Input::Event(Event::Cancelled),
+                    });
+                    return;
+                }
                 let Some((_, worker)) = self.job.as_mut().filter(|(current, _)| *current == id)
                 else {
                     return;
@@ -786,6 +836,82 @@ impl Session {
                 pending.push_back(Intent::PartialCleaned { item, fate });
             }
         }
+    }
+
+    fn deliver_preflight(&mut self, id: u64, delivery: Delivery, now: Instant) -> Outcome {
+        let Some(preflight) = self.preflight.as_mut() else {
+            return Outcome::nothing();
+        };
+        match preflight.handle(delivery) {
+            preflight::Next::Ignore => Outcome::nothing(),
+            preflight::Next::Failed(failure) => self.preflight_failed(id, failure, now),
+            preflight::Next::Send(command) => match self.send_job(id, *command) {
+                Ok(()) => Outcome::nothing(),
+                Err(message) => self.preflight_failed(
+                    id,
+                    Failure {
+                        code: FailureCode::InvalidSettings,
+                        message,
+                    },
+                    now,
+                ),
+            },
+            preflight::Next::Ready(values) => {
+                let Some(preflight) = self.preflight.take() else {
+                    return Outcome::nothing();
+                };
+                let changed = self
+                    .state
+                    .items()
+                    .iter()
+                    .filter_map(crate::queue::Item::attempt)
+                    .find(|attempt| attempt.request == id)
+                    .is_some_and(|attempt| !attempt.policy.is_empty() && attempt.policy != values);
+                if changed {
+                    return self.preflight_failed(id, Failure {
+                        code: FailureCode::InvalidSettings,
+                        message: "The effective encoder policy changed. Add the source again to make a new submission.".into(),
+                    }, now);
+                }
+                let outcome = self.dispatch(Intent::JobPolicy { id, values }, now);
+                let live = Some(self.preview.live_box());
+                if let Err(detail) = self.send_job(
+                    id,
+                    Command::Start {
+                        job: preflight.job,
+                        live,
+                    },
+                ) {
+                    return self.dispatch(
+                        Intent::Job {
+                            id,
+                            input: activity::Input::WorkerEnded { detail },
+                        },
+                        now,
+                    );
+                }
+                outcome
+            }
+        }
+    }
+
+    fn send_job(&mut self, id: u64, command: Command) -> Result<(), String> {
+        let Some((_, worker)) = self.job.as_mut().filter(|(current, _)| *current == id) else {
+            return Err("The job worker stopped.".into());
+        };
+        worker.send(id, command).map_err(|error| error.to_string())
+    }
+
+    fn preflight_failed(&mut self, id: u64, failure: Failure, now: Instant) -> Outcome {
+        self.preflight = None;
+        self.job.take();
+        self.dispatch(
+            Intent::Job {
+                id,
+                input: activity::Input::Event(Event::Failed { failure }),
+            },
+            now,
+        )
     }
 
     fn spawn(&self, route: Route) -> Result<Worker, String> {
@@ -838,7 +964,7 @@ impl Session {
         };
         let journal = journal::snapshot(
             self.state.next_id(),
-            self.state.settings(),
+            self.state.option_request().clone(),
             self.state.items(),
             view.clone(),
         );
