@@ -1018,10 +1018,13 @@ impl Analysis {
                 }
             }
             Purpose::Evidence { pick, offset } => {
-                if doc.locating != Some(request_id) || !doc.evidence.has_finding(pick) {
+                if doc.locating != Some(request_id) {
                     return;
                 }
                 doc.locating = None;
+                if !doc.evidence.has_finding(pick) {
+                    return;
+                }
                 let position = if current {
                     Position::of(row)
                 } else {

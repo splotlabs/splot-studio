@@ -1165,13 +1165,11 @@ fn incompatible_syntax_schema_preserves_byte_inspection() {
     assert!(doc(&analysis).evidence.syntax_error.is_some());
 }
 
-#[test]
-fn unlocated_findings_keep_history_and_next_waits_for_the_locate() {
+fn load_fixture_findings(analysis: &mut Analysis) {
     use studio_domain::validation::{
         Finding, Severity, VALIDATION_SCHEMA, ValidationCompletion, ValidationSummary,
     };
 
-    let (mut analysis, engine) = opened(4);
     let validate = analysis.input(Input::Validate);
     let report = validate[0].request_id;
     let page = analysis.event(
@@ -1223,6 +1221,12 @@ fn unlocated_findings_keep_history_and_next_waits_for_the_locate() {
             findings,
         },
     );
+}
+
+#[test]
+fn unlocated_findings_keep_history_and_next_waits_for_the_locate() {
+    let (mut analysis, engine) = opened(4);
+    load_fixture_findings(&mut analysis);
 
     analysis.input(Input::EvidencePick(0));
     assert_eq!(doc(&analysis).evidence.selected_index(), Some(0));
@@ -1250,4 +1254,69 @@ fn unlocated_findings_keep_history_and_next_waits_for_the_locate() {
         assert_eq!(doc(&analysis).evidence.selected_index(), expected);
         assert_eq!(selected(&analysis), Some((1, Position::Row(1))));
     }
+}
+
+#[test]
+fn a_locate_for_a_replaced_report_releases_the_navigation_slot() {
+    let (mut analysis, engine) = opened(4);
+    load_fixture_findings(&mut analysis);
+    let old = analysis.input(Input::EvidencePick(1));
+    assert!(doc(&analysis).selection_pending());
+    assert_eq!(old.len(), 1);
+
+    analysis.input(Input::Validate);
+    engine.settle(&mut analysis, old);
+    assert!(!doc(&analysis).selection_pending());
+    assert!(selected(&analysis).is_none());
+}
+
+#[test]
+fn a_restored_syntax_row_is_visible_only_after_its_page_arrives() {
+    use studio_domain::syntax::{SYNTAX_SCHEMA, SyntaxEvent, SyntaxStatus, SyntaxSummary};
+
+    let (mut analysis, engine) = opened(4);
+    let effects = analysis.input(Input::RowClicked(0));
+    engine.settle(&mut analysis, effects);
+    let request = analysis.input(Input::EvidenceView(1));
+    let trace = request[0].request_id;
+    // History keeps the field identity while the new trace loads.
+    analysis.documents[0].evidence.selected = Some(Pick::Syntax {
+        element: 0,
+        index: 0,
+    });
+    let page = analysis.event(
+        trace,
+        Event::AnalysisSyntaxReady {
+            document: 1,
+            element: 0,
+            summary: Box::new(SyntaxSummary {
+                schema_version: SYNTAX_SCHEMA,
+                spec_revision: "AV2 v1.0.0".into(),
+                status: SyntaxStatus::Parsed,
+                error: None,
+                retained_events: 1,
+                observed_elements: 1,
+                elements_truncated: false,
+                depth_truncated: false,
+            }),
+            total: 1,
+        },
+    );
+    assert_eq!(doc(&analysis).evidence.selected_index(), None);
+    analysis.event(
+        page[0].request_id,
+        Event::AnalysisSyntaxPage {
+            document: 1,
+            trace,
+            element: 0,
+            first: 0,
+            total: 1,
+            events: vec![SyntaxEvent::Absent {
+                name: "field".into(),
+                condition: "condition".into(),
+                inferred: None,
+            }],
+        },
+    );
+    assert_eq!(doc(&analysis).evidence.selected_index(), Some(0));
 }

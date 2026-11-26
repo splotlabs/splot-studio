@@ -153,7 +153,7 @@ impl Evidence {
                         .as_ref()
                         .is_some_and(|(current, _)| *current == element) =>
             {
-                Some(index)
+                self.events.get(index).map(|_| index)
             }
             Some(Pick::Finding { report, index })
                 if self.tab == 2
@@ -162,7 +162,7 @@ impl Evidence {
                         .as_ref()
                         .is_some_and(|(current, _)| *current == report) =>
             {
-                Some(index)
+                self.findings.get(index).map(|_| index)
             }
             Some(Pick::Finding { .. }) if self.tab == 1 => self.matched_index(),
             _ => None,
