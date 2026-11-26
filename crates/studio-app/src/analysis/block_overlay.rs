@@ -5,8 +5,9 @@
 
 use studio_domain::analysis::AnalysisFailure;
 use studio_domain::blocks::{
-    BlockCoverage, BlockData, BlockEvidence, BlockEvidenceKind, BlockFrame, BlockId, BlockQuery,
-    BlockRecord, BlockRect, BlockTransformId, BlockTree, MAX_BLOCK_BYTES, MAX_BLOCK_RECORDS,
+    BlockCoverage, BlockData, BlockEvidence, BlockEvidenceKind, BlockFrame, BlockId, BlockMotion,
+    BlockPrediction, BlockQuery, BlockRecord, BlockRect, BlockTransformId, BlockTree,
+    MAX_BLOCK_BYTES, MAX_BLOCK_RECORDS,
 };
 use studio_domain::layers::LayerDecodeSelection;
 use studio_domain::preview::{SamplePlane, SampleRect};
@@ -111,6 +112,7 @@ enum Capture {
     View,
     Point(u32, u32, Option<HistoryView>),
     Details(BlockTransformId),
+    Motion(BlockId, u32, u32),
 }
 
 #[derive(Debug, Default)]
@@ -190,6 +192,22 @@ impl Overlay {
         self.records()
             .into_iter()
             .find_map(|(record, key)| (key == selected.key).then_some(record))
+    }
+
+    pub(crate) fn selected_motion(&self) -> Option<BlockMotion> {
+        let selected = self.selected?;
+        let Key::Coding(block) = selected.key else {
+            return None;
+        };
+        [&self.point, &self.viewport, &self.details]
+            .into_iter()
+            .flatten()
+            .filter(|evidence| evidence.frame == Some(selected.frame))
+            .flat_map(|evidence| &evidence.records)
+            .find_map(|record| match record.data {
+                BlockData::Motion { motion } if record.id == block => Some(motion),
+                _ => None,
+            })
     }
 
     fn clear_picture(&mut self) {
@@ -439,8 +457,33 @@ impl Analysis {
         }
         self.overlay.notice = None;
         self.overlay.details = None;
-        if let Key::Transform(id) = key {
-            self.request_overlay(Capture::Details(id), out);
+        self.request_selected_details(out);
+    }
+
+    fn request_selected_details(&mut self, out: &mut Vec<Effect>) {
+        let Some(selected) = self.overlay.selected else {
+            return;
+        };
+        match selected.key {
+            Key::Transform(id) => self.request_overlay(Capture::Details(id), out),
+            Key::Coding(block)
+                if self.overlay.selected_motion().is_none()
+                    && self.overlay.selected_record().is_some_and(|record| {
+                        matches!(
+                            record.data,
+                            BlockData::Coding {
+                                prediction: Some(
+                                    BlockPrediction::Inter { .. } | BlockPrediction::IntraBlockCopy
+                                ),
+                                ..
+                            }
+                        )
+                    }) =>
+            {
+                let (x, y) = selected.point;
+                self.request_overlay(Capture::Motion(block, x, y), out);
+            }
+            _ => {}
         }
     }
 
@@ -460,7 +503,7 @@ impl Analysis {
                 };
                 Some(block_rect(region))
             }
-            Capture::Point(x, y, _) => Some(BlockRect {
+            Capture::Point(x, y, _) | Capture::Motion(_, x, y) => Some(BlockRect {
                 x,
                 y,
                 width: 1,
@@ -475,7 +518,11 @@ impl Analysis {
         let query = BlockQuery {
             coded_offset,
             selection: picture.selection,
-            kind: self.overlay.mode.kind(),
+            kind: if matches!(capture, Capture::Motion(..)) {
+                BlockEvidenceKind::Coding
+            } else {
+                self.overlay.mode.kind()
+            },
             region,
             detail,
             max_events: if detail.is_some() {
@@ -546,18 +593,16 @@ impl Analysis {
                         {
                             self.request_overlay(Capture::Point(x, y, selected.view), out);
                         }
-                    } else if let Key::Transform(id) = selected.key {
-                        self.request_overlay(Capture::Details(id), out);
+                    } else {
+                        self.request_selected_details(out);
                     }
                 }
             }
             Capture::Point(x, y, view) => {
                 self.overlay.point = Some(evidence);
-                if let Some(selected) = self.overlay.selected {
-                    if let Key::Transform(id) = selected.key
-                        && self.overlay.selected_record().is_some()
-                    {
-                        self.request_overlay(Capture::Details(id), out);
+                if self.overlay.selected.is_some() {
+                    if self.overlay.selected_record().is_some() {
+                        self.request_selected_details(out);
                     }
                 } else if let Some(key) = self.overlay.hit(x, y) {
                     self.select_overlay(key, (x, y), view, out);
@@ -572,6 +617,13 @@ impl Analysis {
                     .selected
                     .is_some_and(|s| s.key == Key::Transform(id))
                 {
+                    self.overlay.details = Some(evidence);
+                }
+            }
+            Capture::Motion(block, _, _) => {
+                if self.overlay.selected.is_some_and(|selected| {
+                    selected.key == Key::Coding(block) && evidence.frame == Some(selected.frame)
+                }) {
                     self.overlay.details = Some(evidence);
                 }
             }

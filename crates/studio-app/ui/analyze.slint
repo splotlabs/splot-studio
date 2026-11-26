@@ -1140,7 +1140,9 @@ export component AnalyzeView inherits VerticalLayout {
                 picture-height: root.playback-height;
             }
 
-            if BlockOverlay.mode != 0: BlockOverlayPanel { }
+            if BlockOverlay.mode != 0: BlockOverlayPanel {
+                followed => { history-back.focus(); }
+            }
 
             if Playback.viewer-geometry != "": Caption {
                 text: Playback.viewer-geometry;
@@ -1290,7 +1292,7 @@ export component AnalyzeView inherits VerticalLayout {
         HorizontalLayout {
             spacing: Tokens.space-2;
 
-            IconButton {
+            history-back := IconButton {
                 label: "Back";
                 description: "The previous selection";
                 enabled: Analysis.can-back;

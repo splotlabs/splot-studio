@@ -47,7 +47,7 @@ impl Preview {
     }
 
     fn block_picture_header(&self) -> Option<(&PictureHeader, u64, LayerDecodeSelection)> {
-        if !self.can_sample() {
+        if !self.can_inspect_stage() {
             return None;
         }
         let shown = self.shown.as_ref()?;
@@ -170,6 +170,22 @@ impl BlockViewport {
             width: right.checked_sub(x)?,
             height: bottom.checked_sub(y)?,
         })
+    }
+
+    /// Project a signed luma point in eighths into the painted rectangle.
+    pub(crate) fn project_eighths(self, x: i64, y: i64) -> (f32, f32) {
+        let (sx, sy) = self.scale;
+        let project = |value: i64, scale: u32, start: u32, size: u32| {
+            // The decoder uses u32 sample coordinates and i32 vectors.
+            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+            let fraction = ((value as f64 / (8.0 * f64::from(scale)) - f64::from(start))
+                / f64::from(size.max(1))) as f32;
+            fraction
+        };
+        (
+            project(x, sx, self.crop.x, self.crop.width),
+            project(y, sy, self.crop.y, self.crop.height),
+        )
     }
 }
 

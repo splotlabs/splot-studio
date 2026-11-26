@@ -583,6 +583,13 @@ impl Controller {
         if outcome.analysis {
             render_analysis(&window, session.analysis());
         }
+        if outcome.analysis || outcome.preview.any() {
+            crate::render::block_motion::render_reference(
+                &window,
+                session.analysis(),
+                session.preview(),
+            );
+        }
         export::render_export_status(&window, &session);
         window.set_validation_active(session.batch_active());
         window.set_validation_job_notice(session.batch_notice().unwrap_or_default().into());

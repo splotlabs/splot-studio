@@ -1743,6 +1743,36 @@ fn following_a_reference_keeps_the_verified_index_while_its_page_loads() {
     engine.settle(&mut analysis, effects);
     let (request, document, query) = inspect_reference(&mut analysis);
     analysis.event(request, reference_reply(document, query));
+    let Some(target) = doc(&analysis)
+        .reference_evidence()
+        .and_then(|evidence| references::retained_frame(evidence, 0))
+    else {
+        unreachable!("expected a retained reference")
+    };
+    let mut preview = Vec::new();
+    analysis.request_reference_preview(0, query, target, &mut preview);
+    let preview_request = preview[0].request_id;
+    assert!(matches!(
+        preview[0].command,
+        Command::AnalysisTimelineLocate {
+            target: TimelineTarget::CodedOffset { offset: 10 },
+            ..
+        }
+    ));
+    assert!(doc(&analysis).reference_preview_notice().is_some());
+    let referenced = TimelineSelection {
+        coded_ordinal: 4,
+        coded_offset: 10,
+        output_ordinal: Some(0),
+        showing_offset: Some(10),
+        time: None,
+    };
+    analysis.event(preview_request, timeline_reply(scan, referenced));
+    assert_eq!(
+        doc(&analysis).reference_preview_picture(),
+        Some((target, 0))
+    );
+    assert_eq!(doc(&analysis).timeline().selection(), Some(&origin));
     analysis.input(Input::TimelineRange {
         view: TimelineView::Output,
         first: 1,
@@ -1759,16 +1789,10 @@ fn following_a_reference_keeps_the_verified_index_while_its_page_loads() {
             ..
         }]
     ));
-    let referenced = TimelineSelection {
-        coded_ordinal: 4,
-        coded_offset: 10,
-        output_ordinal: Some(0),
-        showing_offset: Some(10),
-        time: None,
-    };
     let links = analysis.event(effects[0].request_id, timeline_reply(scan, referenced));
     engine.settle(&mut analysis, links);
     assert_eq!(doc(&analysis).bytes().cursor, 10);
+    assert!(doc(&analysis).reference_preview_picture().is_none());
     assert_eq!(analysis.take_timeline_picture(), Some((document, Some(0))));
 }
 

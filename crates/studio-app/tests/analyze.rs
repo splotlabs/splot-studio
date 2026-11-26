@@ -38,6 +38,8 @@ use studio_app::{AnalysisState, AppWindow, ByteRegion};
 mod blocks;
 #[path = "analyze/layers.rs"]
 mod layers;
+#[path = "analyze/motion.rs"]
+mod motion;
 #[path = "analyze/overlays.rs"]
 mod overlays;
 #[path = "analyze/timeline.rs"]
@@ -638,6 +640,7 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
     timeline::controls(&mut rig, &scratch);
     blocks::inspect(&mut rig, &scratch);
     overlays::inspect(&mut rig, &scratch);
+    motion::inspect(&mut rig, &scratch);
 }
 
 /// A malformed trailing bit has a native rule, a known bit position and

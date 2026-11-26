@@ -55,6 +55,7 @@ use studio_domain::protocol::{Command, Event};
 use studio_domain::timeline::{TimelineTarget, TimelineView};
 
 mod batch;
+mod block_motion;
 pub(crate) mod block_overlay;
 pub(crate) mod blocks;
 mod bytes;
@@ -69,6 +70,8 @@ pub(crate) mod references;
 #[cfg(test)]
 mod tests;
 
+pub use block_motion::BlockMotionInput;
+pub(crate) use block_motion::SelectedMotion;
 pub use block_overlay::BlockOverlayInput;
 pub use document::{
     Bytes, Document, Origin, Phase, Position, ReadEnd, Restore, ResultOf, Saved, Selected, extent,
@@ -261,6 +264,8 @@ pub enum Input {
     StopBlocks,
     /// Follow the direct dependency at this row.
     FollowReference(i32),
+    /// Inspect motion or follow a reference from the selected coding block.
+    BlockMotion(BlockMotionInput),
     /// Remove the indexes saved on disk.
     ClearCache,
 }
@@ -276,6 +281,7 @@ enum Asked {
     References(studio_domain::references::ReferenceQuery),
     Blocks(studio_domain::blocks::BlockQuery),
     Overlay(studio_domain::blocks::BlockQuery),
+    ReferencePreview(references::ReferencePreviewQuery),
     Cancel,
     Close,
     Page { generation: u64, first: u64 },
@@ -322,6 +328,8 @@ pub struct Analysis {
     dirty: bool,
     reference_view: Option<(u64, crate::preview::HistoryView)>,
     overlay: block_overlay::Overlay,
+    motion_preview: Option<block_motion::PreviewSelection>,
+    show_motion: bool,
 }
 
 impl Analysis {
@@ -702,6 +710,7 @@ impl Analysis {
             Input::InspectReferences => self.request_references(at, out),
             Input::StopReferences => self.stop_references(at, out),
             Input::FollowReference(index) => self.follow_reference(at, index, out),
+            Input::BlockMotion(input) => self.block_motion_input(at, input, out),
             Input::TypeFilter(index) => self.choose_kind(at, index, out),
             Input::LayerFilter(index) => self.choose_layer(at, index, out),
             Input::ClearFilters => self.refilter(at, RowFilter::default(), out),
@@ -1107,6 +1116,12 @@ impl Analysis {
             (Asked::Overlay(query), Event::AnalysisBlocksReady { evidence, .. }) => {
                 self.accept_overlay(request_id, query, evidence, out);
             }
+            (
+                Asked::ReferencePreview(query),
+                Event::AnalysisTimelineLocated {
+                    scan, selection, ..
+                },
+            ) => self.accept_reference_preview(at, request_id, query, scan, *selection),
             (_, Event::AnalysisFailed { code, message, .. }) => {
                 self.failed(at, request_id, asked, Some(code), message);
                 self.retry_timeline_after_failure(at, asked, out);
@@ -1403,6 +1418,16 @@ impl Analysis {
                     fail_or_notice(doc, code, &message);
                 }
                 self.fail_overlay(request_id, code, &message);
+            }
+            Asked::ReferencePreview(_) => {
+                if matches!(
+                    code,
+                    Some(AnalysisFailure::SourceChanged | AnalysisFailure::UnknownDocument)
+                ) {
+                    fail_or_notice(doc, code, &message);
+                } else {
+                    self.fail_reference_preview(at, request_id, message);
+                }
             }
             Asked::Cancel | Asked::Close | Asked::CancelLayers => {}
         }

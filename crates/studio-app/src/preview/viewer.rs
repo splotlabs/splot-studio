@@ -219,13 +219,30 @@ impl Preview {
     }
 
     fn can_sample(&self) -> bool {
+        self.can_inspect_stage()
+            && !matches!(
+                self.inflight,
+                Some(Sent::Picture {
+                    purpose: super::Purpose::Reference,
+                    ..
+                })
+            )
+    }
+
+    fn can_inspect_stage(&self) -> bool {
         self.document_id().is_some()
             && self.visible
             && self.broken.is_none()
             && !self.playing
             && matches!(
                 self.inflight,
-                None | Some(Sent::Play { stopping: true, .. })
+                None | Some(
+                    Sent::Play { stopping: true, .. }
+                        | Sent::Picture {
+                            purpose: super::Purpose::Reference,
+                            ..
+                        }
+                )
             )
             && self
                 .shown

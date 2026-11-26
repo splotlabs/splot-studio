@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
 import { ComboBox } from "std-widgets.slint";
+import { BlockMotionPane, BlockMotionView, MotionDrawing } from "block-motion.slint";
 import { Caption, LinkButton } from "controls.slint";
 import { FocusRing, KeyboardFocus } from "focus.slint";
 import { Tokens } from "tokens.slint";
@@ -57,6 +58,7 @@ export component BlockOverlayMenu inherits ComboBox {
 }
 
 export component BlockOverlayPanel inherits VerticalLayout {
+    callback followed();
     spacing: Tokens.space-2;
 
     HorizontalLayout {
@@ -192,6 +194,10 @@ export component BlockOverlayPanel inherits VerticalLayout {
             accessible-live-region: polite;
         }
     }
+
+    if BlockMotionView.active: BlockMotionPane {
+        followed => { root.followed(); }
+    }
 }
 
 // The stage and picture use the same physical rectangle and clip.
@@ -253,4 +259,6 @@ export component BlockDrawing inherits Rectangle {
             }
         }
     }
+
+    if BlockMotionView.active && BlockMotionView.show-overlay: MotionDrawing { }
 }
