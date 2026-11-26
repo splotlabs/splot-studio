@@ -178,10 +178,9 @@ fn intra_text(predictor: &IntraPredictor) -> String {
             angle_delta,
             ..
         } => {
-            let mut text = name.clone();
-            if let Some(line) = reference_line.filter(|line| *line > 0) {
-                text.push_str(&format!(", line {line}"));
-            }
+            let mut text = reference_line
+                .filter(|line| *line > 0)
+                .map_or_else(|| name.clone(), |line| format!("{name}, line {line}"));
             let delta = match angle_delta {
                 Some(IntraAngleDelta::DecodedLuma(delta)) => format!("Y mode delta {delta}"),
                 Some(IntraAngleDelta::ChromaFromLuma(delta)) => format!("Y supplies delta {delta}"),
