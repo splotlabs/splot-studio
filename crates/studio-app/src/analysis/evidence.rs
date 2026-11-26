@@ -170,7 +170,7 @@ impl Evidence {
     fn append_syntax(&mut self, events: Vec<SyntaxEvent>) {
         for event in events {
             if event == SyntaxEvent::ExitScope {
-                self.depth = self.depth.saturating_sub(1);
+                self.depth = (self.depth - 1).max(0);
             } else {
                 let scope = matches!(
                     event,

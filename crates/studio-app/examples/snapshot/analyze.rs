@@ -197,20 +197,7 @@ pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
             }
         }
         "analyze-syntax" | "analyze-findings" => {
-            let path = scenario.file("bad trailing bit.obu", &[0x01, 0x08, 0x02, 0x08, 0x00])?;
-            scenario.input(Input::Open(vec![path]));
-            scenario.settle()?;
-            scenario.input(Input::Validate);
-            scenario.settle()?;
-            scenario.input(Input::EvidenceRule(
-                "trailing-bits/missing-one-bit".to_owned(),
-            ));
-            scenario.input(Input::EvidencePick(0));
-            scenario.settle()?;
-            if name == "analyze-syntax" {
-                scenario.input(Input::EvidenceView(1));
-                scenario.settle()?;
-            }
+            linked_evidence(&mut scenario, name == "analyze-syntax")?;
         }
         "analyze-damaged" => {
             let path = scenario.file("cut short.obu", &TRUNCATED)?;
@@ -249,4 +236,22 @@ pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
         other => return Err(format!("unknown scenario {other:?}")),
     }
     Ok(Some(scenario))
+}
+
+fn linked_evidence(scenario: &mut Scenario, syntax: bool) -> Result<(), String> {
+    let path = scenario.file("bad trailing bit.obu", &[0x01, 0x08, 0x02, 0x08, 0x00])?;
+    scenario.input(Input::Open(vec![path]));
+    scenario.settle()?;
+    scenario.input(Input::Validate);
+    scenario.settle()?;
+    scenario.input(Input::EvidenceRule(
+        "trailing-bits/missing-one-bit".to_owned(),
+    ));
+    scenario.input(Input::EvidencePick(0));
+    scenario.settle()?;
+    if syntax {
+        scenario.input(Input::EvidenceView(1));
+        scenario.settle()?;
+    }
+    Ok(())
 }

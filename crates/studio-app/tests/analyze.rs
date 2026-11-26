@@ -619,14 +619,14 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
 
     offsets_are_never_cut(&rig);
     line_offsets_are_never_cut(&rig);
-    linked_validation_evidence(&mut rig, &scratch);
+    linked_validation_evidence(&mut rig, &scratch, &clipboard);
 
     eprintln!("Tab stops: navigator after {tabs}, byte view {byte_tabs} later");
 }
 
 /// A malformed trailing bit has a native rule, a known bit position and
 /// an independently identifiable syntax row.
-fn linked_validation_evidence(rig: &mut Rig, scratch: &Scratch) {
+fn linked_validation_evidence(rig: &mut Rig, scratch: &Scratch, clipboard: &RefCell<String>) {
     let path = scratch.0.join("bad trailing bit.obu");
     fs::write(&path, [0x01, 0x08, 0x02, 0x08, 0x00]).unwrap_or_else(|e| unreachable!("{e}"));
     rig.session.analysis_input(Input::Open(vec![path]));
@@ -634,6 +634,24 @@ fn linked_validation_evidence(rig: &mut Rig, scratch: &Scratch) {
     rig.global().invoke_row_clicked(0);
     rig.idle("the first delimiter");
     assert_eq!(rig.selected(), Some((0, Position::Row(0))));
+
+    rig.global().invoke_evidence_view(1);
+    rig.idle("the first delimiter syntax");
+    assert!(
+        rig.global()
+            .get_syntax_status()
+            .contains("parsed the modeled syntax")
+    );
+    rig.global().invoke_evidence_search("obu_type".into());
+    rig.idle("the OBU type field");
+    let rows = rig.global().get_evidence_rows();
+    assert_eq!(rows.row_count(), 1);
+    assert!(
+        rows.row_data(0)
+            .is_some_and(|row| row.label == "obu_type" && row.detail == "2 · f(5)")
+    );
+    rig.global().invoke_evidence_search("".into());
+    rig.idle("clear the syntax search");
 
     rig.global().invoke_validate_stream();
     rig.idle("validation findings");
@@ -660,6 +678,23 @@ fn linked_validation_evidence(rig: &mut Rig, scratch: &Scratch) {
     let lines = rig.global().get_byte_lines();
     let highlighted = lines.row_data(0).and_then(|line| line.cells.row_data(4));
     assert!(highlighted.is_some_and(|cell| cell.evidence && cell.cursor));
+    rig.chord(Key::Control, "c");
+    assert!(clipboard.borrow().contains("trailing-bits/missing-one-bit"));
+
+    // The same logical viewport must render at two physical pixels per
+    // logical pixel, with the evidence pane and byte view both present.
+    let window = rig.window.window();
+    window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: 2.0 });
+    window.set_size(PhysicalSize::new(SIZE.0 * 2, SIZE.1 * 2));
+    let mut pixels = vec![Rgb8Pixel::default(); (SIZE.0 * SIZE.1 * 4) as usize];
+    window.request_redraw();
+    assert!(rig.platform.draw_if_needed(|renderer| {
+        renderer.render(&mut pixels, (SIZE.0 * 2) as usize);
+    }));
+    assert!(pixels.windows(2).any(|pair| pair[0] != pair[1]));
+    assert_eq!(window.size(), PhysicalSize::new(SIZE.0 * 2, SIZE.1 * 2));
+    window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: 1.0 });
+    window.set_size(PhysicalSize::new(SIZE.0, SIZE.1));
 
     rig.global().invoke_evidence_view(1);
     rig.idle("the linked syntax field");

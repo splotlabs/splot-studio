@@ -1078,7 +1078,7 @@ fn a_key_press_restarts_paging_that_failed() {
 mod lifecycle;
 
 #[test]
-fn old_syntax_and_validation_replies_cannot_cross_document_generations() {
+fn closing_cancels_validation_and_old_syntax_cannot_reach_a_new_generation() {
     use studio_domain::syntax::{SYNTAX_SCHEMA, SyntaxStatus, SyntaxSummary};
 
     let (mut analysis, engine) = opened(4);
