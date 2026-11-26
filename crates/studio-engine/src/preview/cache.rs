@@ -10,6 +10,9 @@ use studio_domain::preview::{PictureBox, PictureHeader, PictureView};
 /// The most pixel bytes kept: about 24 pictures of the largest size.
 pub const CACHE_BYTES: usize = 64 << 20;
 
+/// Bounds retained headers and file paths even for one-pixel views.
+const MAX_ENTRIES: usize = 256;
+
 struct Entry<K> {
     key: K,
     view: PictureView,
@@ -66,7 +69,7 @@ impl<K: PartialEq> Cache<K> {
         if bytes > CACHE_BYTES {
             return;
         }
-        while self.bytes + bytes > CACHE_BYTES {
+        while self.entries.len() >= MAX_ENTRIES || self.bytes + bytes > CACHE_BYTES {
             let Some(old) = self.entries.pop_front() else {
                 break;
             };
@@ -123,6 +126,18 @@ mod tests {
                 assumed: true,
             },
         }
+    }
+
+    #[test]
+    fn tiny_pictures_do_not_fill_the_cache_with_headers() {
+        let mut cache = Cache::default();
+        let size = PictureBox::clamped(1, 1);
+        for index in 0..=MAX_ENTRIES as u64 {
+            cache.put(1, PictureView::Fit, size, &header(index), &[0; 3]);
+        }
+        assert!(cache.get(&1, 0, PictureView::Fit, size).is_none());
+        assert!(cache.get(&1, 1, PictureView::Fit, size).is_some());
+        assert_eq!(cache.entries.len(), MAX_ENTRIES);
     }
 
     #[test]
