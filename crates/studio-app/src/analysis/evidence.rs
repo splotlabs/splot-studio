@@ -4,8 +4,10 @@
 //! Per-document syntax and validation reports, read in bounded protocol pages.
 
 use studio_domain::analysis::{Element, LocateTarget, Row};
-use studio_domain::syntax::{SyntaxEvent, SyntaxSpan, SyntaxSummary};
-use studio_domain::validation::{Finding, Severity, ValidationSettings, ValidationSummary};
+use studio_domain::syntax::{SYNTAX_SCHEMA, SyntaxEvent, SyntaxSpan, SyntaxSummary};
+use studio_domain::validation::{
+    Finding, Severity, VALIDATION_SCHEMA, ValidationSettings, ValidationSummary,
+};
 
 use super::document::{in_window, line_of};
 use super::{Analysis, Asked, Command, Effect, Event, Position, Purpose, Step};
@@ -406,8 +408,15 @@ impl Analysis {
     ) {
         let evidence = &mut self.documents[at].evidence;
         evidence.syntax_request = None;
+        evidence.syntax_loading = false;
+        if summary.schema_version != SYNTAX_SCHEMA {
+            evidence.syntax_error = Some(format!(
+                "This version of Studio cannot read syntax schema {}.",
+                summary.schema_version
+            ));
+            return;
+        }
         if total > MAX_SYNTAX_EVENTS || total != summary.retained_events {
-            evidence.syntax_loading = false;
             evidence.syntax_error = Some("The engine supplied an invalid syntax count.".to_owned());
             return;
         }
@@ -431,6 +440,13 @@ impl Analysis {
         let evidence = &mut self.documents[at].evidence;
         evidence.running = None;
         evidence.cancelling = false;
+        if summary.schema != VALIDATION_SCHEMA {
+            evidence.findings_error = Some(format!(
+                "This version of Studio cannot read validation schema {}.",
+                summary.schema
+            ));
+            return;
+        }
         evidence.validation = Some((id, summary));
         evidence.findings_total = total;
         if total > MAX_FINDINGS {

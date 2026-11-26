@@ -1127,3 +1127,39 @@ fn closing_cancels_validation_and_old_syntax_cannot_reach_a_new_generation() {
     assert!(doc(&analysis).evidence.syntax.is_none());
     assert!(doc(&analysis).evidence.validation.is_none());
 }
+
+#[test]
+fn incompatible_syntax_schema_preserves_byte_inspection() {
+    use studio_domain::syntax::{SYNTAX_SCHEMA, SyntaxStatus, SyntaxSummary};
+
+    let (mut analysis, engine) = opened(4);
+    let effects = analysis.input(Input::RowClicked(0));
+    engine.settle(&mut analysis, effects);
+    let effects = analysis.input(Input::EvidenceView(1));
+    let syntax = effects.first().map_or(0, |effect| effect.request_id);
+    assert_ne!(syntax, 0);
+    let document = doc(&analysis).id();
+    let next = analysis.event(
+        syntax,
+        Event::AnalysisSyntaxReady {
+            document,
+            element: 0,
+            summary: Box::new(SyntaxSummary {
+                schema_version: SYNTAX_SCHEMA + 1,
+                spec_revision: "AV2 v1.0.0".to_owned(),
+                status: SyntaxStatus::Parsed,
+                error: None,
+                retained_events: 2,
+                observed_elements: 2,
+                elements_truncated: false,
+                depth_truncated: false,
+            }),
+            total: 2,
+        },
+    );
+    assert_eq!(next.len(), 0);
+    assert!(doc(&analysis).summary().is_some());
+    assert!(doc(&analysis).bytes().data.is_some());
+    assert!(doc(&analysis).evidence.syntax.is_none());
+    assert!(doc(&analysis).evidence.syntax_error.is_some());
+}
