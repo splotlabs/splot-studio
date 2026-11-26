@@ -120,6 +120,7 @@ pub(crate) struct Overlay {
     pub(crate) tool: i32,
     pub(crate) picture: Option<BlockPicture>,
     pub(crate) viewport: Option<Box<BlockEvidence>>,
+    captured_document: Option<u64>,
     point: Option<Box<BlockEvidence>>,
     pub(crate) details: Option<Box<BlockEvidence>>,
     pub(crate) selected: Option<History>,
@@ -194,6 +195,7 @@ impl Overlay {
     fn clear_picture(&mut self) {
         self.picture = None;
         self.viewport = None;
+        self.captured_document = None;
         self.point = None;
         self.details = None;
         self.notice = None;
@@ -230,8 +232,8 @@ impl Analysis {
             return out;
         }
         self.cancel_overlay(&mut out);
-        self.overlay.clear_picture();
         self.overlay.picture = picture;
+        self.overlay.notice = None;
         self.dirty = true;
         if let Some(picture) = picture {
             if self.overlay.selected.is_some_and(|selected| {
@@ -239,7 +241,42 @@ impl Analysis {
             }) {
                 self.overlay.selected = None;
             }
-            self.request_overlay(Capture::View, &mut out);
+            let covered = self.overlay.captured_document == Some(picture.document)
+                && self.overlay.viewport.as_deref().is_some_and(|evidence| {
+                    let region = picture.viewport.region().map(block_rect);
+                    evidence.coverage == BlockCoverage::Complete
+                        && evidence.query.selection == picture.selection
+                        && evidence.query.kind == self.overlay.mode.kind()
+                        && evidence
+                            .frame
+                            .is_some_and(|frame| matches_picture(picture, frame))
+                        && evidence
+                            .query
+                            .region
+                            .zip(region)
+                            .is_some_and(|(outer, inner)| {
+                                contains(outer, inner.x, inner.y)
+                                    && contains(
+                                        outer,
+                                        inner.x + inner.width - 1,
+                                        inner.y + inner.height - 1,
+                                    )
+                            })
+                });
+            if !covered {
+                self.overlay.viewport = None;
+                self.overlay.point = None;
+                self.overlay.details = None;
+                self.request_overlay(Capture::View, &mut out);
+            } else if self.overlay.details.is_none()
+                && let Some(History {
+                    key: Key::Transform(id),
+                    ..
+                }) = self.overlay.selected
+                && self.overlay.selected_record().is_some()
+            {
+                self.request_overlay(Capture::Details(id), &mut out);
+            }
         }
         out
     }
@@ -410,6 +447,8 @@ impl Analysis {
         };
         let region = match capture {
             Capture::View => {
+                self.overlay.captured_document =
+                    self.overlay.picture.map(|picture| picture.document);
                 let Some(region) = picture.viewport.region() else {
                     return;
                 };
@@ -517,7 +556,8 @@ impl Analysis {
                 } else if let Some(key) = self.overlay.hit(x, y) {
                     self.select_overlay(key, (x, y), view, out);
                 } else {
-                    self.overlay.notice = Some("No decoder record covers this point.".to_owned());
+                    self.overlay.notice =
+                        Some("This capture returned no decoder record for the point.".to_owned());
                 }
             }
             Capture::Details(id) => {

@@ -47,7 +47,7 @@ their AVM provenance and expected decode or validation results.
 
 ## Block records
 
-The three IVF files below come from the Splot conformance corpus at commit
+The IVF files below come from the Splot conformance corpus at commit
 `8e08378f2bbb08213f2fc89685fe471c740e3cbf`. AVM `a1ec4594d9` inspection
 provides the expected mode, geometry, quantizer, and motion facts.
 
@@ -62,3 +62,9 @@ provides the expected mode, geometry, quantizer, and motion facts.
   NEW_NEWMV block at (0, 0) in the second coded frame. Its quarter-sample
   vectors are (32, 0) and (-128, 0) in eighth-sample units. Both use slot 0.
   SHA-256 `d0a83ae53e5ef9ff9009a1c1c1679eca71935234601d1ec7752061957b3381d4`.
+- `syn-hrect-intra-64x64-q120.ivf` has two 64 × 32 luma blocks and luma
+  transforms at (0, 0) and (0, 32). AVM reports `DCT_DCT`, qindex 120 and
+  segment 0 for both. SHA-256 `0f85478c9dd5ad50bf4b5523be73b3213c8fd10e0d5b5f1c11997a46e9d21257`.
+- `syn-lossless-sdp-nondc-chroma-v-intra-64x64-10bit.ivf` has distinct
+  64 × 64 luma and chroma tree leaves at (0, 0).
+  SHA-256 `3882ab66f3adc69279d8db24faa0511b850012858d1d6fa473cf6a76c80d190f`.

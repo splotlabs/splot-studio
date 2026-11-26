@@ -344,7 +344,7 @@ pub fn bind_block_overlay(
             y,
             width,
             height,
-        })
+        });
     });
     overlay.on_stop(move || send(Input::Stop));
 }

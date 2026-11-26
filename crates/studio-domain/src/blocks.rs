@@ -159,7 +159,7 @@ pub struct BlockTransformId {
 pub struct BlockTransformDetails {
     /// The plane codes one or more nonzero coefficients.
     pub has_coefficients: bool,
-    /// The canonical AV2 PlaneTxType, if the plane codes coefficients.
+    /// The canonical AV2 `PlaneTxType`, if the plane codes coefficients.
     pub plane_tx_type: Option<String>,
     /// Whether the segment is lossless.
     pub lossless: bool,

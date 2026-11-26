@@ -3,6 +3,8 @@
 
 //! The current crop and its matching rows, as shown by Slint.
 
+use std::fmt::Write as _;
+
 use slint::Color;
 use studio_domain::blocks::{
     BlockCoverage, BlockData, BlockPrediction, BlockRecord, BlockTree, IntraPredictor,
@@ -13,7 +15,7 @@ use super::{
     blocks::{prediction_text, rect},
     refill,
 };
-use crate::analysis::block_overlay::{Key, Mode, Overlay, geometry, sample_rect};
+use crate::analysis::block_overlay::{Mode, Overlay, geometry, sample_rect};
 use crate::ui::{BlockOutline, BlockOverlay, OverlayRow};
 
 const TABLE_ROWS: usize = 6;
@@ -83,6 +85,10 @@ pub(super) fn render(view: &BlockOverlay<'_>, overlay: &Overlay) {
 }
 
 fn status(overlay: &Overlay) -> String {
+    if overlay.picture.is_none() {
+        return "Decoder evidence requires a paused picture with a coded frame location."
+            .to_owned();
+    }
     if let Some(notice) = &overlay.notice {
         return notice.clone();
     }
@@ -96,7 +102,7 @@ fn status(overlay: &Overlay) -> String {
         Some(BlockCoverage::DecodeFailed) => "The decoder failed during capture. Some regions may be uncaptured.".to_owned(),
         Some(BlockCoverage::AllocationFailed) => "The decoder ran out of space for evidence. Some regions may be uncaptured.".to_owned(),
         Some(BlockCoverage::Unavailable | BlockCoverage::FrameNotFound) => "Block evidence is unavailable for this picture.".to_owned(),
-        None => "Decoder evidence requires a paused picture with a coded frame location.".to_owned(),
+        None => "No decoder evidence for this crop.".to_owned(),
     }
 }
 
@@ -135,17 +141,12 @@ fn identity(record: &BlockRecord) -> String {
 }
 
 fn picked(overlay: &Overlay) -> String {
-    let Some(record) = overlay.selected_record() else {
+    let (Some(record), Some(selected)) = (overlay.selected_record(), overlay.selected) else {
         return "Select a region in the picture or in the list.".to_owned();
-    };
-    let Some(selected) = overlay.selected else {
-        return String::new();
     };
     let frame = selected.frame;
     let mut text = format!(
-        "{} · {}
-Coded frame at byte {} · X{}/M{}/T{}
-Coded luma {}",
+        "{} · {}\nCoded frame at byte {} · X{}/M{}/T{}\nCoded luma {}",
         label(record),
         identity(record),
         frame.coded_offset,
@@ -155,18 +156,10 @@ Coded luma {}",
         rect(geometry(record))
     );
     if let Some(visible) = record.visible.filter(|v| *v != geometry(record)) {
-        text.push_str(&format!(
-            "
-Visible luma {}",
-            rect(visible)
-        ));
+        let _ = write!(text, "\nVisible luma {}", rect(visible));
     }
     if let Some(parent) = record.parent {
-        text.push_str(&format!(
-            "
-Partition parent {}",
-            rect(parent.coded)
-        ));
+        let _ = write!(text, "\nPartition parent {}", rect(parent.coded));
     }
     match &record.data {
         BlockData::Coding {
@@ -175,69 +168,66 @@ Partition parent {}",
             qindex,
             ..
         } => {
-            text.push_str(&format!(
-                "
-Decoder qindex {qindex} before plane adjustments · Segment {segment}
-{}",
-                prediction_text(prediction.as_ref()).replace('\n', " · ")
-            ));
+            let prediction = prediction.as_ref();
+            let _ = write!(
+                text,
+                "\nDecoder qindex {qindex} before plane adjustments · Segment {segment}\n{}",
+                prediction_text(prediction).replace('\n', " · ")
+            );
             if overlay.mode == Mode::Tools {
-                let state = tool_use(overlay, prediction.as_ref())
+                let state = tool_use(overlay, prediction)
                     .map_or("Unavailable", |used| if used { "Used" } else { "Unused" });
-                text.push_str(&format!(
-                    "
-Selected tool · {state}"
-                ));
+                let _ = write!(text, "\nSelected tool · {state}");
             }
         }
         BlockData::Transform { transform } => {
-            text.push_str(&format!(
-                "
-Native {} {}",
+            let _ = write!(
+                text,
+                "\nNative {} {}",
                 plane_label(transform.id.plane),
                 rect(transform.id.coded)
-            ));
-            let detail = overlay
-                .details
-                .as_ref()
-                .and_then(|reply| reply.records.first())
-                .and_then(|record| match &record.data {
-                    BlockData::Transform {
-                        transform: selected,
-                    } => selected.details.as_ref(),
-                    _ => None,
-                });
-            if let Some(detail) = detail {
-                let coefficients = if detail.has_coefficients {
-                    "Present"
-                } else {
-                    "Zero"
-                };
-                let transform_type = detail.plane_tx_type.as_deref().unwrap_or("Unavailable");
-                let segment = if detail.lossless {
-                    "Lossless segment"
-                } else {
-                    "Lossy segment"
-                };
-                text.push_str(&format!(
-                    "
-PlaneTxType {transform_type} · Coefficients {coefficients} · {segment}"
-                ));
-            } else if overlay.busy() {
-                text.push_str(
-                    "
-Reading transform details…",
-                );
-            } else {
-                text.push_str(
-                    "
-Transform details are unavailable.",
-                );
-            }
+            );
+            append_transform_details(&mut text, overlay);
         }
         _ => {}
     }
     text
+}
+
+fn append_transform_details(text: &mut String, overlay: &Overlay) {
+    let detail = overlay
+        .details
+        .as_ref()
+        .and_then(|reply| reply.records.first())
+        .and_then(|record| match &record.data {
+            BlockData::Transform { transform } => transform.details.as_ref(),
+            _ => None,
+        });
+    if let Some(detail) = detail {
+        let coefficients = if detail.has_coefficients {
+            "Present"
+        } else {
+            "Zero"
+        };
+        let transform_type = if detail.has_coefficients {
+            detail.plane_tx_type.as_deref().unwrap_or("Unavailable")
+        } else {
+            "Unused"
+        };
+        let segment = if detail.lossless {
+            "Lossless segment"
+        } else {
+            "Lossy segment"
+        };
+        let _ = write!(
+            text,
+            "\nPlaneTxType {transform_type} · Coefficients {coefficients} · {segment}"
+        );
+    } else if overlay.busy() {
+        text.push_str("\nReading transform details…");
+    } else {
+        text.push_str("\nTransform details are unavailable.");
+    }
 }
 
 fn outline(
@@ -273,12 +263,19 @@ fn outline(
         ),
         (BlockData::Coding { segment, .. }, Mode::Segment) => {
             let colors = [
-                0x1cbcdf, 0x9b74f3, 0xf2c467, 0xea7676, 0x78df98, 0x7d90f3, 0xf587cd, 0xadce6c,
+                0x001c_bcdf,
+                0x009b_74f3,
+                0x00f2_c467,
+                0x00ea_7676,
+                0x0078_df98,
+                0x007d_90f3,
+                0x00f5_87cd,
+                0x00ad_ce6c,
             ];
             let color = *colors.get(usize::from(*segment))?;
             (
-                Color::from_argb_encoded(0xe0000000 | color),
-                Color::from_argb_encoded(0x38000000 | color),
+                Color::from_argb_encoded(0xe000_0000 | color),
+                Color::from_argb_encoded(0x3800_0000 | color),
                 false,
                 format!("S {segment}"),
             )
@@ -326,13 +323,19 @@ fn tool_use(overlay: &Overlay, prediction: Option<&BlockPrediction>) -> Option<b
     if overlay.tool == 0 {
         return Some(matches!(prediction, BlockPrediction::IntraBlockCopy));
     }
+    let plane = overlay.active_plane()?;
+    if matches!(
+        (plane, overlay.tool),
+        (SamplePlane::Y, 3) | (SamplePlane::U | SamplePlane::V, 2)
+    ) {
+        return None;
+    }
     let BlockPrediction::Intra { luma, chroma } = prediction else {
         return Some(false);
     };
-    let predictor = match (overlay.active_plane()?, overlay.tool) {
-        (SamplePlane::Y, 3) | (SamplePlane::U | SamplePlane::V, 2) => return None,
-        (SamplePlane::Y, _) => luma.as_ref()?,
-        (SamplePlane::U | SamplePlane::V, _) => chroma.as_ref()?,
+    let predictor = match plane {
+        SamplePlane::Y => luma.as_ref()?,
+        SamplePlane::U | SamplePlane::V => chroma.as_ref()?,
     };
     Some(matches!(
         (overlay.tool, predictor),

@@ -19,6 +19,8 @@
 //! `analyze-export-setup` shows the export dialog for a real decoded frame.
 //! `analyze-layers` shows the layer inspector on an AVM content-interpretation fixture.
 //! `analyze-blocks-8bit` and `analyze-blocks-10bit` inspect the first coded frame.
+//! `analyze-overlay`, `analyze-transforms` and `analyze-quantizer` show a selected
+//! region on the decoded picture from `STUDIO_PLAYBACK_FIXTURE`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,7 +28,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use slint::ComponentHandle;
-use studio_app::analysis::{Input, Origin, Phase, Restore, Saved};
+use studio_app::analysis::{BlockOverlayInput, Input, Origin, Phase, Restore, Saved};
 use studio_app::engine::{Delivery, ENGINE_NAME};
 use studio_app::preview::{self, StageState};
 use studio_app::recovery::{Recovered, RestoredView};
@@ -117,7 +119,12 @@ impl Scenario {
     ) -> Result<(), Box<dyn std::error::Error>> {
         if matches!(
             name,
-            "analyze-playback" | "analyze-sample" | "analyze-export-setup"
+            "analyze-playback"
+                | "analyze-sample"
+                | "analyze-export-setup"
+                | "analyze-overlay"
+                | "analyze-transforms"
+                | "analyze-quantizer"
         ) {
             window.show()?;
             let stage = PictureBox::clamped(
@@ -125,6 +132,30 @@ impl Scenario {
                 u32::try_from(window.get_stage_px_height()).unwrap_or(1),
             );
             self.playback(stage, name == "analyze-sample")?;
+            if let Some(mode) = match name {
+                "analyze-overlay" => Some(1),
+                "analyze-transforms" => Some(2),
+                "analyze-quantizer" => Some(3),
+                _ => None,
+            } {
+                self.session
+                    .block_overlay_input(BlockOverlayInput::Mode(mode));
+                self.settle()?;
+                self.session.block_overlay_input(BlockOverlayInput::Pick {
+                    x: 33,
+                    y: 33,
+                    width: 100,
+                    height: 100,
+                });
+                self.settle()?;
+                studio_app::render_analysis(window, self.session.analysis());
+                let overlay = window.global::<studio_app::BlockOverlay>();
+                if overlay.get_row_count() == 0 {
+                    return Err(
+                        "The decoder did not return overlay records for this fixture.".into(),
+                    );
+                }
+            }
             if name == "analyze-export-setup" {
                 studio_app::export_setup::Draft::new(
                     studio_app::ExportPurpose::Frame,

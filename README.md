@@ -121,6 +121,10 @@ codec is young.
   plane dimensions, bit depth, and available color and chroma information. The grain control
   selects which decoded samples the viewer shows. Native planes remain available for
   sample inspection when the viewer cannot display the signaled colors in RGB.
+- Pause on a decoded picture and choose a decoder overlay. Select a region in
+  the picture or the list to inspect its geometry and decoder facts. Use the
+  overlay plane control to distinguish overlapping luma and chroma trees.
+  If a capture reaches its limit, zoom in or select a point to read more.
 - In Analyze, use **Export Decoded Video** for a stream or range, **Export Frame** for
   the displayed output, or **Frame Hashes** for a report. A frame export keeps the
   displayed layer and grain policy. Jobs writes only the selected outputs, even

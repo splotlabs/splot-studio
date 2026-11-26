@@ -480,11 +480,17 @@ impl Session {
     }
 
     fn sync_block_overlay(&mut self) {
-        let picture = (self.state.workspace() == Workspace::Analyze)
-            .then(|| self.preview.block_picture())
-            .flatten();
+        let picture = if self.state.workspace() == Workspace::Analyze
+            && self.analysis.overlay().mode != analysis::block_overlay::Mode::Off
+        {
+            self.preview.block_picture()
+        } else {
+            None
+        };
         let effects = self.analysis.sync_overlay(picture);
-        self.send_inspect(effects);
+        if !effects.is_empty() {
+            self.send_inspect(effects);
+        }
     }
 
     /// Applies an action for the displayed block overlay.
