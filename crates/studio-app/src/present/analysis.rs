@@ -116,7 +116,7 @@ pub fn summary_line(summary: &DocumentSummary) -> String {
     parts.join(" · ")
 }
 
-fn plural(n: u64, one: &str, many: &str) -> String {
+pub(crate) fn plural(n: u64, one: &str, many: &str) -> String {
     format!("{} {}", count(n), if n == 1 { one } else { many })
 }
 

@@ -7,7 +7,7 @@
 use studio_domain::analysis::{DocumentSummary, ScanOutcome};
 use studio_domain::validation::{BatchOutcome, ValidationCompletion};
 
-use super::{Tone, bytes, count, file_name, queue::is_first_pass};
+use super::{Tone, analysis::plural, bytes, count, file_name, queue::is_first_pass};
 use crate::activity::Phase as JobPhase;
 use crate::analysis::Phase;
 use crate::batch::{File as ValidationFile, Phase as ValidationPhase};
@@ -263,9 +263,9 @@ fn validation_result(report: &BatchOutcome) -> String {
                 "Checks are incomplete."
             };
             format!(
-                "{scope} {policy} {} errors, {} warnings.",
-                count(summary.errors),
-                count(summary.warnings)
+                "{scope} {policy} {}, {}.",
+                plural(summary.errors, "error", "errors"),
+                plural(summary.warnings, "warning", "warnings"),
             )
         }
     }

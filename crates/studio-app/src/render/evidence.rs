@@ -10,6 +10,7 @@ use studio_domain::validation::{Finding, Severity, ValidationCompletion};
 
 use super::model;
 use crate::analysis::evidence::{Evidence, VIEW_ROWS};
+use crate::present::analysis::plural;
 use crate::ui::{Analysis, EvidenceRow};
 
 pub(super) fn render(global: &Analysis<'_>, evidence: &Evidence, selection_pending: bool) {
@@ -191,7 +192,10 @@ fn findings_status(evidence: &Evidence) -> String {
             format!("A unit at byte {offset} exceeded the size limit.")
         }
         ValidationCompletion::ObuLimit { max_obus } => {
-            format!("Validation reached the limit of {max_obus} OBUs.")
+            format!(
+                "Validation reached the limit of {}.",
+                plural(*max_obus, "OBU", "OBUs")
+            )
         }
         ValidationCompletion::Unsupported => {
             "The engine returned an unsupported completion state.".to_owned()
@@ -203,14 +207,23 @@ fn findings_status(evidence: &Evidence) -> String {
         "End checks did not run."
     };
     let mut text = format!(
-        "{status} {} errors, {} warnings, {} informational findings. {} OBUs checked. {end} {}",
-        report.errors, report.warnings, report.info, report.checked_obus, report.scope
+        "{status} {}, {}, {}. {} checked. {end} {}",
+        plural(report.errors, "error", "errors"),
+        plural(report.warnings, "warning", "warnings"),
+        plural(
+            report.info,
+            "informational finding",
+            "informational findings"
+        ),
+        plural(report.checked_obus, "OBU", "OBUs"),
+        report.scope
     );
     if report.strict && report.warnings > 0 {
         text.push_str(" Strict policy treats warnings as a failure.");
     }
     if report.omitted > 0 {
-        let _ = write!(text, " The report omits {} findings.", report.omitted);
+        let omitted = plural(report.omitted, "finding", "findings");
+        let _ = write!(text, " The report omits {omitted}.");
     }
     if evidence.findings_loading {
         text.push_str(" Reading more rows…");

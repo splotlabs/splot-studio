@@ -424,6 +424,12 @@ fn batch_reports_in_jobs_and_analyze(rig: &mut Rig) {
         )
     );
 
+    assert!(
+        rig.window
+            .get_jobs()
+            .row_data(0)
+            .is_some_and(|row| { row.detail.contains("1 error, 0 warnings.") })
+    );
     let (report, _) = rig
         .session()
         .batch_export_target(0)
@@ -465,7 +471,9 @@ fn batch_reports_in_jobs_and_analyze(rig: &mut Rig) {
     });
     let analysis = rig.window.global::<studio_app::Analysis>();
     assert_eq!(analysis.get_evidence_tab(), 2);
-    assert!(analysis.get_findings_status().contains("OBUs checked"));
+    let status = analysis.get_findings_status();
+    assert!(status.contains("1 error, 0 warnings"));
+    assert!(status.contains("1 OBU checked."));
     assert_eq!(rig.session().analysis().documents()[0].path(), source);
     batch_report_refuses_rewritten_source(rig, &source);
 
