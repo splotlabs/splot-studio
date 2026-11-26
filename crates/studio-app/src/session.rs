@@ -182,6 +182,7 @@ pub struct Session {
     /// The inspect process, started on first need, with its spawn number.
     inspector: Option<(u64, Worker)>,
     inspectors_started: u64,
+    inspect_data_dir: Option<PathBuf>,
     /// The Analyze Open dialog is showing.
     analyze_dialog: bool,
     /// The Locate dialog is showing for the missing document of this path.
@@ -200,10 +201,20 @@ impl Session {
     /// when given. Saves once right away, so a recovered queue is recorded.
     #[must_use]
     pub fn new(
+        state: AppState,
+        engine: Result<PathBuf, String>,
+        post: Post,
+        journal: Option<Writer>,
+    ) -> Self {
+        Self::with_inspect_data_dir(state, engine, post, journal, None)
+    }
+
+    pub(crate) fn with_inspect_data_dir(
         mut state: AppState,
         engine: Result<PathBuf, String>,
         post: Post,
         journal: Option<Writer>,
+        inspect_data_dir: Option<PathBuf>,
     ) -> Self {
         let view = state.take_restored_view();
         let exports = state.take_restored_exports();
@@ -233,6 +244,7 @@ impl Session {
             batch_workers_started: 0,
             inspector: None,
             inspectors_started: 0,
+            inspect_data_dir,
             analyze_dialog: false,
             locating: None,
             journal,
@@ -1020,8 +1032,13 @@ impl Session {
     fn spawn_as(&self, role: Role, route: Route) -> Result<Worker, String> {
         let engine = self.engine.as_ref().map_err(Clone::clone)?;
         let post = Arc::clone(&self.post);
-        Worker::spawn(engine, role, move |delivery| post(route, delivery))
-            .map_err(|e| e.to_string())
+        Worker::spawn_with_data_dir(
+            engine,
+            role,
+            self.inspect_data_dir.as_deref(),
+            move |delivery| post(route, delivery),
+        )
+        .map_err(|e| e.to_string())
     }
 
     /// The view record of the workspace and the Analyze documents.

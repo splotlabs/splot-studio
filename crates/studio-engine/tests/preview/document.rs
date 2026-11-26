@@ -278,6 +278,36 @@ fn document_timing_uses_ivf_ticks_and_keeps_invalid_timing_unknown() -> TestResu
     preview.finish()
 }
 
+#[cfg(unix)]
+#[test]
+fn cached_document_picture_rejects_a_write_with_restored_mtime() -> TestResult {
+    use studio_domain::job::SourceFingerprint;
+    use studio_engine::output::FileId;
+
+    let dir = tempfile::tempdir()?;
+    let target = IVF_10.write(dir.path(), 1)?;
+    let path = dir.path().join(IVF_10.name);
+    let old = fs::metadata(&path)?;
+    let id = FileId::of_path(&path)?;
+    let mut preview = Preview::spawn()?;
+    let (header, rgb) = preview.frame(1, &target, 0)?;
+    check_picture(&header, &rgb, &IVF_10, 0)?;
+
+    // Change a byte in place and restore mtime without replacing the file.
+    let mut writer = fs::OpenOptions::new().write(true).open(&path)?;
+    writer.write_all(b"X")?;
+    writer.set_times(fs::FileTimes::new().set_modified(old.modified()?))?;
+    let new = writer.metadata()?;
+    assert_eq!(id, FileId::of_path(&path)?);
+    assert_eq!(SourceFingerprint::of(&old), SourceFingerprint::of(&new));
+
+    assert_eq!(
+        preview.failure(2, &target, 0)?,
+        PictureFailure::SourceChanged
+    );
+    preview.finish()
+}
+
 #[test]
 fn document_close_and_replacement_supersede_playback() -> TestResult {
     let dir = tempfile::tempdir()?;
@@ -304,11 +334,14 @@ fn document_close_and_replacement_supersede_playback() -> TestResult {
     );
 
     preview.send(3, Command::CloseDocumentPlayback { document: 1 })?;
+    // The work thread releases closed documents before serving another request.
+    let other = ANNEX_B_10.write(dir.path(), 2)?;
+    preview.frame(4, &other, 0)?;
     fs::write(&path, ANNEX_B_8.input)?;
-    let new = target(&path, 2)?;
-    let (header, rgb) = preview.frame(4, &new, 3)?;
+    let new = target(&path, 3)?;
+    let (header, rgb) = preview.frame(5, &new, 3)?;
     check_picture(&header, &rgb, &ANNEX_B_8, 3)?;
-    assert_eq!(preview.failure(5, &old, 0)?, PictureFailure::SourceChanged);
+    assert_eq!(preview.failure(6, &old, 0)?, PictureFailure::SourceChanged);
     preview.finish()
 }
 

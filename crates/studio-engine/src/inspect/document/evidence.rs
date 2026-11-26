@@ -3,20 +3,26 @@
 
 //! Evidence retained for one generation of an open source.
 
+use std::fs::File;
+
 use serde::Serialize;
 use studio_domain::analysis::{AnalysisFailure, Element, Framing, MAX_PAGE_ELEMENTS, SourceDigest};
+use studio_domain::identity::{IdentityKind, IdentityPage, IdentitySummary};
+use studio_domain::preview::GrainPolicy;
 use studio_domain::syntax::{SyntaxEvent, SyntaxSummary};
 use studio_domain::validation::{
     Finding, ValidationEvidence, ValidationSettings, ValidationSummary,
 };
 
 use super::{Document, Item, PAGE_BUDGET, Refusal, Seek, SeekFrom, read_file_range};
-use crate::inspect::{syntax, validation};
+use crate::inspect::{ValidationResult, identity::IdentityIndex, syntax, validation};
+use crate::output::FileId;
 
 #[derive(Debug, Default)]
 pub(super) struct Evidence {
     trace: Option<(u64, u64, Vec<SyntaxEvent>)>,
     report: Option<(u64, Vec<Finding>)>,
+    identity: Option<(u64, IdentityIndex)>,
 }
 
 pub(in crate::inspect) struct EvidencePage<T> {
@@ -41,10 +47,9 @@ impl Document {
                 "Use a request ID greater than the last syntax request ID.",
             ));
         }
-        let entry = usize::try_from(element)
-            .ok()
-            .and_then(|index| self.items.get(index));
-        let Some(Element::Obu { obu }) = entry.map(super::Item::element) else {
+        let index = usize::try_from(element).unwrap_or(usize::MAX);
+        let entry = self.index.item(index)?;
+        let Some(Element::Obu { obu }) = entry.as_ref().map(Item::element) else {
             return Err(invalid("Select an indexed OBU for syntax observation."));
         };
         let len = if obu.obu.len <= syntax::MAX_OBU_BYTES {
@@ -87,12 +92,7 @@ impl Document {
         Ok((*element, page(events, first, count)?))
     }
 
-    pub(in crate::inspect) fn validate(
-        &mut self,
-        request: u64,
-        settings: &ValidationSettings,
-        cancelled: &dyn Fn() -> bool,
-    ) -> Result<(ValidationSummary, u64), Refusal> {
+    pub(in crate::inspect) fn prepare_validation(&self, request: u64) -> Result<File, Refusal> {
         self.check()?;
         if self
             .evidence
@@ -104,7 +104,127 @@ impl Document {
                 "Use a request ID greater than the last validation request ID.",
             ));
         }
-        let (report, _) = self.validate_source(settings, cancelled)?;
+        self.open_evidence_source()
+    }
+
+    pub(in crate::inspect) fn open_evidence_source(&self) -> Result<File, Refusal> {
+        self.check()?;
+        self.require_av2()?;
+        let opened = crate::source::open_verified(&self.path);
+        self.check()?;
+        let file = opened.map_err(|error| {
+            Refusal::new(
+                AnalysisFailure::Io,
+                format!("Cannot open the source. {error}"),
+            )
+        })?;
+        let id = FileId::of_file(&file, &self.path).map_err(|error| {
+            Refusal::new(
+                AnalysisFailure::Io,
+                format!("Cannot identify the source. {error}"),
+            )
+        })?;
+        if id != self.id {
+            return Err(Refusal::new(
+                AnalysisFailure::SourceChanged,
+                "The source changed before the evidence pass started.",
+            ));
+        }
+        Ok(file)
+    }
+
+    pub(in crate::inspect) fn begin_identity(
+        &mut self,
+        request: u64,
+        grain: GrainPolicy,
+    ) -> Result<IdentityIndex, Refusal> {
+        if self
+            .evidence
+            .identity
+            .as_ref()
+            .is_some_and(|(id, _)| request <= *id)
+        {
+            return Err(invalid(
+                "Use a request ID greater than the last identity scan request ID.",
+            ));
+        }
+        let index = IdentityIndex::new(grain, self.summary.fingerprint)?;
+        self.evidence.identity = Some((request, index.clone()));
+        Ok(index)
+    }
+
+    pub(in crate::inspect) fn drop_identity(&mut self, request: u64) {
+        if self
+            .evidence
+            .identity
+            .as_ref()
+            .is_some_and(|(id, _)| request == *id)
+        {
+            self.evidence.identity = None;
+        }
+    }
+
+    fn identity_index(&self, request: u64) -> Result<&IdentityIndex, Refusal> {
+        self.check()?;
+        match &self.evidence.identity {
+            Some((id, index)) if *id == request => Ok(index),
+            _ => Err(invalid("The requested identity scan is unavailable.")),
+        }
+    }
+
+    pub(in crate::inspect) fn complete_identity(
+        &mut self,
+        request: u64,
+        result: Result<(), Refusal>,
+    ) -> Result<IdentitySummary, Refusal> {
+        self.check()?;
+        if let Err(error) = result {
+            self.drop_identity(request);
+            return Err(error);
+        }
+        let mut summary = self.identity_index(request)?.summary();
+        self.verify_identity(&mut summary)?;
+        Ok(summary)
+    }
+
+    pub(in crate::inspect) fn identity_page(
+        &self,
+        request: u64,
+        kind: IdentityKind,
+        first: u64,
+        count: u32,
+    ) -> Result<IdentityPage, Refusal> {
+        let mut page = self.identity_index(request)?.page(kind, first, count)?;
+        self.check()?;
+        self.verify_identity(&mut page.summary)?;
+        Ok(page)
+    }
+
+    fn verify_identity(&self, summary: &mut IdentitySummary) -> Result<(), Refusal> {
+        let Some((structure, decoded)) =
+            self.summary.digest.as_deref().zip(summary.digest.as_ref())
+        else {
+            return Ok(());
+        };
+        if structure.bytes == decoded.bytes {
+            if structure != decoded {
+                return Err(Refusal::new(
+                    AnalysisFailure::SourceChanged,
+                    "The source bytes changed between structure and identity scans.",
+                ));
+            }
+            summary.matches_structure = decoded.bytes == self.summary.fingerprint.len;
+        }
+        Ok(())
+    }
+
+    pub(in crate::inspect) fn complete_validation(
+        &mut self,
+        request: u64,
+        result: ValidationResult,
+    ) -> Result<(ValidationSummary, u64), Refusal> {
+        self.check()?;
+        let (report, _) = self.enrich_validation(result?)?;
         let total = report.findings.len() as u64;
         self.evidence.report = Some((request, report.findings));
         Ok((report.summary, total))
@@ -119,11 +239,7 @@ impl Document {
         self.validate_source(settings, cancelled)
     }
 
-    fn validate_source(
-        &mut self,
-        settings: &ValidationSettings,
-        cancelled: &dyn Fn() -> bool,
-    ) -> Result<(ValidationEvidence, SourceDigest), Refusal> {
+    fn require_av2(&self) -> Result<(), Refusal> {
         if self
             .summary
             .ivf_header
@@ -135,6 +251,15 @@ impl Document {
                 "Validation requires an AV2 source.",
             ));
         }
+        Ok(())
+    }
+
+    fn validate_source(
+        &mut self,
+        settings: &ValidationSettings,
+        cancelled: &dyn Fn() -> bool,
+    ) -> ValidationResult {
+        self.require_av2()?;
         let result = self
             .file
             .seek(SeekFrom::Start(0))
@@ -146,7 +271,13 @@ impl Document {
             })
             .and_then(|_| validation::validate(&mut self.file, settings, cancelled));
         self.check()?;
-        let (mut report, digest) = result?;
+        self.enrich_validation(result?)
+    }
+
+    fn enrich_validation(
+        &self,
+        (mut report, digest): (ValidationEvidence, SourceDigest),
+    ) -> ValidationResult {
         let Some(indexed) = self
             .summary
             .digest
@@ -166,7 +297,12 @@ impl Document {
         }
         for finding in &mut report.findings {
             if let Some(byte) = finding.file_offset {
-                let (stream, layer) = indexed_location(&self.items, byte);
+                let index = &self.index;
+                let item = match index.preceding(byte)? {
+                    Some(at) => index.item(at)?,
+                    None => None,
+                };
+                let (stream, layer) = item_location(item.as_ref(), byte);
                 finding.stream_offset = if self.summary.framing == Framing::AnnexB {
                     (byte < self.summary.fingerprint.len).then_some(byte)
                 } else {
@@ -197,9 +333,14 @@ impl Document {
     }
 }
 
+#[cfg(test)]
 fn indexed_location(items: &[Item], byte: u64) -> (Option<u64>, Option<u8>) {
     let end = items.partition_point(|item| item.start() <= byte);
-    let Some(item) = items[..end].last().filter(|item| byte < item.end()) else {
+    item_location(items[..end].last(), byte)
+}
+
+fn item_location(item: Option<&Item>, byte: u64) -> (Option<u64>, Option<u8>) {
+    let Some(item) = item.filter(|item| byte < item.end()) else {
         return (None, None);
     };
     match item {

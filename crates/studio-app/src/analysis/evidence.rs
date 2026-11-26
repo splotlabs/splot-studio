@@ -503,7 +503,7 @@ impl Analysis {
     ) {
         let doc = &mut self.documents[at];
         let document_id = doc.id;
-        if doc.evidence.running.is_some() {
+        if !matches!(doc.phase, super::Phase::Open(_)) || doc.evidence.running.is_some() {
             return;
         }
         doc.evidence.tab = 2;

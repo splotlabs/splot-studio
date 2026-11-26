@@ -100,6 +100,9 @@ pub fn summary_line(summary: &DocumentSummary) -> String {
         framing(summary.framing).to_owned(),
         byte_count(summary.fingerprint.len),
     ];
+    if matches!(summary.outcome, ScanOutcome::Scanning) {
+        return parts.join(" · ");
+    }
     let mut counts = Vec::new();
     if summary.framing == Framing::Ivf {
         counts.push(plural(summary.packets, "packet", "packets"));
@@ -124,6 +127,10 @@ pub(crate) fn plural(n: u64, one: &str, many: &str) -> String {
 #[must_use]
 pub fn outcome(summary: &DocumentSummary) -> (String, bool) {
     match &summary.outcome {
+        ScanOutcome::Scanning => (
+            "The index shows only the part of the file read so far.".to_owned(),
+            false,
+        ),
         ScanOutcome::Complete => ("Every byte belongs to a parsed element.".to_owned(), false),
         ScanOutcome::Damaged { first } => (
             format!(
@@ -257,8 +264,10 @@ pub fn row_line(row: &Row) -> String {
 /// The type filter's label for one choice.
 #[must_use]
 pub fn kind_label(kind: KindFilter, summary: Option<&DocumentSummary>) -> String {
+    let scanning = summary.is_some_and(|s| matches!(s.outcome, ScanOutcome::Scanning));
     match kind {
         KindFilter::All => "All elements".to_owned(),
+        KindFilter::Unparsed if scanning => "Unparsed regions".to_owned(),
         KindFilter::Unparsed => format!(
             "Unparsed regions ({})",
             count(summary.map_or(0, |s| s.unparsed))
@@ -266,6 +275,7 @@ pub fn kind_label(kind: KindFilter, summary: Option<&DocumentSummary>) -> String
         KindFilter::Obu { obu_type } => {
             let found = summary.and_then(|s| s.obu_types.iter().find(|t| t.obu_type == obu_type));
             match found {
+                Some(t) if scanning => t.type_name.clone(),
                 Some(t) => format!("{} ({})", t.type_name, count(t.count)),
                 None => format!("OBU type {obu_type}"),
             }
@@ -279,6 +289,10 @@ pub fn layer_label(layer: Option<LayerFilter>, summary: Option<&DocumentSummary>
     match layer {
         None => "All layers".to_owned(),
         Some(layer) => {
+            let label = format!("tlayer {} · mlayer {}", layer.temporal, layer.embedded);
+            if summary.is_some_and(|s| matches!(s.outcome, ScanOutcome::Scanning)) {
+                return label;
+            }
             let (n, inferred) = summary
                 .and_then(|s| {
                     s.layers
@@ -293,28 +307,26 @@ pub fn layer_label(layer: Option<LayerFilter>, summary: Option<&DocumentSummary>
                 i if i == n => format!(" {INFERRED}"),
                 i => format!(" {INFERRED} in {}", count(i)),
             };
-            format!(
-                "tlayer {} · mlayer {}{mark} ({})",
-                layer.temporal,
-                layer.embedded,
-                count(n)
-            )
+            format!("{label}{mark} ({})", count(n))
         }
     }
 }
 
 /// `5 rows`, or `2 of 8 elements` under a filter.
 #[must_use]
-pub fn rows_line(filter: RowFilter, total: Option<u64>, elements: u64) -> String {
+pub fn rows_line(filter: RowFilter, total: Option<u64>, elements: Option<u64>) -> String {
     match total {
         None => "Loading rows…".to_owned(),
         Some(total) if filter.is_all() => plural(total, "element", "elements"),
         Some(0) => "No element matches the filters.".to_owned(),
-        Some(total) => format!(
-            "{} of {} match",
-            count(total),
-            plural(elements, "element", "elements")
-        ),
+        Some(total) => match elements {
+            Some(elements) => format!(
+                "{} of {} match",
+                count(total),
+                plural(elements, "element", "elements")
+            ),
+            None => plural(total, "matching element", "matching elements"),
+        },
     }
 }
 
@@ -365,17 +377,19 @@ fn file_properties(
             framing(summary.framing),
             "identified from the contents",
         ),
-        property("Elements", count(summary.elements), ""),
     ];
-    if summary.framing == Framing::Ivf {
-        rows.push(property(
-            "Packets",
-            count(summary.packets),
-            "IVF frame records",
-        ));
+    if !matches!(summary.outcome, ScanOutcome::Scanning) {
+        rows.push(property("Elements", count(summary.elements), ""));
+        if summary.framing == Framing::Ivf {
+            rows.push(property(
+                "Packets",
+                count(summary.packets),
+                "IVF frame records",
+            ));
+        }
+        rows.push(property("OBUs", count(summary.obus), ""));
+        rows.push(property("Unparsed", count(summary.unparsed), "regions"));
     }
-    rows.push(property("OBUs", count(summary.obus), ""));
-    rows.push(property("Unparsed", count(summary.unparsed), "regions"));
     if let Origin::Result(result) = origin {
         rows.push(property(
             "Converted from",
@@ -717,15 +731,22 @@ mod tests {
             ),
             "tlayer 0 · mlayer 0 inferred in 2 (3)"
         );
-        assert_eq!(rows_line(RowFilter::default(), Some(8), 8), "8 elements");
-        assert_eq!(rows_line(RowFilter::default(), None, 8), "Loading rows…");
+        assert_eq!(
+            rows_line(RowFilter::default(), Some(8), Some(8)),
+            "8 elements"
+        );
+        assert_eq!(
+            rows_line(RowFilter::default(), None, Some(8)),
+            "Loading rows…"
+        );
         let tds = RowFilter {
             kind: KindFilter::Obu { obu_type: 2 },
             layer: None,
         };
-        assert_eq!(rows_line(tds, Some(2), 8), "2 of 8 elements match");
+        assert_eq!(rows_line(tds, Some(2), Some(8)), "2 of 8 elements match");
+        assert_eq!(rows_line(tds, Some(2), None), "2 matching elements");
         assert_eq!(
-            rows_line(tds, Some(0), 8),
+            rows_line(tds, Some(0), Some(8)),
             "No element matches the filters."
         );
     }

@@ -26,6 +26,7 @@ use crate::analysis::{AnalysisFailure, DocumentSummary, Framing, LocateTarget, R
 use crate::export::{
     ExportArtifact, ExportOutcome, ExportProgress, ExportRequest, ExportStage, ExportTemp,
 };
+use crate::identity::{IdentityKind, IdentityPage, IdentitySummary};
 use crate::job::{Failure, JobReport, JobSpec, Progress, SourceFacts, Stage, WirePath};
 use crate::options::{EffectiveOption, FieldError, OptionDescriptor, OptionRequest};
 use crate::preview::{
@@ -39,7 +40,7 @@ use crate::validation::{
 };
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -299,6 +300,20 @@ pub enum Command {
         /// The file. It is never modified.
         source: WirePath,
     },
+    /// Inspect process only. Opens a read-only document and scans its framing.
+    /// If the scan continues after the first slice, the engine sends
+    /// [`Event::AnalysisOpenProgress`]. Page, locate, byte and syntax requests
+    /// can use the document after that event. The final reply is [`Event::AnalysisOpened`]
+    /// or [`Event::AnalysisFailed`].
+    AnalysisOpenProgressive {
+        /// A document ID greater than each previously accepted ID.
+        document: u64,
+        /// The source file.
+        source: WirePath,
+    },
+    /// Inspect process only. Removes persistent index data owned by the engine.
+    /// Answered by [`Event::AnalysisCacheCleared`] or [`Event::Error`].
+    AnalysisClearCache,
     /// Inspect process only. Stops the [`Command::AnalysisOpen`] of
     /// `document` if it is not answered yet; other documents are not
     /// affected. Answered by [`Event::CancelRequested`], after which reading
@@ -394,6 +409,33 @@ pub enum Command {
         /// The first finding, or zero for an empty report.
         first: u64,
         /// The maximum number of findings, in `1..=MAX_PAGE_ELEMENTS`.
+        count: u32,
+    },
+    /// Inspect process only. Decode and index frame identities for an open document.
+    AnalysisIdentityScan {
+        /// The document generation.
+        document: u64,
+        /// The decoder's film grain policy.
+        grain: GrainPolicy,
+    },
+    /// Inspect process only. Stop a pending identity scan.
+    AnalysisCancelIdentity {
+        /// The document generation.
+        document: u64,
+        /// The request ID of the scan to stop.
+        scan: u64,
+    },
+    /// Inspect process only. Page the current identity scan while it runs or after it stops.
+    AnalysisIdentityPage {
+        /// The document generation.
+        document: u64,
+        /// The request ID of the scan.
+        scan: u64,
+        /// The table to page.
+        kind: IdentityKind,
+        /// The first row.
+        first: u64,
+        /// The maximum number of rows, in `1..=MAX_IDENTITY_PAGE`.
         count: u32,
     },
     /// Inspect process only. Checks validation options before starting a batch.
@@ -634,6 +676,13 @@ pub enum Event {
         /// Why.
         failure: Failure,
     },
+    /// An interim reply to [`Command::AnalysisOpenProgressive`].
+    AnalysisOpenProgress {
+        /// The document.
+        document: u64,
+        /// Facts found so far.
+        summary: DocumentSummary,
+    },
     /// Answers [`Command::AnalysisOpen`]: the document is open.
     AnalysisOpened {
         /// The document.
@@ -641,6 +690,8 @@ pub enum Event {
         /// What reading the file found.
         summary: DocumentSummary,
     },
+    /// Answers [`Command::AnalysisClearCache`].
+    AnalysisCacheCleared,
     /// Answers [`Command::AnalysisPage`].
     AnalysisPage {
         /// The document.
@@ -718,6 +769,22 @@ pub enum Event {
         total: u64,
         /// The findings from `first`.
         findings: Vec<Finding>,
+    },
+    /// Terminal answer to [`Command::AnalysisIdentityScan`].
+    AnalysisIdentityScanned {
+        /// The document generation.
+        document: u64,
+        /// Coverage for the finished scan.
+        summary: Box<IdentitySummary>,
+    },
+    /// Answers [`Command::AnalysisIdentityPage`].
+    AnalysisIdentityPage {
+        /// The document generation.
+        document: u64,
+        /// The request ID of the scan.
+        scan: u64,
+        /// The requested records and their coverage.
+        page: Box<IdentityPage>,
     },
     /// Answers [`Command::BatchCheckSettings`] when the options are valid.
     BatchSettingsChecked,

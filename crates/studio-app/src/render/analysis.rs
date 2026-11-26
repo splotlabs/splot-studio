@@ -5,7 +5,7 @@
 //! the visible rows and the one byte window, as display strings.
 
 use slint::{ComponentHandle, SharedString};
-use studio_domain::analysis::{DocumentSummary, Element, Span};
+use studio_domain::analysis::{DocumentSummary, Element, ScanOutcome, Span};
 use studio_domain::syntax::SyntaxSpan;
 
 use super::{model, refill};
@@ -34,12 +34,21 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
     global.set_document_index(int(analysis.shown_index() as u64));
     let notice = analysis.notice_line().unwrap_or_default();
     global.set_notice(notice.into());
+    global.set_clearing_cache(analysis.clearing_cache());
     global.set_can_playback(
         analysis
             .shown()
             .and_then(Document::summary)
             .is_some_and(|summary| summary.digest.is_some()),
     );
+    global.set_can_cancel_read(matches!(
+        analysis.shown().map(Document::phase),
+        Some(Phase::Opening)
+    ));
+    global.set_reading(matches!(
+        analysis.shown().map(Document::phase),
+        Some(Phase::Opening | Phase::Cancelling)
+    ));
     let Some(doc) = analysis.shown() else {
         global.set_state(AnalysisState::Empty);
         global.set_message(
@@ -58,7 +67,11 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
     };
     global.set_summary_line(text::summary_line(summary).into());
     let (outcome, problem) = text::outcome(summary);
-    global.set_outcome_line(outcome.into());
+    global.set_outcome_line(if matches!(doc.phase(), Phase::Cancelling) {
+        "Stopping the scan. The index shows the part read so far.".into()
+    } else {
+        outcome.into()
+    });
     global.set_outcome_problem(problem);
 
     let filter = doc.filter();
@@ -79,7 +92,8 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
     ));
     global.set_layer_index(index_of(&layers, &filter.layer));
     global.set_filtered(!filter.is_all());
-    global.set_rows_line(text::rows_line(filter, doc.total(), summary.elements).into());
+    let elements = (!matches!(summary.outcome, ScanOutcome::Scanning)).then_some(summary.elements);
+    global.set_rows_line(text::rows_line(filter, doc.total(), elements).into());
     global.set_hidden_note(text::hidden_note(doc.selected()).into());
     if let Some(rows) = refill(&global.get_rows(), rows(doc)) {
         global.set_rows(rows);
@@ -89,6 +103,10 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
     global.set_can_back(doc.can_go_back());
     global.set_can_forward(doc.can_go_forward());
 
+    render_inspector(&global, doc, summary);
+}
+
+fn render_inspector(global: &Global<'_>, doc: &Document, summary: &DocumentSummary) {
     let (title, properties) = text::properties(summary, doc.origin(), doc.path(), doc.selected());
     global.set_inspector_title(title.into());
     let properties = properties.into_iter().map(property).collect();
@@ -106,9 +124,9 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
             .map_or_else(String::new, |s| extent(&s.row.element).0.to_string())
             .into(),
     );
-    super::evidence::render(&global, &doc.evidence, doc.selection_pending());
+    super::evidence::render(global, &doc.evidence, doc.selection_pending());
     render_bytes(
-        &global,
+        global,
         doc.bytes(),
         summary.fingerprint.len,
         selected,
@@ -120,6 +138,10 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
 /// it is open.
 fn render_phase<'a>(global: &Global<'_>, doc: &'a Document) -> Option<&'a DocumentSummary> {
     let name = file_name(doc.path());
+    if let Some(summary) = doc.summary() {
+        global.set_state(AnalysisState::Open);
+        return Some(summary);
+    }
     match doc.phase() {
         Phase::Unread => {
             global.set_state(AnalysisState::Opening);
@@ -162,10 +184,7 @@ fn render_phase<'a>(global: &Global<'_>, doc: &'a Document) -> Option<&'a Docume
             global.set_message(format!("{name}: {message}").into());
             None
         }
-        Phase::Open(summary) => {
-            global.set_state(AnalysisState::Open);
-            Some(summary)
-        }
+        Phase::Open(_) => None,
     }
 }
 

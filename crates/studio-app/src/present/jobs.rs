@@ -247,12 +247,10 @@ fn conversion(item: &Item, state: State) -> String {
 
 fn read(doc: &crate::analysis::Document, state: State) -> String {
     match (state, doc.phase()) {
-        (State::Queued, _) => {
-            "Waits for the read before it; the engine reads one file at a time.".to_owned()
-        }
-        (State::Running, _) => {
-            "Reading the OBU envelopes. This read reports no progress until it ends.".to_owned()
-        }
+        (State::Queued, _) => "Waiting to scan this file.".to_owned(),
+        (State::Running, _) => doc
+            .summary()
+            .map_or_else(|| "Reading the OBU envelopes.".to_owned(), found),
         (State::Cancelling, _) => "Stopping; what was read is kept.".to_owned(),
         (_, Phase::Open(summary)) => found(summary),
         (_, Phase::Failed { message, .. }) => message.clone(),
@@ -267,10 +265,11 @@ fn read(doc: &crate::analysis::Document, state: State) -> String {
     }
 }
 
-/// What a finished read kept.
+/// The elements found or retained by the scan.
 fn found(summary: &DocumentSummary) -> String {
-    let elements = format!("{} elements", count(summary.elements));
+    let elements = plural(summary.elements, "element", "elements");
     match &summary.outcome {
+        ScanOutcome::Scanning => format!("{elements} found so far."),
         ScanOutcome::Complete => format!("{elements}; every byte parsed."),
         ScanOutcome::Damaged { .. } => format!(
             "{elements}; read to the end, {} unparsed.",

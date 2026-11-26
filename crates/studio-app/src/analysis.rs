@@ -215,6 +215,8 @@ pub enum Input {
     Validate,
     /// Stop validation of the current source.
     CancelValidation,
+    /// Remove the indexes saved on disk.
+    ClearCache,
 }
 
 /// What a request was for.
@@ -258,6 +260,7 @@ pub struct Analysis {
     next_request: u64,
     /// Requests not answered: request id to engine document id and purpose.
     pending: HashMap<u64, (u64, Asked)>,
+    cache_clear: Option<u64>,
     notice: Option<String>,
     /// Why the documents cannot be saved, while that is so.
     storage: Option<String>,
@@ -371,7 +374,7 @@ impl Analysis {
     /// or is open there.
     #[must_use]
     pub fn needs_engine(&self) -> bool {
-        self.documents.iter().any(Document::in_engine)
+        self.cache_clear.is_some() || self.documents.iter().any(Document::in_engine)
     }
 
     /// The inspect process was let go while no document needed it: what
@@ -436,7 +439,13 @@ impl Analysis {
     /// Whether a request to the inspect process is not answered yet.
     #[must_use]
     pub fn waiting(&self) -> bool {
-        !self.pending.is_empty()
+        self.cache_clear.is_some() || !self.pending.is_empty()
+    }
+
+    /// Whether the cache clear request is still pending.
+    #[must_use]
+    pub const fn clearing_cache(&self) -> bool {
+        self.cache_clear.is_some()
     }
 
     /// Whether anything changed since the last call.
@@ -541,6 +550,17 @@ impl Analysis {
                 }
             }
             Input::TogglePlayback => {}
+            Input::ClearCache => {
+                if self.cache_clear.is_none() {
+                    self.next_request += 1;
+                    self.cache_clear = Some(self.next_request);
+                    self.notice = None;
+                    out.push(Effect {
+                        request_id: self.next_request,
+                        command: Command::AnalysisClearCache,
+                    });
+                }
+            }
             other => {
                 if let Some(at) = self.open_index() {
                     self.document_input(at, other, &mut out);
@@ -655,7 +675,8 @@ impl Analysis {
             | Input::Resolve
             | Input::Relink { .. }
             | Input::TogglePlayback
-            | Input::PlaybackByte { .. } => {}
+            | Input::PlaybackByte { .. }
+            | Input::ClearCache => {}
         }
     }
 
@@ -789,7 +810,7 @@ impl Analysis {
         doc.phase = Phase::Opening;
         self.documents[at] = doc;
         self.send(id, Asked::Open, out, move |document| {
-            Command::AnalysisOpen { document, source }
+            Command::AnalysisOpenProgressive { document, source }
         });
     }
 
@@ -876,54 +897,46 @@ impl Analysis {
     /// An answer from the inspect process.
     pub fn event(&mut self, request_id: u64, event: Event) -> Vec<Effect> {
         let mut out = Vec::new();
-        let Some((document, asked)) = self.pending.remove(&request_id) else {
+        if self.cache_clear == Some(request_id) {
+            self.cache_clear = None;
+            self.dirty = true;
+            self.notice = Some(match event {
+                Event::AnalysisCacheCleared => "Studio cleared the index cache.".into(),
+                Event::Error { message, .. } => {
+                    format!("Studio could not clear the index cache. {message}")
+                }
+                _ => "Studio could not confirm that the engine cleared the index cache.".into(),
+            });
+            return out;
+        }
+        let Some(&(document, asked)) = self.pending.get(&request_id) else {
             return out;
         };
         if reply_document(&event).is_some_and(|d| d != document) {
             return out;
+        }
+        if !matches!(event, Event::AnalysisOpenProgress { .. }) {
+            self.pending.remove(&request_id);
         }
         let Some(at) = self.index_of(document) else {
             return out;
         };
         self.dirty = true;
         match (asked, event) {
-            (Asked::Open, Event::AnalysisOpened { summary, .. }) => {
+            (Asked::Open, Event::AnalysisOpenProgress { summary, .. }) => {
                 let doc = &mut self.documents[at];
-                let batch = doc.pending_batch.take();
-                if let Origin::Result(result) = &doc.origin
-                    && summary.fingerprint.len != result.bytes
+                if doc.in_engine()
+                    && doc
+                        .restore
+                        .is_none_or(|view| same_file(view.fingerprint, summary.fingerprint))
                 {
-                    doc.caution = Some(format!(
-                        "This file is {} bytes now; the conversion wrote {} bytes. It may have \
-                         changed since.",
-                        summary.fingerprint.len, result.bytes
-                    ));
+                    doc.update_partial(summary);
+                    self.fill(at, &mut out);
+                    self.fetch_bytes(at, &mut out);
                 }
-                match doc.restore.take() {
-                    Some(restore) if !same_file(restore.fingerprint, summary.fingerprint) => {
-                        // Never trust the path alone: the view waits. The
-                        // engine gives the read back, so nothing of it
-                        // outlives the change, an engine stop included.
-                        doc.restore = Some(restore);
-                        doc.phase = Phase::Changed {
-                            now: summary.fingerprint,
-                        };
-                        self.send(document, Asked::Close, &mut out, |document| {
-                            Command::AnalysisClose { document }
-                        });
-                    }
-                    restore => {
-                        doc.phase = Phase::Open(Box::new(summary));
-                        if let Some(restore) = restore {
-                            self.apply(at, restore, &mut out);
-                        }
-                        self.fill(at, &mut out);
-                        self.fetch_bytes(at, &mut out);
-                        if let Some(report) = batch {
-                            self.attach_batch(at, *report);
-                        }
-                    }
-                }
+            }
+            (Asked::Open, Event::AnalysisOpened { summary, .. }) => {
+                self.opened(at, summary, &mut out);
             }
             (
                 Asked::Page { generation, first },
@@ -977,6 +990,53 @@ impl Analysis {
             _ => self.broken(at, "an answer of the wrong kind", &mut out),
         }
         out
+    }
+
+    /// Apply the final summary and restore the view for this source.
+    fn opened(&mut self, at: usize, summary: DocumentSummary, out: &mut Vec<Effect>) {
+        let doc = &mut self.documents[at];
+        if !doc.in_engine() {
+            return;
+        }
+        let document = doc.id;
+        let partial = doc.partial.take().is_some();
+        let batch = doc.pending_batch.take();
+        if let Origin::Result(result) = &doc.origin
+            && summary.fingerprint.len != result.bytes
+        {
+            doc.caution = Some(format!(
+                "This file is {} bytes now; the conversion wrote {} bytes. It may have \
+                 changed since.",
+                summary.fingerprint.len, result.bytes
+            ));
+        }
+        match doc.restore.take() {
+            Some(restore) if !same_file(restore.fingerprint, summary.fingerprint) => {
+                // Never trust the path alone: the view waits. The
+                // engine gives the read back, so nothing of it
+                // outlives the change, an engine stop included.
+                doc.restore = Some(restore);
+                doc.phase = Phase::Changed {
+                    now: summary.fingerprint,
+                };
+                self.send(document, Asked::Close, out, |document| {
+                    Command::AnalysisClose { document }
+                });
+            }
+            restore => {
+                doc.phase = Phase::Open(Box::new(summary));
+                doc.refresh_total |= partial;
+                if let Some(restore) = restore {
+                    self.apply(at, restore, out);
+                }
+                self.fill(at, out);
+                self.fetch_bytes(at, out);
+                self.ensure_syntax(at, out);
+                if let Some(report) = batch {
+                    self.attach_batch(at, *report);
+                }
+            }
+        }
     }
 
     /// A page answered the request for `(generation, first)`.
@@ -1165,6 +1225,10 @@ impl Analysis {
     /// Every document in the engine fails with `message`.
     fn end_reads(&mut self, message: &str, by: ReadEnd) {
         self.pending.clear();
+        if self.cache_clear.take().is_some() {
+            self.notice = Some(format!("Studio could not clear the index cache. {message}"));
+            self.dirty = true;
+        }
         for doc in &mut self.documents {
             if doc.in_engine() {
                 doc.fail(message.to_owned(), by);
@@ -1425,10 +1489,18 @@ impl Analysis {
                 g == generation && (f..f.saturating_add(u64::from(PAGE_ROWS))).contains(&p)
             })
         };
-        let missing = (top..end).find(|p| !doc.rows.contains_key(p) && !asked(*p));
+        let refresh = doc.refresh_total && !asked(top);
+        let missing = if refresh {
+            Some(top)
+        } else {
+            (top..end).find(|p| !doc.rows.contains_key(p) && !asked(*p))
+        };
         // Two pages in flight per document at most, of any filter; the
         // engine queues 64.
         if let Some(first) = missing.filter(|_| doc.asked.len() < 2) {
+            if refresh {
+                doc.refresh_total = false;
+            }
             doc.asked.push((generation, first));
             let (id, filter) = (doc.id, doc.filter);
             self.send(
@@ -1505,6 +1577,7 @@ fn page_fits(first: u64, total: u64, len: usize) -> bool {
 fn reply_document(event: &Event) -> Option<u64> {
     match event {
         Event::AnalysisOpened { document: d, .. }
+        | Event::AnalysisOpenProgress { document: d, .. }
         | Event::AnalysisPage { document: d, .. }
         | Event::AnalysisLocated { document: d, .. }
         | Event::AnalysisBytes { document: d, .. }

@@ -21,6 +21,7 @@ is missing or not among the reviewed identifiers in `xtask/src/notices.rs`.
 | `slint` | 1.19.0 | GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0 | studio-app |
 | `slint-build` | 1.19.0 | GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0 | studio-app (build) |
 | `rfd` | 0.18.0 | MIT | studio-app |
+| `rustix` | 1.1.6 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | studio-engine (Unix) |
 | `tempfile` | 3.27.0 | MIT OR Apache-2.0 | studio-engine |
 | `directories` | 6.0.0 | MIT OR Apache-2.0 | studio-app |
 | `splot-encode`, `splot-decode`, `splot-validate`, `splot-core` | git `main`, commit in `Cargo.lock` | PolyForm-Noncommercial-1.0.0 (same owner) | studio-engine |

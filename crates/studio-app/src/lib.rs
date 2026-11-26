@@ -278,7 +278,13 @@ pub fn build_with_engine(
                 }
             },
         );
-    let session = Session::new(state, engine, controller::post(), writer);
+    let session = Session::with_inspect_data_dir(
+        state,
+        engine,
+        controller::post(),
+        writer,
+        instance.as_ref().map(|owner| owner.dir().to_owned()),
+    );
     let ctl = Controller::start(&window, session, files);
     Ok(Studio {
         window,
@@ -346,6 +352,7 @@ pub fn bind_analysis(window: &AppWindow, send: impl Fn(analysis::Input) + Clone 
     global.on_forward(on(Input::Forward));
     global.on_clear_filters(on(Input::ClearFilters));
     global.on_validate_stream(on(Input::Validate));
+    global.on_clear_cache(on(Input::ClearCache));
     global.on_cancel_validation(on(Input::CancelValidation));
     let on = |input: fn(i32) -> Input| {
         let send = send.clone();

@@ -292,6 +292,8 @@ impl Activity {
             | Event::PictureSample { .. }
             | Event::PlaybackEnded { .. }
             | Event::AnalysisOpened { .. }
+            | Event::AnalysisOpenProgress { .. }
+            | Event::AnalysisCacheCleared
             | Event::AnalysisPage { .. }
             | Event::AnalysisLocated { .. }
             | Event::AnalysisBytes { .. }
@@ -299,6 +301,8 @@ impl Activity {
             | Event::AnalysisSyntaxPage { .. }
             | Event::AnalysisValidated { .. }
             | Event::AnalysisFindings { .. }
+            | Event::AnalysisIdentityScanned { .. }
+            | Event::AnalysisIdentityPage { .. }
             | Event::BatchSettingsChecked
             | Event::BatchValidating { .. }
             | Event::BatchValidated { .. }

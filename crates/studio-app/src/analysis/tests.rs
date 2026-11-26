@@ -142,7 +142,7 @@ impl Engine {
     fn event(&self, command: &Command) -> Option<Event> {
         let len = self.rows.len() as u64 * 9;
         Some(match command.clone() {
-            Command::AnalysisOpen { document, .. } => Event::AnalysisOpened {
+            Command::AnalysisOpenProgressive { document, .. } => Event::AnalysisOpened {
                 document,
                 summary: summary(self.rows.len() as u64),
             },
@@ -232,12 +232,80 @@ fn commands(effects: &[Effect]) -> Vec<&Command> {
 }
 
 #[test]
+fn clearing_the_cache_with_no_documents_keeps_the_engine_until_the_reply() {
+    let mut analysis = Analysis::new();
+    let effects = analysis.input(Input::ClearCache);
+    assert_eq!(commands(&effects), [&Command::AnalysisClearCache]);
+    assert!(analysis.needs_engine());
+    assert_eq!(analysis.input(Input::ClearCache), []);
+    assert_eq!(
+        analysis.event(effects[0].request_id, Event::AnalysisCacheCleared),
+        []
+    );
+    assert!(!analysis.needs_engine());
+    assert_eq!(analysis.notice(), Some("Studio cleared the index cache."));
+}
+
+#[test]
+fn progressive_scan_keeps_rows_available_through_cancel() {
+    let mut analysis = Analysis::new();
+    let open = analysis.input(Input::Open(vec![PathBuf::from("/media/long.obu")]));
+    let request = open[0].request_id;
+    let mut first = summary(4);
+    let final_summary = summary(20);
+    first.fingerprint = final_summary.fingerprint;
+    first.outcome = ScanOutcome::Scanning;
+    let effects = analysis.event(
+        request,
+        Event::AnalysisOpenProgress {
+            document: 1,
+            summary: first,
+        },
+    );
+    for effect in effects {
+        let available = if matches!(effect.command, Command::AnalysisBytes { .. }) {
+            20
+        } else {
+            4
+        };
+        Engine {
+            rows: stream(available),
+        }
+        .settle(&mut analysis, vec![effect]);
+    }
+    assert_eq!(doc(&analysis).total(), Some(4));
+    assert_eq!(doc(&analysis).phase(), &Phase::Opening);
+    let select = analysis.input(Input::RowClicked(2));
+    Engine { rows: stream(4) }.settle(&mut analysis, select);
+    assert_eq!(selected(&analysis), Some((2, Position::Row(2))));
+
+    let cancel = analysis.input(Input::Cancel);
+    assert!(matches!(
+        commands(&cancel)[..],
+        [Command::AnalysisCancel { document: 1 }]
+    ));
+    assert_eq!(doc(&analysis).phase(), &Phase::Cancelling);
+    assert_eq!(doc(&analysis).total(), Some(4));
+    let effects = analysis.event(
+        request,
+        Event::AnalysisOpened {
+            document: 1,
+            summary: final_summary,
+        },
+    );
+    Engine { rows: stream(20) }.settle(&mut analysis, effects);
+    assert!(matches!(doc(&analysis).phase(), Phase::Open(_)));
+    assert_eq!(doc(&analysis).total(), Some(20));
+    assert_eq!(selected(&analysis), Some((2, Position::Row(2))));
+}
+
+#[test]
 fn opening_asks_for_the_first_page_and_byte_window() {
     let mut analysis = Analysis::new();
     let effects = analysis.input(Input::Open(vec![PathBuf::from("/media/clip.obu")]));
     assert!(matches!(
         commands(&effects)[..],
-        [Command::AnalysisOpen { document: 1, .. }]
+        [Command::AnalysisOpenProgressive { document: 1, .. }]
     ));
     assert_eq!(*doc(&analysis).phase(), Phase::Opening);
     let engine = Engine { rows: stream(40) };
@@ -453,7 +521,7 @@ fn documents_do_not_share_selections_or_events() {
     let ids: Vec<u64> = effects
         .iter()
         .filter_map(|e| match e.command {
-            Command::AnalysisOpen { document, .. } => Some(document),
+            Command::AnalysisOpenProgressive { document, .. } => Some(document),
             _ => None,
         })
         .collect();
@@ -619,7 +687,7 @@ fn a_dead_process_fails_its_documents_until_reopened() {
     let effects = analysis.input(Input::Reopen);
     assert!(matches!(
         commands(&effects)[..],
-        [Command::AnalysisOpen { document: 2, .. }]
+        [Command::AnalysisOpenProgressive { document: 2, .. }]
     ));
     engine.settle(&mut analysis, effects);
     assert!(doc(&analysis).summary().is_some());

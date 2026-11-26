@@ -19,7 +19,9 @@ use studio_domain::analysis::{
     AnalysisFailure, DocumentSummary, Element, Framing, KindFilter, LocateTarget,
     MAX_PAGE_ELEMENTS, ObuFact, ProblemKind, RowFilter, ScanOutcome, Span,
 };
+use studio_domain::identity::{IdentityCompletion, IdentityKind};
 use studio_domain::job::WirePath;
+use studio_domain::preview::GrainPolicy;
 use studio_domain::protocol::{
     BuildIdentity, Command, Envelope, ErrorCode, Event, read_message, write_message,
 };
@@ -573,6 +575,59 @@ fn long_stream(path: &Path) -> std::io::Result<()> {
     fs::write(path, bytes)
 }
 
+#[test]
+fn progressive_open_serves_pages_before_its_terminal_reply() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("long.obu");
+    long_stream(&path)?;
+    let mut inspect = Inspect::spawn()?;
+    let [open, page] = inspect.send(vec![
+        Command::AnalysisOpenProgressive {
+            document: 1,
+            source: WirePath::from_path(&path),
+        },
+        Command::AnalysisPage {
+            document: 1,
+            filter: RowFilter::default(),
+            first: 0,
+            count: 1,
+        },
+    ])?[..] else {
+        return Err("Expected two request IDs.".into());
+    };
+
+    let partial = inspect.next()?;
+    assert_eq!(partial.request_id, open);
+    assert!(matches!(
+        partial.body,
+        Event::AnalysisOpenProgress { document: 1, summary }
+            if summary.outcome == ScanOutcome::Scanning && summary.elements > 0 &&
+                summary.digest.as_ref().is_some_and(|digest| digest.bytes < summary.fingerprint.len)
+    ));
+    let response = inspect.next()?;
+    assert_eq!(response.request_id, page);
+    assert!(matches!(
+        response.body,
+        Event::AnalysisPage { document: 1, total, rows, .. }
+            if total > 0 && rows.len() == 1
+    ));
+    let complete = loop {
+        let response = inspect.next()?;
+        assert_eq!(response.request_id, open);
+        match response.body {
+            Event::AnalysisOpenProgress { .. } => {}
+            Event::AnalysisOpened {
+                document: 1,
+                summary,
+            } => break summary,
+            other => return Err(format!("Unexpected open reply {other:?}.").into()),
+        }
+    };
+    assert_eq!(complete, inspect.open(2, &path)?);
+    assert_eq!(complete.outcome, ScanOutcome::Complete);
+    Ok(())
+}
+
 /// Whether the document is open after a cancel answered `cancel` and its
 /// open answered `open`.
 fn kept_after_cancel(cancel: &Event, open: &Event) -> Result<bool, String> {
@@ -850,27 +905,48 @@ fn a_changed_source_closes_its_document() -> TestResult {
         })?,
         Event::AnalysisValidated { .. },
     ));
-    fs::OpenOptions::new()
-        .append(true)
-        .open(&path)?
-        .write_all(&[0x01, 0x08])?;
-    let page = || Command::AnalysisPage {
+    let append = || {
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)?
+            .write_all(&[0x01, 0x08])
+    };
+    let findings = || Command::AnalysisFindings {
+        document: 1,
+        validation,
+        first: 0,
+        count: 1,
+    };
+    #[cfg(windows)]
+    {
+        let error = append().err().ok_or("A verified reader allowed a write.")?;
+        assert_eq!(error.raw_os_error(), Some(32)); // ERROR_SHARING_VIOLATION
+        assert!(matches!(
+            inspect.ask(findings())?,
+            Event::AnalysisFindings { document: 1, .. },
+        ));
+        assert!(matches!(
+            inspect.ask(Command::AnalysisClose { document: 1 })?,
+            Event::AnalysisClosed { document: 1 },
+        ));
+        append()?;
+    }
+    #[cfg(not(windows))]
+    {
+        append()?;
+        assert_eq!(
+            failure(&inspect.ask(findings())?),
+            Some(AnalysisFailure::SourceChanged)
+        );
+    }
+    let page = Command::AnalysisPage {
         document: 1,
         filter: RowFilter::default(),
         first: 0,
         count: 1,
     };
     assert_eq!(
-        failure(&inspect.ask(Command::AnalysisFindings {
-            document: 1,
-            validation,
-            first: 0,
-            count: 1
-        })?),
-        Some(AnalysisFailure::SourceChanged)
-    );
-    assert_eq!(
-        failure(&inspect.ask(page())?),
+        failure(&inspect.ask(page)?),
         Some(AnalysisFailure::UnknownDocument)
     );
     let locate = Command::AnalysisLocate {
@@ -964,7 +1040,6 @@ fn a_document_closed_while_read_frees_its_slot() -> TestResult {
             document: 4,
             source: WirePath::from_path(&long),
         },
-        Command::AnalysisCancel { document: 4 },
         Command::AnalysisClose { document: 4 },
         Command::AnalysisOpen {
             document: 5,
@@ -972,17 +1047,122 @@ fn a_document_closed_while_read_frees_its_slot() -> TestResult {
         },
     ])?;
     let mut answers = std::collections::HashMap::new();
-    for _ in 0..4 {
+    for _ in 0..3 {
         let answer = inspect.next()?;
         answers.insert(answer.request_id, answer.body);
     }
     assert!(
         matches!(
-            answers.get(&ids[3]),
+            answers.get(&ids[2]),
             Some(Event::AnalysisOpened { document: 5, .. })
         ),
         "{answers:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn identity_pages_require_the_selected_scan_and_source() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("identity.ivf");
+    fs::write(
+        &path,
+        include_bytes!("inspect/fixtures/syn-bridge-celu-64x64.ivf"),
+    )?;
+    let mut inspect = Inspect::spawn()?;
+    inspect.open(1, &path)?;
+
+    let scan = inspect.next_id;
+    assert!(matches!(
+        inspect.ask(Command::AnalysisIdentityScan {
+            document: 1,
+            grain: GrainPolicy::Skip,
+        })?,
+        Event::AnalysisIdentityScanned { document: 1, summary }
+            if summary.completion == IdentityCompletion::Complete && summary.matches_structure
+    ));
+    let output = |scan| Command::AnalysisIdentityPage {
+        document: 1,
+        scan,
+        first: 0,
+        count: 1,
+        kind: IdentityKind::Output,
+    };
+    assert!(matches!(
+        inspect.ask(output(scan))?,
+        Event::AnalysisIdentityPage { document: 1, scan: current, page }
+            if current == scan && page.rows.len() == 1
+    ));
+    assert_eq!(
+        failure(&inspect.ask(output(scan - 1))?),
+        Some(AnalysisFailure::InvalidRequest)
+    );
+    let replace = || fs::write(&path, [0x01, 0x08]);
+    #[cfg(windows)]
+    {
+        let error = replace()
+            .err()
+            .ok_or("A verified reader allowed a write.")?;
+        assert_eq!(error.raw_os_error(), Some(32)); // ERROR_SHARING_VIOLATION
+        assert!(matches!(
+            inspect.ask(Command::AnalysisClose { document: 1 })?,
+            Event::AnalysisClosed { document: 1 },
+        ));
+        replace()?;
+    }
+    #[cfg(not(windows))]
+    {
+        replace()?;
+        assert_eq!(
+            failure(&inspect.ask(output(scan))?),
+            Some(AnalysisFailure::SourceChanged)
+        );
+    }
+    assert_eq!(
+        failure(&inspect.ask(output(scan))?),
+        Some(AnalysisFailure::UnknownDocument)
+    );
+    let reopened = inspect.open(2, &path)?;
+    assert_eq!(reopened.framing, Framing::AnnexB);
+    assert_eq!(reopened.obus, 1);
+    Ok(())
+}
+
+#[test]
+fn validation_and_foreground_pages_share_one_inspector() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("long.obu");
+    long_stream(&path)?;
+    let mut inspect = Inspect::spawn()?;
+    let opened = inspect.open(1, &path)?;
+    let [validation, page] = inspect.send(vec![
+        Command::AnalysisValidate {
+            document: 1,
+            settings: ValidationSettings::default(),
+        },
+        Command::AnalysisPage {
+            document: 1,
+            filter: RowFilter::default(),
+            first: 0,
+            count: 1,
+        },
+    ])?[..] else {
+        return Err("Expected two request IDs.".into());
+    };
+
+    let response = inspect.next()?;
+    assert_eq!(response.request_id, page);
+    assert!(matches!(
+        response.body,
+        Event::AnalysisPage { document: 1, total, rows, .. }
+            if total == opened.elements && rows.len() == 1
+    ));
+    let response = inspect.next()?;
+    assert_eq!(response.request_id, validation);
+    assert!(matches!(
+        response.body,
+        Event::AnalysisValidated { document: 1, .. }
+    ));
     Ok(())
 }
 

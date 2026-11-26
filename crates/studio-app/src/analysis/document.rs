@@ -188,6 +188,10 @@ pub struct Document {
     pub(super) path: PathBuf,
     pub(super) origin: Origin,
     pub(super) phase: Phase,
+    /// Structure available before the scan completes.
+    pub(super) partial: Option<Box<DocumentSummary>>,
+    /// The index grew. Query the visible page even when its rows are cached.
+    pub(super) refresh_total: bool,
     pub(super) filter: RowFilter,
     pub(super) filter_generation: u64,
     /// Rows under the filter; `None` until a page says.
@@ -226,6 +230,8 @@ impl Document {
             path,
             origin,
             phase: Phase::Unread,
+            partial: None,
+            refresh_total: false,
             filter: RowFilter::default(),
             filter_generation: 0,
             total: None,
@@ -317,6 +323,7 @@ impl Document {
     pub(super) fn fail(&mut self, message: String, by: ReadEnd) {
         self.pending_batch = None;
         self.restore = self.restore();
+        self.partial = None;
         self.phase = Phase::Failed { message, by };
     }
 
@@ -344,11 +351,20 @@ impl Document {
         &self.phase
     }
 
-    /// What reading it found, once open.
+    pub(super) fn update_partial(&mut self, summary: DocumentSummary) {
+        self.refresh_total |= self
+            .partial
+            .as_ref()
+            .is_none_or(|old| old.elements != summary.elements);
+        self.partial = Some(Box::new(summary));
+    }
+
+    /// What the current read found.
     #[must_use]
     pub fn summary(&self) -> Option<&DocumentSummary> {
         match &self.phase {
             Phase::Open(summary) => Some(summary),
+            Phase::Opening | Phase::Cancelling => self.partial.as_deref(),
             _ => None,
         }
     }

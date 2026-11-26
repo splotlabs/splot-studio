@@ -108,6 +108,9 @@ export global Analysis {
     in property <string> action-description;
     // The read was cancelled and kept only the start of the file.
     in property <bool> can-read-again;
+    in property <bool> can-cancel-read;
+    in property <bool> reading;
+    in property <bool> clearing-cache;
     in property <bool> can-playback;
 
     in property <[string]> type-labels;
@@ -169,6 +172,7 @@ export global Analysis {
     callback finding-step(int);
     callback validate-stream();
     callback cancel-validation();
+    callback clear-cache();
 
     callback open();
     callback close();
@@ -565,6 +569,7 @@ component EvidencePane inherits VerticalLayout {
         }
 
         if root.findings: LinkButton {
+            enabled: !Analysis.reading;
             text: Analysis.validation-running ? "Cancel" : "Validate";
             description: Analysis.validation-running ? "Stop stream validation." : "Run validation on this stream.";
             clicked => {
@@ -895,11 +900,22 @@ export component AnalyzeView inherits VerticalLayout {
     callback copy(string);
     callback reveal-bytes();
 
+    if Analysis.state == AnalysisState.empty: StateCard {
+        height: 220px;
+        heading: "Open an AV2 stream to analyze it";
+        text: Analysis.message;
+        action: "Open…";
+        action-description: "Choose an IVF or Annex B file (" + root.open-shortcut + ")";
+        act => {
+            Analysis.open();
+        }
+    }
+
     // The documents and what reading the shown one found.
-    if Analysis.documents.length > 0: HorizontalLayout {
+    HorizontalLayout {
         spacing: Tokens.space-2;
 
-        ComboBox {
+        if Analysis.documents.length > 0: ComboBox {
             width: root.navigator-width;
             model: Analysis.documents;
             current-index <=> Analysis.document-index;
@@ -918,6 +934,15 @@ export component AnalyzeView inherits VerticalLayout {
         }
 
         LinkButton {
+            text: Analysis.clearing-cache ? "Clearing Index Cache…" : "Clear Index Cache";
+            description: "Remove saved indexes from Studio's cache";
+            enabled: !Analysis.clearing-cache;
+            clicked => {
+                Analysis.clear-cache();
+            }
+        }
+
+        if Analysis.documents.length > 0: LinkButton {
             text: "Open…";
             description: "Open an AV2 IVF or Annex B stream to analyze (" + root.open-shortcut + ")";
             clicked => {
@@ -925,7 +950,7 @@ export component AnalyzeView inherits VerticalLayout {
             }
         }
 
-        LinkButton {
+        if Analysis.documents.length > 0: LinkButton {
             text: "Close";
             description: "Close the shown document; the file is not touched";
             clicked => {
@@ -943,22 +968,11 @@ export component AnalyzeView inherits VerticalLayout {
         accessible-live-region: polite;
     }
 
-    if Analysis.state == AnalysisState.empty: StateCard {
-        height: 220px;
-        heading: "Open an AV2 stream to analyze it";
-        text: Analysis.message;
-        action: "Open…";
-        action-description: "Choose an IVF or Annex B file (" + root.open-shortcut + ")";
-        act => {
-            Analysis.open();
-        }
-    }
-
     if Analysis.state == AnalysisState.opening: StateCard {
         height: 220px;
         heading: "Reading the stream…";
         text: Analysis.message;
-        action: "Cancel";
+        action: Analysis.can-cancel-read ? "Cancel" : "";
         action-description: "Stop reading this file";
         act => {
             Analysis.cancel();
@@ -1023,6 +1037,15 @@ export component AnalyzeView inherits VerticalLayout {
                 accessible-expanded: Playback.state != StageState.none;
                 clicked => {
                     Analysis.toggle-playback();
+                }
+            }
+
+            if Analysis.can-cancel-read: LinkButton {
+                min-height: 0;
+                text: "Cancel Scan";
+                description: "Stop reading this file";
+                clicked => {
+                    Analysis.cancel();
                 }
             }
 

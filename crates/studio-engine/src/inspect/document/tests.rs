@@ -20,6 +20,87 @@ fn never() -> bool {
     false
 }
 
+#[derive(Debug)]
+pub(super) struct Scanned {
+    framing: Framing,
+    header: Option<IvfHeader>,
+    pub(super) items: Vec<Item>,
+    outcome: ScanOutcome,
+    facts: Index,
+}
+
+impl Scanned {
+    fn summary(&self, fingerprint: SourceFingerprint) -> DocumentSummary {
+        self.facts.facts().summary(
+            fingerprint,
+            self.framing,
+            self.header,
+            self.outcome.clone(),
+            None,
+        )
+    }
+}
+
+pub(super) fn scan(
+    input: impl Read,
+    len: u64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Scanned, Refusal> {
+    scan_with_index(input, len, cancelled, Index::new()?)
+}
+
+fn scan_with_index(
+    input: impl Read,
+    len: u64,
+    cancelled: &dyn Fn() -> bool,
+    mut facts: Index,
+) -> Result<Scanned, Refusal> {
+    let mut scan = Scan::new(input);
+    loop {
+        if let Some(outcome) = scan.step(len, &mut facts, cancelled)? {
+            let items = (0..facts.len())
+                .map(|at| {
+                    facts
+                        .item(at)
+                        .map(|item| item.unwrap_or_else(|| unreachable!("missing indexed item")))
+                })
+                .collect::<Result<_, _>>()?;
+            return Ok(Scanned {
+                framing: scan.builder.framing.unwrap_or(Framing::AnnexB),
+                header: scan.header,
+                items,
+                outcome,
+                facts,
+            });
+        }
+    }
+}
+
+fn index_items(items: &[Item]) -> Result<Index, Refusal> {
+    let mut index = Index::new()?;
+    for item in items {
+        index.push(item.clone())?;
+    }
+    Ok(index)
+}
+
+fn page(
+    items: &[Item],
+    filter: RowFilter,
+    first: u64,
+    count: u32,
+) -> Result<(u64, Vec<Row>), Refusal> {
+    index_items(items)?.page(filter, first, count)
+}
+
+fn locate(
+    items: &[Item],
+    filter: RowFilter,
+    target: LocateTarget,
+) -> Result<(Option<u64>, Row), Refusal> {
+    index_items(items)?.locate(filter, target)
+}
+
 fn scanned(bytes: &[u8]) -> Result<Scanned, Refusal> {
     scan(bytes, bytes.len() as u64, &never)
 }
@@ -560,25 +641,6 @@ fn a_declared_unit_over_the_cap_is_a_limit_and_at_the_cap_is_not() -> Result<(),
     Ok(())
 }
 
-#[test]
-fn the_element_limit_is_exact() -> Result<(), Refusal> {
-    let small = scanned(&annex_b())?;
-    assert_eq!(small.items.capacity(), 64);
-    let full = [0x01, 0x08].repeat(MAX_RETAINED_ELEMENTS);
-    let scanned = scanned(&full)?;
-    assert_eq!(scanned.outcome, ScanOutcome::Complete);
-    assert_eq!(scanned.items.len(), MAX_RETAINED_ELEMENTS);
-    assert_eq!(scanned.items.capacity(), ELEMENT_SLOTS);
-    let over = [0x01, 0x08].repeat(MAX_RETAINED_ELEMENTS + 1);
-    let scanned = self::scanned(&over)?;
-    let end = 2 * MAX_RETAINED_ELEMENTS as u64;
-    assert_eq!(stopped(&scanned), Some((ProblemKind::LimitReached, end, 2)));
-    assert_eq!(scanned.items.len(), ELEMENT_SLOTS);
-    // The final region took the last slot; the list never grew past it.
-    assert_eq!(scanned.items.capacity(), ELEMENT_SLOTS);
-    Ok(())
-}
-
 /// Serves `bytes`, failing once `fail_at` bytes were read, and raises
 /// `trip` after its first read.
 struct Source<'a> {
@@ -1061,6 +1123,7 @@ fn byte_ranges_are_exact_bounded_and_inside_the_file() -> Result<(), Refusal> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 #[test]
 fn a_changed_or_replaced_source_is_refused() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
@@ -1125,67 +1188,78 @@ fn a_changed_or_replaced_source_is_refused() -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-/// The memory bound documented on [`MAX_RETAINED_ELEMENTS`].
+/// Verify the framing fact size used in a resident page.
 #[test]
 fn a_kept_element_takes_at_most_64_bytes() {
     assert!(size_of::<Item>() <= 64, "{}", size_of::<Item>());
 }
 
-/// Serves `bytes` and raises `trip` on read number `trip_at`.
-struct Tripping<'a> {
+/// Waits for the requested read boundary before making cancellation visible.
+struct Chunked<'a> {
     bytes: &'a [u8],
     at: usize,
-    reads: usize,
-    trip_at: usize,
-    trip: &'a Cell<bool>,
+    cancel_after: usize,
+    cancelled: &'a Cell<bool>,
 }
 
-impl Read for Tripping<'_> {
+impl Read for Chunked<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.reads += 1;
-        if self.reads == self.trip_at {
-            self.trip.set(true);
-        }
-        let n = buf.len().min(self.bytes.len() - self.at);
+        let n = buf.len().min(4096).min(self.bytes.len() - self.at);
         buf[..n].copy_from_slice(&self.bytes[self.at..self.at + n]);
         self.at += n;
+        if self.at >= self.cancel_after {
+            self.cancelled.set(true);
+        }
         Ok(n)
     }
 }
 
-/// A cancel during the read of one large unit stops inside it: the next
-/// read fails, and the failure is reported as the cancel, not as I/O.
 #[test]
-fn a_cancel_inside_one_large_unit_stops_its_read() {
-    let mut bytes = vec![0x01, 0x08, 0x81, 0x80, 0x40, 0x64];
-    bytes.resize(bytes.len() + (1 << 20), 0);
-    let trip = Cell::new(false);
-    let cancelled = || trip.get();
-    let mut source = Tripping {
-        bytes: &bytes,
-        at: 0,
-        reads: 0,
-        trip_at: 4,
-        trip: &trip,
-    };
-    let checked = Checked {
-        inner: &mut source,
-        cancelled: &cancelled,
-    };
-    let len = bytes.len() as u64;
-    let got = scan(checked, len, &cancelled);
-    // The temporal delimiter before the cancel is kept; the padding OBU it
-    // stopped in is the region that was not read.
-    let Ok(got) = got else {
-        unreachable!("{got:?}")
-    };
-    assert_eq!(obus(&elements(&got)).len(), 1);
-    assert_eq!(stopped(&got), Some((ProblemKind::Cancelled, 2, len - 2)));
-    // Stopped inside the padding OBU, long before its end.
-    assert!(source.at < bytes.len() / 2, "{}", source.at);
+fn cancellation_interrupts_chunked_framing_reads_in_both_formats() -> Result<(), Refusal> {
+    let mut large = leb128((1 << 20) + 1);
+    large.push(0x64); // Padding OBU.
+    large.resize(large.len() + (1 << 20), 0);
+    for framing in [Framing::AnnexB, Framing::Ivf] {
+        let delimiter = [0x01, 0x08];
+        let (mut bytes, tail) = if framing == Framing::Ivf {
+            let mut bytes = ivf_header(*b"AV02", 32);
+            bytes.extend(record(0, &delimiter));
+            (bytes, record(1, &large))
+        } else {
+            (delimiter.to_vec(), large.clone())
+        };
+        let prefix = bytes.len();
+        bytes.extend(tail);
+        let trip = Cell::new(false);
+        let cancelled = || trip.get();
+        let cancel_after = prefix + 8192;
+        let mut source = Chunked {
+            bytes: &bytes,
+            at: 0,
+            cancel_after,
+            cancelled: &trip,
+        };
+        let read = BufReader::new(ScanReader::new(&mut source, Rc::new(cancelled)));
+        let len = bytes.len() as u64;
+        let got = scan(read, len, &cancelled)?;
+        assert_eq!(got.framing, framing);
+        assert_eq!(obus(&elements(&got)).len(), 1);
+        assert_eq!(
+            stopped(&got),
+            Some((ProblemKind::Cancelled, prefix as u64, len - prefix as u64))
+        );
+        assert!((cancel_after..cancel_after + 4096).contains(&source.at));
+        let offset = if framing == Framing::Ivf { 45 } else { 1 };
+        let (_, row) = got
+            .facts
+            .locate(RowFilter::default(), LocateTarget::Offset { offset })?;
+        assert!(matches!(row.element, Element::Obu { .. }));
+    }
+    Ok(())
 }
 
 /// The file changes while the open reads it: the open is refused.
+#[cfg(not(windows))]
 #[test]
 fn a_source_that_changes_during_the_open_is_refused() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
@@ -1217,50 +1291,22 @@ fn a_source_that_changes_during_the_open_is_refused() -> Result<(), Box<dyn std:
     Ok(())
 }
 
+/// A disk limit inside a payload leaves a region from the last indexed OBU to EOF.
 #[test]
-fn the_ivf_element_limit_counts_the_header() -> Result<(), Refusal> {
-    let records = |n: usize| {
-        let mut bytes = ivf_header(*b"AV02", 32);
-        for pts in 0..n as u64 {
-            bytes.extend(record(pts, &[]));
-        }
-        bytes
-    };
-    let full = records(MAX_RETAINED_ELEMENTS - 1);
-    let scanned = scanned(&full)?;
-    assert_eq!(scanned.outcome, ScanOutcome::Complete);
-    assert_eq!(scanned.items.len(), MAX_RETAINED_ELEMENTS);
-    let over = records(MAX_RETAINED_ELEMENTS);
-    let scanned = self::scanned(&over)?;
-    assert_eq!(scanned.items.len(), ELEMENT_SLOTS);
-    assert_eq!(scanned.items.capacity(), ELEMENT_SLOTS);
-    assert_eq!(
-        stopped(&scanned),
-        Some((
-            ProblemKind::LimitReached,
-            over.len() as u64 - IVF_FRAME_HEADER_SIZE as u64,
-            IVF_FRAME_HEADER_SIZE as u64
-        ))
-    );
-    Ok(())
-}
-
-/// The element limit reached inside a payload leaves a region that starts
-/// in that payload and ends past it: it belongs to no packet.
-#[test]
-fn the_region_after_an_element_limit_in_a_payload_has_no_packet() -> Result<(), Refusal> {
+fn the_region_after_a_disk_limit_in_a_payload_has_no_packet() -> Result<(), Refusal> {
     let mut bytes = ivf_header(*b"AV02", 32);
-    // The header and these records take all but three slots.
-    let empty = MAX_RETAINED_ELEMENTS - 3;
-    for pts in 0..empty as u64 {
+    let empty = 252;
+    for pts in 0..empty {
         bytes.extend(record(pts, &[]));
     }
-    // A packet and one OBU fit; the second OBU is over the limit.
-    bytes.extend(record(empty as u64, &[0x01, 0x08, 0x01, 0x08, 0x01, 0x08]));
-    bytes.extend(record(empty as u64 + 1, &TD_SH));
-    let scanned = scanned(&bytes)?;
+    bytes.extend(record(empty, &[0x01, 0x08, 0x01, 0x08, 0x01, 0x08]));
+    bytes.extend(record(empty + 1, &TD_SH));
+    let mut index = Index::new()?;
+    index.set_disk_budget(0);
+    let scanned = scan_with_index(bytes.as_slice(), bytes.len() as u64, &never, index)?;
     let last = scanned.items.len() - 1;
     let packet = last - 2;
+    assert_eq!(last, 255);
     assert!(matches!(scanned.items[packet], Item::Packet { .. }));
     assert!(matches!(
         scanned.items[last],
@@ -1269,11 +1315,16 @@ fn the_region_after_an_element_limit_in_a_payload_has_no_packet() -> Result<(), 
             ..
         }
     ));
-    // It starts inside the packet's payload and ends at the end of the file.
     assert!(scanned.items[last].start() < scanned.items[packet].end());
     assert_eq!(scanned.items[last].end(), bytes.len() as u64);
-    assert_eq!(parent(&scanned.items, last), None);
-    assert_eq!(parent(&scanned.items, last - 1), Some(packet));
+    let row = |index| {
+        scanned
+            .facts
+            .locate(RowFilter::default(), LocateTarget::Element { index })
+            .map(|(_, row)| row)
+    };
+    assert_eq!(row(last as u64)?.parent, None);
+    assert_eq!(row(last as u64 - 1)?.parent, Some(packet as u64));
     Ok(())
 }
 
@@ -1332,5 +1383,175 @@ fn a_fifo_is_refused_without_waiting() -> Result<(), Box<dyn std::error::Error>>
         ),
         "{got:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn progressive_pages_keep_packet_links_and_source_coordinates()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("paged.ivf");
+    let mut bytes = ivf_header(*b"AV02", 32);
+    let payload = TD_TG.repeat(280);
+    bytes.extend(record(0, &payload));
+    bytes.extend(record(1, &TD_SH));
+    std::fs::write(&path, &bytes)?;
+    let mut doc = Document::open_progressive(&WirePath::from_path(&path), never)
+        .map_err(|reason| reason.message)?;
+    assert_eq!(doc.summary().outcome, ScanOutcome::Scanning);
+    assert_eq!(doc.summary().elements, 1);
+    assert_eq!(
+        doc.document_mut()
+            .bytes(0, 4)
+            .map_err(|reason| reason.message)?,
+        *b"DKIF"
+    );
+    while !doc.advance().map_err(|reason| reason.message)? {}
+    assert_eq!(doc.summary().outcome, ScanOutcome::Complete);
+    let reference = scanned(&bytes).map_err(|reason| reason.message)?;
+    assert_eq!(doc.summary().elements, reference.items.len() as u64);
+    let filter = RowFilter {
+        kind: KindFilter::All,
+        layer: Some(LayerFilter {
+            temporal: 1,
+            embedded: 2,
+        }),
+    };
+    for first in [0, 127, 128, 255, 279] {
+        let expected = page(&reference.items, filter, first, 1).map_err(|reason| reason.message)?;
+        let actual = doc
+            .page(filter, first, 1)
+            .map_err(|reason| reason.message)?;
+        assert_eq!(actual, expected);
+        let row = &actual.1[0];
+        assert_eq!(row.parent, Some(1));
+        let index = usize::try_from(row.index)?;
+        let target = LocateTarget::Offset {
+            offset: reference.items[index].start(),
+        };
+        assert_eq!(
+            doc.locate(filter, target)
+                .map_err(|reason| reason.message)?,
+            locate(&reference.items, filter, target).map_err(|reason| reason.message)?,
+        );
+    }
+    let export = doc.index.export()?;
+    let mut cached = tempfile::tempfile()?;
+    cached.write_all(b"external header")?;
+    let start = cached.stream_position()?;
+    let end = start + export.len();
+    export.write(&mut cached)?;
+    assert_eq!(cached.stream_position()?, end);
+    cached.seek(SeekFrom::Start(start))?;
+    let warm = Index::open_cache(
+        super::cache::FileLease::unleased(cached),
+        doc.summary(),
+        end,
+    )?;
+    assert_eq!(
+        warm.page(filter, 128, 4).map_err(|reason| reason.message)?,
+        doc.page(filter, 128, 4).map_err(|reason| reason.message)?,
+    );
+    Ok(())
+}
+
+#[test]
+fn a_large_ivf_record_yields_and_cancels_during_payload_indexing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("large-record.ivf");
+    let mut file = File::create(&path)?;
+    let header = ivf_header(*b"AV02", 16 << 10);
+    file.write_all(&header)?;
+    file.write_all(&u32::try_from(MAX_UNIT_BYTES)?.to_le_bytes())?;
+    file.write_all(&0_u64.to_le_bytes())?;
+    let chunk = [0x01, 0x08].repeat(1 << 19);
+    for _ in 0..MAX_UNIT_BYTES / chunk.len() {
+        file.write_all(&chunk)?;
+    }
+    drop(file);
+
+    let polls = Cell::new(0);
+    let armed = Cell::new(false);
+    let cancel = || {
+        if armed.get() {
+            polls.set(polls.get() + 1);
+        }
+        polls.get() > 16
+    };
+    let mut doc = Document::open_progressive(&WirePath::from_path(&path), cancel)
+        .map_err(|error| error.message)?;
+    let digest = doc
+        .summary()
+        .digest
+        .as_deref()
+        .ok_or("missing IVF header digest")?;
+    assert_eq!(digest.bytes, header.len() as u64);
+    assert_eq!(
+        digest.sha256,
+        crate::artifact::hex(&Sha256::digest(&header))
+    );
+    assert!(!doc.advance().map_err(|error| error.message)?);
+    assert!(!doc.advance().map_err(|error| error.message)?);
+    assert_eq!(doc.summary().outcome, ScanOutcome::Scanning);
+    assert_eq!(doc.summary().obus, 256);
+    let (_, rows) = doc
+        .page(RowFilter::default(), 256, 1)
+        .map_err(|error| error.message)?;
+    assert_eq!(rows[0].parent, Some(1));
+
+    armed.set(true);
+    assert!(doc.advance().map_err(|error| error.message)?);
+    assert!(matches!(&doc.summary().outcome,
+        ScanOutcome::Stopped { problem } if problem.kind == ProblemKind::Cancelled));
+    assert!((257..=272).contains(&doc.summary().obus));
+    let last = doc.summary().elements - 1;
+    let (_, rows) = doc
+        .page(RowFilter::default(), last, 1)
+        .map_err(|error| error.message)?;
+    assert!(matches!(&rows[0].element, Element::Unparsed { span, .. }
+        if span.offset == header.len() as u64 + IVF_FRAME_HEADER_SIZE as u64 + doc.summary().obus * 2
+            && span.len + span.offset == doc.summary().fingerprint.len));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn restoring_modification_time_does_not_hide_a_source_change()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("source.obu");
+    let mut bytes = annex_b();
+    std::fs::write(&path, &bytes)?;
+    let doc = Document::open(&WirePath::from_path(&path), &never).map_err(|error| error.message)?;
+    let modified = std::fs::metadata(&path)?.modified()?;
+    if let Some(last) = bytes.last_mut() {
+        *last ^= 1;
+    }
+    std::fs::write(&path, bytes)?;
+    File::options()
+        .write(true)
+        .open(&path)?
+        .set_times(std::fs::FileTimes::new().set_modified(modified))?;
+    assert!(matches!(
+        doc.page(RowFilter::default(), 0, 1),
+        Err(Refusal {
+            code: AnalysisFailure::SourceChanged,
+            ..
+        })
+    ));
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn an_indexed_source_cannot_be_modified_while_open() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("source.obu");
+    std::fs::write(&path, annex_b())?;
+    let doc = Document::open(&WirePath::from_path(&path), &never).map_err(|error| error.message)?;
+    assert!(File::options().write(true).open(&path).is_err());
+    drop(doc);
+    assert!(File::options().write(true).open(&path).is_ok());
     Ok(())
 }

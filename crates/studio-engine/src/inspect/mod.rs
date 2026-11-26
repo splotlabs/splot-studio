@@ -4,49 +4,46 @@
 //! The inspect process: read-only analysis [`document`]s of local AV2 IVF
 //! and Annex B files, over the same framed protocol as the worker.
 //!
-//! Two threads. The caller's thread reads commands and never touches a
-//! file: it answers `Hello`, refuses what this process does not serve,
-//! handles cancellation, and queues analysis requests for the work
-//! thread (at most [`REQUEST_BACKLOG`]; a request beyond that is refused, so
-//! a cancel is always read). The work thread serves the requests in order,
-//! with at most [`MAX_DOCUMENTS`] documents open. Both write their replies
-//! under one lock, each frame whole. The process ends at the end of its
-//! input, which cancels pending open and validation requests.
+//! The reader accepts commands and processes cancellation without opening files.
+//! The work thread serves an ordered, bounded command queue. It advances active
+//! progressive scans in round-robin order between commands. A scan keeps the
+//! facts it has found if the reader requests cancellation.
 //!
-//! The [`Ledger`] records open and validation requests until the work thread
-//! answers them. The ledger serializes cancellation and completion. A request
-//! that already has an answer cannot be cancelled. A cancelled open stops at
-//! the next unit. Its answer keeps the earlier data as a document
-//! whose outcome is stopped by [`ProblemKind::Cancelled`] (or, when the read
-//! finished first, with the whole document). Only an open cancelled before
-//! its framing was known is answered [`AnalysisFailure::Cancelled`].
-//! Validation also keeps completed evidence when cancelled. A cancel targets
-//! the document generation and the request ID of the pending validation.
+//! The [`Ledger`] serializes cancellation and terminal replies. Both threads
+//! write complete replies under one lock. One additional thread can collect
+//! document evidence while the work thread serves foreground queries.
 
 mod batch;
 pub mod document;
+mod identity;
 mod report;
 mod syntax;
 mod validation;
 
+use std::collections::VecDeque;
+use std::fs::File;
 use std::io::{Read, Write};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
+use std::time::{Duration, Instant};
 
-#[cfg(doc)]
-use studio_domain::analysis::ProblemKind;
-use studio_domain::analysis::{AnalysisFailure, LocateTarget, RowFilter};
+use studio_domain::analysis::{
+    AnalysisFailure, LocateTarget, RowFilter, ScanOutcome, SourceDigest,
+};
+use studio_domain::identity::IdentityKind;
 use studio_domain::job::WirePath;
+use studio_domain::preview::GrainPolicy;
 use studio_domain::protocol::{
     AnalysisEvidenceIdentity, Command, Envelope, ErrorCode, Event, ProtocolError, decode,
     read_frame, write_message,
 };
 use studio_domain::syntax::SYNTAX_SCHEMA;
-use studio_domain::validation::{VALIDATION_SCHEMA, ValidationSettings};
+use studio_domain::validation::{VALIDATION_SCHEMA, ValidationEvidence, ValidationSettings};
 
-use self::document::{Document, Refusal};
+use self::document::{Document, OpeningDocument, Refusal};
 use crate::job::JOB_STACK_BYTES;
 use crate::worker::{SessionError, request_id_of};
 use crate::{build_identity, capabilities};
@@ -59,7 +56,7 @@ pub const REQUEST_BACKLOG: usize = 64;
 
 /// Serves the inspect protocol on `input` and `output` until the input ends.
 /// Every frame gets a terminal reply with its `request_id`.
-/// Batch validation and report export can also report progress.
+/// Progressive opens, batch validation and report export can also report progress.
 ///
 /// # Errors
 /// [`SessionError::Read`] on an unrecoverable input frame or failure,
@@ -76,17 +73,19 @@ pub fn run(input: &mut impl Read, output: impl Write + Send) -> Result<(), Sessi
     let (requests, queue) = mpsc::sync_channel(REQUEST_BACKLOG);
     let shared = &shared;
     thread::scope(|scope| {
+        let replies = requests.clone();
         let work = thread::Builder::new()
             .name("studio-inspect".to_owned())
             .stack_size(JOB_STACK_BYTES)
-            .spawn_scoped(scope, move || work(&queue, shared));
+            .spawn_scoped(scope, move || {
+                thread::scope(|scope| work(&queue, &replies, shared, scope));
+            });
         let read = match work {
             Ok(work) => {
                 let read = serve(input, &requests, shared);
-                // Ends the work thread once the queue is empty.
-                drop(requests);
-                // Nobody can cancel later.
                 shared.stopped.store(true, Ordering::SeqCst);
+                // The validation producer may still send a result through the queue.
+                let _ = requests.send((0, 0, Request::ReaderStopped));
                 // The work body has no panics to report.
                 let _ = work.join();
                 read
@@ -105,11 +104,14 @@ pub fn run(input: &mut impl Read, output: impl Write + Send) -> Result<(), Sessi
 /// One request for the work thread.
 #[derive(Debug)]
 enum Request {
-    Open { source: WirePath },
-    Validate { settings: ValidationSettings },
+    Open { source: WirePath, progressive: bool },
+    Evidence(EvidenceRequest),
+    EvidenceDone(EvidenceResult),
+    ReaderStopped,
     Inspect(Query),
     Batch(batch::Request),
     Close,
+    ClearCache,
 }
 
 /// Reads the selected document on the work thread.
@@ -141,10 +143,115 @@ enum Query {
         first: u64,
         count: u32,
     },
+    IdentityPage {
+        scan: u64,
+        first: u64,
+        count: u32,
+        kind: IdentityKind,
+    },
 }
 
 /// A queued request: its `request_id`, its document and what it asks.
 type Queued = (u64, u64, Request);
+type ValidationResult = Result<(ValidationEvidence, SourceDigest), Refusal>;
+
+#[derive(Debug)]
+enum EvidenceRequest {
+    Validate(ValidationSettings),
+    Identity(GrainPolicy),
+}
+
+impl EvidenceRequest {
+    fn pending(&self, document: u64, id: u64) -> Pending {
+        match self {
+            Self::Validate(_) => Pending::Validation {
+                document,
+                validation: id,
+            },
+            Self::Identity(_) => Pending::Identity { document, scan: id },
+        }
+    }
+
+    fn prepare(self, doc: &mut Document, id: u64) -> Result<EvidenceTask, Refusal> {
+        Ok(match self {
+            Self::Validate(settings) => {
+                EvidenceTask::Validate(doc.prepare_validation(id)?, settings)
+            }
+            Self::Identity(grain) => {
+                let file = doc.open_evidence_source()?;
+                let index = doc.begin_identity(id, grain)?;
+                let digest = doc.summary().digest.clone();
+                EvidenceTask::Identity {
+                    file,
+                    index,
+                    digest,
+                }
+            }
+        })
+    }
+}
+
+enum EvidenceTask {
+    Validate(File, ValidationSettings),
+    Identity {
+        file: File,
+        index: identity::IdentityIndex,
+        digest: Option<Box<SourceDigest>>,
+    },
+}
+
+impl EvidenceTask {
+    fn run(self, cancelled: &dyn Fn() -> bool) -> EvidenceResult {
+        match self {
+            Self::Validate(mut file, settings) => EvidenceResult::Validation(Box::new(
+                validation::validate(&mut file, &settings, cancelled),
+            )),
+            Self::Identity {
+                mut file,
+                index,
+                digest,
+            } => EvidenceResult::Identity(index.scan(&mut file, digest.as_deref(), cancelled)),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum EvidenceResult {
+    Validation(Box<ValidationResult>),
+    Identity(Result<(), Refusal>),
+    Aborted(Pending),
+}
+
+impl EvidenceResult {
+    fn finish(self, doc: &mut Document, document: u64, id: u64) -> Result<Event, Refusal> {
+        match self {
+            Self::Validation(result) => {
+                let (summary, total) = doc.complete_validation(id, *result)?;
+                Ok(Event::AnalysisValidated {
+                    document,
+                    summary: Box::new(summary),
+                    total,
+                })
+            }
+            Self::Identity(result) => {
+                let summary = doc.complete_identity(id, result)?;
+                Ok(Event::AnalysisIdentityScanned {
+                    document,
+                    summary: Box::new(summary),
+                })
+            }
+            Self::Aborted(operation) => {
+                if matches!(operation, Pending::Identity { .. }) {
+                    doc.drop_identity(id);
+                }
+                Err(Refusal::new(
+                    AnalysisFailure::Io,
+                    "The evidence thread stopped.",
+                ))
+            }
+        }
+    }
+}
 
 struct Shared<W> {
     out: Mutex<Out<W>>,
@@ -164,6 +271,18 @@ enum Pending {
     Open(u64),
     BatchValidation(u64),
     Validation { document: u64, validation: u64 },
+    Identity { document: u64, scan: u64 },
+}
+
+impl Pending {
+    fn belongs_to(self, member: u64) -> bool {
+        match self {
+            Self::Validation { document, .. } | Self::Identity { document, .. } => {
+                document == member
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Long operations that the reader can cancel.
@@ -171,7 +290,7 @@ enum Pending {
 struct Ledger {
     /// The newest document id an open was queued for.
     newest: u64,
-    /// At most the queue capacity and the one request running.
+    /// At most the queued requests and active scans and evidence pass.
     pending: Vec<(Pending, bool)>,
 }
 
@@ -294,64 +413,106 @@ fn serve<W: Write>(
                 continue;
             }
         };
-        let id = envelope.request_id;
-        match envelope.body {
-            Command::Hello { .. } => {
+        route(shared, requests, envelope.request_id, envelope.body);
+    }
+}
+
+fn route<W: Write>(shared: &Shared<W>, requests: &SyncSender<Queued>, id: u64, command: Command) {
+    match command {
+        Command::Hello { .. } => {
+            shared.send(
+                id,
+                Event::Hello {
+                    engine: build_identity(),
+                    capabilities: studio_domain::protocol::Capabilities {
+                        analysis_evidence: Some(AnalysisEvidenceIdentity {
+                            syntax_schema: SYNTAX_SCHEMA,
+                            validation_schema: VALIDATION_SCHEMA,
+                            codec_revision: env!("SPLOT_CODEC_REVISION").into(),
+                        }),
+                        ..capabilities()
+                    },
+                },
+            );
+        }
+        Command::AnalysisClearCache => {
+            if requests.try_send((id, 0, Request::ClearCache)).is_err() {
                 shared.send(
                     id,
-                    Event::Hello {
-                        engine: build_identity(),
-                        capabilities: studio_domain::protocol::Capabilities {
-                            analysis_evidence: Some(AnalysisEvidenceIdentity {
-                                syntax_schema: SYNTAX_SCHEMA,
-                                validation_schema: VALIDATION_SCHEMA,
-                                codec_revision: env!("SPLOT_CODEC_REVISION").into(),
-                            }),
-                            ..capabilities()
-                        },
-                    },
+                    refusal(ErrorCode::Busy, "The inspection queue is full."),
                 );
             }
-            Command::AnalysisCancel { document } => {
-                shared.cancel(id, Pending::Open(document));
+        }
+        Command::AnalysisCancel { document } => {
+            shared.cancel(id, Pending::Open(document));
+        }
+        Command::AnalysisCancelValidation {
+            document,
+            validation,
+        } => {
+            shared.cancel(
+                id,
+                Pending::Validation {
+                    document,
+                    validation,
+                },
+            );
+        }
+        Command::AnalysisClose { document } => {
+            let mut ledger = shared.ledger();
+            if requests.try_send((id, document, Request::Close)).is_ok() {
+                // Let the active read yield before the scheduler handles the close.
+                ledger.cancel(Pending::Open(document));
+            } else {
+                drop(ledger);
+                busy(shared, id, document);
             }
-            Command::AnalysisCancelValidation {
+        }
+        Command::AnalysisOpen { document, source } => {
+            queue_open(shared, requests, id, document, source, false);
+        }
+        Command::AnalysisOpenProgressive { document, source } => {
+            queue_open(shared, requests, id, document, source, true);
+        }
+        Command::AnalysisValidate { document, settings } => {
+            queue_evidence(
+                shared,
+                requests,
+                id,
                 document,
-                validation,
-            } => {
-                shared.cancel(
-                    id,
-                    Pending::Validation {
-                        document,
-                        validation,
-                    },
-                );
-            }
-            Command::AnalysisOpen { document, source } => {
-                queue_open(shared, requests, id, document, source);
-            }
-            Command::AnalysisValidate { document, settings } => {
-                queue_validation(shared, requests, id, document, settings);
-            }
-            Command::BatchCancel { validation } => {
-                shared.cancel(id, Pending::BatchValidation(validation));
-            }
-            command => {
-                if let Some(request) = batch::Request::from_command(&command) {
-                    batch::queue(shared, requests, id, request);
-                } else if let Some((document, request)) = queued_request(&command) {
-                    if requests.try_send((id, document, request)).is_err() {
-                        busy(shared, id, document);
-                    }
-                } else {
-                    shared.send(
-                        id,
-                        refusal(
-                            ErrorCode::WrongState,
-                            "Use an analysis command with the inspect process.",
-                        ),
-                    );
+                EvidenceRequest::Validate(settings),
+            );
+        }
+        Command::AnalysisIdentityScan { document, grain } => {
+            queue_evidence(
+                shared,
+                requests,
+                id,
+                document,
+                EvidenceRequest::Identity(grain),
+            );
+        }
+        Command::AnalysisCancelIdentity { document, scan } => {
+            shared.cancel(id, Pending::Identity { document, scan });
+        }
+        Command::BatchCancel { validation } => {
+            shared.cancel(id, Pending::BatchValidation(validation));
+        }
+        command => {
+            if let Some(request) = batch::Request::from_command(&command) {
+                batch::queue(shared, requests, id, request);
+            } else if let Some((document, request)) = queued_request(&command) {
+                if requests.try_send((id, document, request)).is_err() {
+                    busy(shared, id, document);
                 }
+            } else {
+                shared.send(
+                    id,
+                    refusal(
+                        ErrorCode::WrongState,
+                        "Use an analysis command with the inspect process.",
+                    ),
+                );
             }
         }
     }
@@ -411,7 +572,21 @@ fn queued_request(command: &Command) -> Option<(u64, Request)> {
                 count,
             }),
         ),
-        Command::AnalysisClose { document } => (document, Request::Close),
+        Command::AnalysisIdentityPage {
+            document,
+            scan,
+            first,
+            count,
+            kind,
+        } => (
+            document,
+            Request::Inspect(Query::IdentityPage {
+                scan,
+                first,
+                count,
+                kind,
+            }),
+        ),
         _ => return None,
     })
 }
@@ -424,6 +599,7 @@ fn queue_open<W: Write>(
     id: u64,
     document: u64,
     source: WirePath,
+    progressive: bool,
 ) {
     // The ledger is held until the open is recorded, so the work thread
     // cannot answer it first.
@@ -444,7 +620,14 @@ fn queue_open<W: Write>(
         return;
     }
     if requests
-        .try_send((id, document, Request::Open { source }))
+        .try_send((
+            id,
+            document,
+            Request::Open {
+                source,
+                progressive,
+            },
+        ))
         .is_ok()
     {
         ledger.queue_open(document);
@@ -454,17 +637,14 @@ fn queue_open<W: Write>(
     }
 }
 
-fn queue_validation<W: Write>(
+fn queue_evidence<W: Write>(
     shared: &Shared<W>,
     requests: &SyncSender<Queued>,
     id: u64,
     document: u64,
-    settings: ValidationSettings,
+    request: EvidenceRequest,
 ) {
-    let operation = Pending::Validation {
-        document,
-        validation: id,
-    };
+    let operation = request.pending(document, id);
     let mut ledger = shared.ledger();
     if ledger.contains(operation) {
         drop(ledger);
@@ -474,12 +654,12 @@ fn queue_validation<W: Write>(
                 document,
                 Refusal::new(
                     AnalysisFailure::InvalidRequest,
-                    "This validation request ID is already pending.",
+                    "This request ID is already pending.",
                 ),
             ),
         );
     } else if requests
-        .try_send((id, document, Request::Validate { settings }))
+        .try_send((id, document, Request::Evidence(request)))
         .is_ok()
     {
         ledger.pending.push((operation, false));
@@ -501,68 +681,332 @@ fn busy<W: Write>(shared: &Shared<W>, id: u64, document: u64) {
     );
 }
 
-fn work<W: Write>(queue: &Receiver<Queued>, shared: &Shared<W>) {
-    let mut documents: Vec<(u64, Document)> = Vec::new();
-    let mut batch = batch::Archive::default();
-    while let Ok((id, document, request)) = queue.recv() {
-        let open = documents.iter().position(|(d, _)| *d == document);
-        let unknown = || {
-            Refusal::new(
-                AnalysisFailure::UnknownDocument,
-                format!("document {document} is not open"),
-            )
+// A sustained stream of requests must still leave time for scanning.
+const FOREGROUND_BURST: u8 = 8;
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
+
+struct Scan {
+    request: u64,
+    document: u64,
+    reported: Instant,
+}
+
+fn work<'scope, W: Write + Send>(
+    queue: &Receiver<Queued>,
+    replies: &'scope SyncSender<Queued>,
+    shared: &'scope Shared<W>,
+    scope: &'scope thread::Scope<'scope, '_>,
+) {
+    let mut scheduler = Scheduler {
+        shared,
+        scope,
+        replies,
+        documents: Vec::new(),
+        batch: batch::Archive::default(),
+        scans: VecDeque::new(),
+        waiting: VecDeque::new(),
+        active: None,
+    };
+    let mut burst = 0;
+    let mut reader_stopped = false;
+    loop {
+        let ready = if scheduler.active.is_none() {
+            scheduler.waiting.pop_front()
+        } else {
+            None
         };
+        let request = if ready.is_some() {
+            ready
+        } else if scheduler.scans.is_empty() {
+            if reader_stopped && scheduler.active.is_none() {
+                break;
+            }
+            queue.recv().ok()
+        } else if burst < FOREGROUND_BURST && !shared.stopped() {
+            queue.try_recv().ok()
+        } else {
+            None
+        };
+        match request {
+            Some((_, _, Request::ReaderStopped)) => reader_stopped = true,
+            Some(request) => {
+                if !scheduler.scans.is_empty() {
+                    burst += 1;
+                }
+                scheduler.handle(request);
+            }
+            None => {
+                let Some(scan) = scheduler.scans.pop_front() else {
+                    break;
+                };
+                scheduler.advance_scan(scan);
+                burst = 0;
+            }
+        }
+    }
+}
+
+struct Scheduler<'scope, 'env, W> {
+    shared: &'scope Shared<W>,
+    scope: &'scope thread::Scope<'scope, 'env>,
+    replies: &'scope SyncSender<Queued>,
+    documents: Vec<(u64, OpeningDocument<'scope>)>,
+    batch: batch::Archive,
+    scans: VecDeque<Scan>,
+    waiting: VecDeque<Queued>,
+    active: Option<(Pending, thread::ScopedJoinHandle<'scope, ()>)>,
+}
+
+impl<W: Write + Send> Scheduler<'_, '_, W> {
+    fn document_index(&self, document: u64) -> Option<usize> {
+        self.documents.iter().position(|(id, _)| *id == document)
+    }
+
+    fn handle(&mut self, (id, document, request): Queued) {
+        let shared = self.shared;
         let answer = match request {
             Request::Batch(request) => {
-                batch.work(shared, id, request);
-                continue;
+                self.batch.work(shared, id, request);
+                return;
             }
-            Request::Open { source } => {
-                open_document(shared, &mut documents, id, document, &source);
-                continue;
+            Request::Open {
+                source,
+                progressive,
+            } => {
+                self.open_document(id, document, &source, progressive);
+                return;
             }
-            Request::Validate { settings } => {
-                let operation = Pending::Validation {
-                    document,
-                    validation: id,
-                };
-                let answer = match open {
-                    Some(at) => match documents[at]
-                        .1
-                        .validate(id, &settings, &|| shared.cancelled(operation))
-                    {
-                        Ok((summary, total)) => Event::AnalysisValidated {
-                            document,
-                            summary: Box::new(summary),
-                            total,
-                        },
-                        Err(refusal) => dropped(&mut documents, at, document, refusal),
-                    },
-                    None => failed(document, unknown()),
-                };
-                let mut ledger = shared.ledger();
-                ledger.settle(operation);
-                shared.send(id, answer);
-                drop(ledger);
-                continue;
-            }
-            Request::Close => match open {
-                Some(at) => {
-                    documents.remove(at);
-                    Event::AnalysisClosed { document }
+            Request::Evidence(request) => {
+                let operation = request.pending(document, id);
+                if let Err(error) = self.begin_evidence(id, document, request) {
+                    let answer = self.fail_document(document, error);
+                    settle_evidence(shared, id, operation, answer);
                 }
-                None => failed(document, unknown()),
+                return;
+            }
+            Request::EvidenceDone(result) => {
+                self.finish_evidence(id, document, result);
+                return;
+            }
+            Request::ReaderStopped => return,
+            Request::ClearCache if !self.scans.is_empty() => {
+                refusal(ErrorCode::Busy, "Wait for the document scans to finish.")
+            }
+            Request::ClearCache => match document::clear_cache() {
+                Ok(()) => Event::AnalysisCacheCleared,
+                Err(error) => refusal(ErrorCode::WrongState, error.message),
             },
-            Request::Inspect(query) => match open {
-                Some(at) => match serve_document(&mut documents[at].1, document, id, query) {
-                    Ok(answer) => answer,
-                    Err(refusal) => dropped(&mut documents, at, document, refusal),
-                },
-                None => failed(document, unknown()),
-            },
+            Request::Close => {
+                if let Some(at) = self.document_index(document) {
+                    self.remove_document(
+                        at,
+                        document,
+                        &Refusal::new(
+                            AnalysisFailure::Cancelled,
+                            "The document closed during the scan.",
+                        ),
+                    );
+                    Event::AnalysisClosed { document }
+                } else {
+                    failed(document, unknown_document(document))
+                }
+            }
+            Request::Inspect(query) => {
+                let result = self
+                    .document_index(document)
+                    .ok_or_else(|| unknown_document(document))
+                    .and_then(|at| {
+                        serve_document(self.documents[at].1.document_mut(), document, id, query)
+                    });
+                result.unwrap_or_else(|error| self.fail_document(document, error))
+            }
         };
         shared.send(id, answer);
     }
+
+    fn open_document(&mut self, id: u64, document: u64, source: &WirePath, progressive: bool) {
+        let shared = self.shared;
+        let cancelled = move || shared.cancelled(Pending::Open(document));
+        let opened = if cancelled() {
+            Err(cancelled_open())
+        } else if self.documents.len() >= MAX_DOCUMENTS {
+            Err(open_limit())
+        } else if progressive {
+            Document::open_progressive(source, cancelled)
+        } else {
+            Document::open_complete(source, cancelled)
+        };
+        let answer = match opened {
+            Ok(doc) => {
+                let summary = doc.summary().clone();
+                self.documents.push((document, doc));
+                if summary.outcome == ScanOutcome::Scanning {
+                    self.shared
+                        .send(id, Event::AnalysisOpenProgress { document, summary });
+                    self.scans.push_back(Scan {
+                        request: id,
+                        document,
+                        reported: Instant::now(),
+                    });
+                    return;
+                }
+                Event::AnalysisOpened { document, summary }
+            }
+            Err(error) => failed(document, error),
+        };
+        settle_open(self.shared, id, document, answer);
+    }
+
+    fn advance_scan(&mut self, mut scan: Scan) {
+        let Scan {
+            request, document, ..
+        } = scan;
+        let Some(at) = self.document_index(document) else {
+            settle_open(
+                self.shared,
+                request,
+                document,
+                failed(document, unknown_document(document)),
+            );
+            return;
+        };
+        let shared = self.shared;
+        let doc = &mut self.documents[at].1;
+        match doc.advance() {
+            Ok(true) => {
+                let summary = doc.summary().clone();
+                settle_open(
+                    shared,
+                    request,
+                    document,
+                    Event::AnalysisOpened { document, summary },
+                );
+            }
+            Ok(false) => {
+                if scan.reported.elapsed() >= PROGRESS_INTERVAL {
+                    shared.send(
+                        request,
+                        Event::AnalysisOpenProgress {
+                            document,
+                            summary: doc.summary().clone(),
+                        },
+                    );
+                    scan.reported = Instant::now();
+                }
+                self.scans.push_back(scan);
+            }
+            Err(error) => {
+                self.remove_document(at, document, &error);
+                settle_open(shared, request, document, failed(document, error));
+            }
+        }
+    }
+
+    fn begin_evidence(
+        &mut self,
+        id: u64,
+        document: u64,
+        request: EvidenceRequest,
+    ) -> Result<(), Refusal> {
+        let at = self
+            .document_index(document)
+            .ok_or_else(|| unknown_document(document))?;
+        if matches!(request, EvidenceRequest::Validate(_))
+            && self.scans.iter().any(|scan| scan.document == document)
+        {
+            return Err(scan_pending());
+        }
+        if self.active.is_some() {
+            if self.waiting.len() >= REQUEST_BACKLOG {
+                return Err(Refusal::new(
+                    AnalysisFailure::LimitReached,
+                    "The evidence queue is full.",
+                ));
+            }
+            self.waiting
+                .push_back((id, document, Request::Evidence(request)));
+            return Ok(());
+        }
+
+        let operation = request.pending(document, id);
+        let task = request.prepare(self.documents[at].1.document_mut(), id)?;
+        let shared = self.shared;
+        let replies = self.replies;
+        let job = thread::Builder::new()
+            .name("studio-inspect-evidence".to_owned())
+            .stack_size(JOB_STACK_BYTES)
+            .spawn_scoped(self.scope, move || {
+                // Always wake the scheduler, even if the codec unwinds.
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    task.run(&|| shared.cancelled(operation))
+                }))
+                .unwrap_or(EvidenceResult::Aborted(operation));
+                let _ = replies.send((id, document, Request::EvidenceDone(result)));
+            })
+            .map_err(|error| {
+                if matches!(operation, Pending::Identity { .. }) {
+                    self.documents[at].1.document_mut().drop_identity(id);
+                }
+                Refusal::new(
+                    AnalysisFailure::Io,
+                    format!("Cannot start the evidence thread. {error}"),
+                )
+            })?;
+        self.active = Some((operation, job));
+        Ok(())
+    }
+
+    fn finish_evidence(&mut self, id: u64, document: u64, result: EvidenceResult) {
+        let Some((operation, job)) = self.active.take() else {
+            return;
+        };
+        let _ = job.join();
+        let answer = self
+            .document_index(document)
+            .ok_or_else(|| unknown_document(document))
+            .and_then(|at| result.finish(self.documents[at].1.document_mut(), document, id))
+            .unwrap_or_else(|error| self.fail_document(document, error));
+        settle_evidence(self.shared, id, operation, answer);
+    }
+
+    fn fail_document(&mut self, document: u64, error: Refusal) -> Event {
+        if error.code == AnalysisFailure::SourceChanged
+            && let Some(at) = self.document_index(document)
+        {
+            self.remove_document(at, document, &error);
+        }
+        failed(document, error)
+    }
+
+    fn remove_document(&mut self, at: usize, document: u64, reason: &Refusal) {
+        self.documents.remove(at);
+        if let Some((operation, _)) = &self.active
+            && operation.belongs_to(document)
+        {
+            self.shared.ledger().cancel(*operation);
+        }
+        abandon_scan(
+            self.shared,
+            &mut self.scans,
+            document,
+            reason.code,
+            &reason.message,
+        );
+    }
+}
+
+fn unknown_document(document: u64) -> Refusal {
+    Refusal::new(
+        AnalysisFailure::UnknownDocument,
+        format!("Document {document} is not open."),
+    )
+}
+
+fn settle_evidence<W: Write>(shared: &Shared<W>, id: u64, operation: Pending, answer: Event) {
+    let mut ledger = shared.ledger();
+    ledger.settle(operation);
+    shared.send(id, answer);
+    drop(ledger);
 }
 
 fn serve_document(
@@ -625,6 +1069,16 @@ fn serve_document(
                 events: page.entries,
             }
         }
+        Query::IdentityPage {
+            scan,
+            first,
+            count,
+            kind,
+        } => Event::AnalysisIdentityPage {
+            document,
+            scan,
+            page: Box::new(doc.identity_page(scan, kind, first, count)?),
+        },
         Query::Findings {
             validation,
             first,
@@ -642,62 +1096,54 @@ fn serve_document(
     })
 }
 
-/// The failure of a request on an open document; a changed source closes it.
-fn dropped(
-    documents: &mut Vec<(u64, Document)>,
-    at: usize,
-    document: u64,
-    refusal: Refusal,
-) -> Event {
-    if refusal.code == AnalysisFailure::SourceChanged {
-        documents.remove(at);
-    }
-    failed(document, refusal)
+fn scan_pending() -> Refusal {
+    Refusal::new(
+        AnalysisFailure::InvalidRequest,
+        "Wait for the document scan to finish.",
+    )
 }
 
-fn open_document<W: Write>(
-    shared: &Shared<W>,
-    documents: &mut Vec<(u64, Document)>,
-    id: u64,
-    document: u64,
-    source: &WirePath,
-) {
-    let operation = Pending::Open(document);
-    let opened = if shared.cancelled(operation) {
-        // Not started: its answer is decided below.
-        None
-    } else if documents.len() >= MAX_DOCUMENTS {
-        Some(Err(Refusal::new(
-            AnalysisFailure::LimitReached,
-            format!("{MAX_DOCUMENTS} documents are open; close one first"),
-        )))
-    } else {
-        Some(Document::open(source, &|| shared.cancelled(operation)))
-    };
+fn open_limit() -> Refusal {
+    Refusal::new(
+        AnalysisFailure::LimitReached,
+        format!("Close a document before opening more than {MAX_DOCUMENTS} documents."),
+    )
+}
+
+fn cancelled_open() -> Refusal {
+    Refusal::new(AnalysisFailure::Cancelled, "The open was cancelled.")
+}
+
+fn settle_open<W: Write>(shared: &Shared<W>, id: u64, document: u64, answer: Event) {
     let mut ledger = shared.ledger();
-    ledger.settle(operation);
-    let answer = match opened {
-        // A cancelled read keeps what it read: the outcome says it stopped.
-        Some(Ok(opened)) => {
-            let summary = opened.summary().clone();
-            documents.push((document, opened));
-            Event::AnalysisOpened { document, summary }
-        }
-        Some(Err(refusal)) => failed(document, refusal),
-        None => failed(
-            document,
-            Refusal::new(AnalysisFailure::Cancelled, "the open was cancelled"),
-        ),
-    };
-    // Sent under the ledger, so a cancel decided after this one is refused
-    // and one decided before it was honoured above.
+    ledger.settle(Pending::Open(document));
     shared.send(id, answer);
     drop(ledger);
 }
 
+fn abandon_scan<W: Write>(
+    shared: &Shared<W>,
+    scans: &mut VecDeque<Scan>,
+    document: u64,
+    code: AnalysisFailure,
+    message: &str,
+) {
+    if let Some(at) = scans.iter().position(|scan| scan.document == document)
+        && let Some(scan) = scans.remove(at)
+    {
+        settle_open(
+            shared,
+            scan.request,
+            document,
+            failed(document, Refusal::new(code, message)),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Ledger, Pending};
+    use super::{Command, Ledger, Out, Pending, Request, Shared, route};
+    use std::sync::{Mutex, mpsc};
 
     /// Queues `document` as the reader does when the queue takes it.
     fn queued(ledger: &mut Ledger, document: u64) -> bool {
@@ -730,6 +1176,28 @@ mod tests {
         // Ids only increase; an id never sent is not pending.
         assert!(!ledger.admits(4) && !ledger.admits(2));
         assert!(!ledger.cancel(Pending::Open(9)));
+    }
+
+    #[test]
+    fn a_queued_close_cancels_only_its_inflight_read() {
+        let shared = Shared {
+            out: Mutex::new(Out {
+                writer: Vec::new(),
+                error: None,
+            }),
+            ledger: Mutex::new(Ledger::default()),
+            stopped: false.into(),
+        };
+        shared.ledger().queue_open(1);
+        shared.ledger().queue_open(2);
+        let (tx, rx) = mpsc::sync_channel(1);
+        route(&shared, &tx, 3, Command::AnalysisClose { document: 1 });
+        // The scheduler has not yet received the close.
+        assert!(shared.cancelled(Pending::Open(1)));
+        assert!(!shared.cancelled(Pending::Open(2)));
+        route(&shared, &tx, 4, Command::AnalysisClose { document: 2 });
+        assert!(!shared.cancelled(Pending::Open(2)));
+        assert!(matches!(rx.try_recv(), Ok((3, 1, Request::Close))));
     }
 
     /// An open the full queue refused is not recorded: its id can be sent

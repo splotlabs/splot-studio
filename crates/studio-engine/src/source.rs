@@ -605,6 +605,71 @@ fn hash_io(error: impl std::fmt::Display) -> Stop {
     invalid(format!("Cannot identify the first-pass source. {error}"))
 }
 
+/// Open an analysis source for content verification and later reads.
+pub(crate) fn open_verified(path: &Path) -> io::Result<File> {
+    let mut options = File::options();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // A replacement between the regular-file check and open can be a FIFO.
+        options.custom_flags(i32::from_ne_bytes(
+            rustix::fs::OFlags::NONBLOCK.bits().to_ne_bytes(),
+        ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        // Permit other readers. Deny handles with write or delete access.
+        const FILE_SHARE_READ: u32 = 1;
+        options.share_mode(FILE_SHARE_READ);
+    }
+    options.open(path)
+}
+
+/// Detects a Unix file change even if its modification time is restored.
+/// Windows readers use an open handle that denies write and delete access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileChangeStamp {
+    #[cfg(unix)]
+    changed: (i64, i64),
+}
+
+impl FileChangeStamp {
+    #[allow(unused_variables)] // Unix supplies the change time.
+    pub(crate) fn of(metadata: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Self {
+                changed: (metadata.ctime(), metadata.ctime_nsec()),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self {}
+        }
+    }
+}
+
+/// Check both the path and the original handle before using verified evidence.
+pub(crate) fn still_verified(
+    path: &Path,
+    id: &FileId,
+    fingerprint: SourceFingerprint,
+    file: &File,
+    stamp: FileChangeStamp,
+) -> Result<(), Stop> {
+    still_the_same(path, id, fingerprint)?;
+    let metadata = file.metadata().map_err(|_| changed())?;
+    if FileChangeStamp::of(&metadata) != stamp || SourceFingerprint::of(&metadata) != fingerprint {
+        return Err(changed());
+    }
+    Ok(())
+}
+
 /// The tools open the file by name; it must still be the one probed.
 pub(crate) fn still_the_same(
     path: &Path,
@@ -823,4 +888,28 @@ fn invalid(message: impl Into<String>) -> Stop {
 
 fn unsupported(message: impl Into<String>) -> Stop {
     Stop::failed(FailureCode::UnsupportedSource, message)
+}
+
+#[cfg(all(test, windows))]
+mod verified_file_tests {
+    use super::*;
+
+    #[test]
+    fn a_verified_reader_excludes_writes_and_deletion() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("source.ivf");
+        std::fs::write(&path, b"source")?;
+        let writer = File::options().write(true).open(&path)?;
+        assert!(open_verified(&path).is_err());
+        drop(writer);
+
+        let reader = open_verified(&path)?;
+        let other_reader = open_verified(&path)?;
+        assert!(File::options().write(true).open(&path).is_err());
+        assert!(std::fs::remove_file(&path).is_err());
+
+        drop(other_reader);
+        drop(reader);
+        std::fs::remove_file(path)
+    }
 }

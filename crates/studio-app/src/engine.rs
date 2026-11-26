@@ -228,9 +228,26 @@ impl Worker {
     pub fn spawn(
         engine: &Path,
         role: Role,
+        deliver: impl FnMut(Delivery) + Send + 'static,
+    ) -> Result<Self, SpawnError> {
+        Self::spawn_with_data_dir(engine, role, None, deliver)
+    }
+
+    pub(crate) fn spawn_with_data_dir(
+        engine: &Path,
+        role: Role,
+        data_dir: Option<&Path>,
         mut deliver: impl FnMut(Delivery) + Send + 'static,
     ) -> Result<Self, SpawnError> {
+        use studio_domain::analysis::INSPECT_DATA_DIR_VAR;
+
         let mut command = Process::new(engine);
+        command.env_remove(INSPECT_DATA_DIR_VAR);
+        if role == Role::Inspect
+            && let Some(dir) = data_dir
+        {
+            command.env(INSPECT_DATA_DIR_VAR, dir);
+        }
         command
             .arg(role.arg())
             .stdin(Stdio::piped())

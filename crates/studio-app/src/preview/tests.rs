@@ -779,6 +779,39 @@ fn the_scene_follows_the_file_from_source_to_live_to_result() {
     ));
 }
 
+#[test]
+fn partial_updates_keep_the_decode_request_and_completion_verifies_the_selected_output() {
+    let full = document_subject(1);
+    let prefix = |bytes| {
+        let mut subject = full.clone();
+        let Subject::Document { digest, .. } = &mut subject else {
+            unreachable!("a document subject")
+        };
+        digest.bytes = bytes;
+        subject
+    };
+    let (mut preview, initial) = shown(prefix(100));
+    let next_prefix = prefix(500);
+    none(preview.sync(stage(next_prefix.clone())));
+    assert_eq!(
+        preview.document_request_generation(),
+        Some(only(&initial).request_id)
+    );
+    let seek = preview.input(Input::SeekOutput(2));
+    let Command::Picture { target, frame, .. } = &only(&seek).command else {
+        unreachable!("a picture request")
+    };
+    assert_eq!(Some(target.clone()), next_prefix.target());
+    assert_eq!(*frame, PictureFrame::Index { index: 1 });
+
+    let verified = preview.sync(stage(full.clone()));
+    let Command::Picture { target, frame, .. } = &only(&verified).command else {
+        unreachable!("a verified picture request")
+    };
+    assert_eq!(Some(target.clone()), full.target());
+    assert_eq!(*frame, PictureFrame::Index { index: 1 });
+}
+
 fn document_subject(document: u64) -> Subject {
     let source = source("clip.obu");
     Subject::Document {
@@ -837,6 +870,19 @@ fn output_picture(generation: u64, frame: u64, interval: Option<MediaTime>) -> P
         }),
         ..header(generation, PictureOrigin::Document, frame, 2, 2)
     })
+}
+
+#[test]
+fn next_at_a_partial_boundary_preserves_the_picture_with_no_frame_count() {
+    let (mut preview, opening) = shown(document_subject(7));
+    preview.picture(output_picture(only(&opening).request_id, 0, None));
+    let next = only(&preview.input(Input::Step(1))).request_id;
+    none(preview.unavailable(next, PictureFailure::PartialCoverage, "Partial index."));
+    let view = preview.view();
+    assert_eq!(view.frame_text, "Output 1");
+    assert!(view.picture.is_some());
+    assert_eq!(view.frames, 0);
+    assert_eq!(view.seek_error, "Partial index.");
 }
 
 #[test]

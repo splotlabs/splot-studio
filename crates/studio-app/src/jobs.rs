@@ -169,7 +169,7 @@ pub fn list<'a>(state: &'a AppState, analysis: &'a Analysis) -> Vec<Job<'a>> {
             work: Work::Convert(item),
         })
     });
-    // The engine reads in the order asked, and ids only increase.
+    // The smallest pending id starts first. Other scans report their own progress.
     let first_read = analysis
         .documents()
         .iter()
@@ -257,7 +257,7 @@ fn conversion(state: &AppState, item: &Item) -> Option<State> {
 
 fn read(doc: &Document, first_read: Option<u64>) -> Option<State> {
     Some(match doc.phase() {
-        Phase::Opening if Some(doc.id()) == first_read => State::Running,
+        Phase::Opening if Some(doc.id()) == first_read || doc.summary().is_some() => State::Running,
         Phase::Opening => State::Queued,
         Phase::Cancelling => State::Cancelling,
         Phase::Open(summary) => match &summary.outcome {
@@ -268,6 +268,7 @@ fn read(doc: &Document, first_read: Option<u64>) -> Option<State> {
                 ProblemKind::Malformed | ProblemKind::Unsupported => State::Stopped,
             },
             ScanOutcome::Complete | ScanOutcome::Damaged { .. } => State::Completed,
+            ScanOutcome::Scanning => State::Running,
         },
         Phase::Failed { by, .. } => match by {
             ReadEnd::Failure => State::Failed,

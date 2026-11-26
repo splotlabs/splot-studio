@@ -78,7 +78,7 @@ fn opens(effects: &[Effect]) -> Vec<u64> {
     commands(effects)
         .iter()
         .filter_map(|c| match c {
-            Command::AnalysisOpen { document, .. } => Some(*document),
+            Command::AnalysisOpenProgressive { document, .. } => Some(*document),
             _ => None,
         })
         .collect()
@@ -362,7 +362,7 @@ fn a_cancelled_read_keeps_the_document_and_what_it_read() {
         [
             Command::AnalysisCancelValidation { document: 1, validation: id },
             Command::AnalysisClose { document: 1 },
-            Command::AnalysisOpen { document: 2, .. }
+            Command::AnalysisOpenProgressive { document: 2, .. }
         ] if *id == validation
     ));
     engine.settle(&mut analysis, effects);
