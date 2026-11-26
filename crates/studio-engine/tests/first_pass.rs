@@ -258,10 +258,10 @@ fn missing_last_cost(original: &[u8]) -> Result<(Vec<u8>, String), Box<dyn Error
     assert_eq!(usize::try_from(frames), Ok(FRAMES));
     let mut incomplete = original[..original.len() - 32 - 8].to_vec();
     incomplete[12..16].copy_from_slice(&(frames - 1).to_le_bytes());
-    let bytes = Sha256::digest(&incomplete);
-    incomplete.extend_from_slice(&bytes);
+    let checksum = Sha256::digest(&incomplete);
+    incomplete.extend_from_slice(&checksum);
     let mut digest = String::new();
-    for byte in bytes {
+    for byte in Sha256::digest(&incomplete) {
         write!(digest, "{byte:02x}")?;
     }
     Ok((incomplete, digest))
@@ -321,7 +321,11 @@ fn wrong_or_incomplete_passes_fail_before_opening_output() -> TestResult {
     fs::write(&path, incomplete)?;
     let mut incomplete = final_job.clone();
     incomplete.pass_digest = Some(digest);
-    pass_error(incomplete);
+    refused(
+        incomplete,
+        FailureCode::InvalidSettings,
+        Some("pass_artifact: The artifact has fewer frame entries than the source."),
+    );
     fs::write(&path, original)?;
 
     // Restore the modification time to isolate the content check from the fingerprint.
