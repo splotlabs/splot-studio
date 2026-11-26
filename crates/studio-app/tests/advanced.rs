@@ -5,6 +5,9 @@
 //! The software renderer needs no display. Build the sibling engine first
 //! with `cargo build -p studio-engine` in the same profile.
 
+#[path = "advanced/coverage.rs"]
+mod coverage;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -391,6 +394,8 @@ fn advanced_edits_and_submits_the_displayed_policy() {
     rig.until("the option catalog", || !keys(window).is_empty());
     assert!(simple != rig.pixels(), "The window did not show Advanced.");
     check_native_width(&rig);
+    coverage::check_catalog(&rig).unwrap_or_else(|error| unreachable!("{error}"));
+    coverage::check_explicit_values(&rig);
 
     change_key_interval(&rig);
     check_context_edits(&rig);

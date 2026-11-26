@@ -257,6 +257,9 @@ fn effective(
 }
 
 #[cfg(test)]
+mod coverage;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
