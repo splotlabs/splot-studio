@@ -6,7 +6,7 @@
 //! phase, [`render_counters`] for progress ticks.
 
 mod analysis;
-mod blocks;
+pub(crate) mod blocks;
 mod evidence;
 pub(crate) mod layers;
 mod references;

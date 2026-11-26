@@ -326,6 +326,7 @@ pub fn new_window() -> Result<AppWindow, slint::PlatformError> {
 pub fn bind_analysis(window: &AppWindow, send: impl Fn(analysis::Input) + Clone + 'static) {
     use analysis::{Input, Step};
     render::timeline::bind(window, send.clone());
+    render::blocks::bind(window, send.clone());
     let global = window.global::<Analysis>();
     let step = |step: NavStep| match step {
         // The window sends no `None`; treat it as no movement.
@@ -376,15 +377,6 @@ pub fn bind_analysis(window: &AppWindow, send: impl Fn(analysis::Input) + Clone 
         move || send(Input::StopReferences)
     });
     references.on_follow(on(Input::FollowReference));
-    let blocks = window.global::<Blocks>();
-    blocks.on_inspect({
-        let send = send.clone();
-        move || send(Input::InspectBlocks)
-    });
-    blocks.on_cancel({
-        let send = send.clone();
-        move || send(Input::StopBlocks)
-    });
     global.on_evidence_view(on(Input::EvidenceView));
     global.on_evidence_severity(on(Input::EvidenceSeverity));
     global.on_evidence_layer(on(Input::EvidenceLayer));

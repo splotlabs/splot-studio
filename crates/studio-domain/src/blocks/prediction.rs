@@ -152,7 +152,7 @@ pub enum BlockMotion {
     Inter {
         /// Base vectors in predictor order.
         vectors: [Option<BlockVector>; 2],
-        /// Affine models in native AV2 WarpParams units.
+        /// Affine models in native AV2 `WarpParams` units.
         warp: [Option<[i32; 6]>; 2],
         /// Subblock refinement planned by the native predictor.
         refinement: Option<BlockRefinement>,

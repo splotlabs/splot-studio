@@ -146,6 +146,9 @@ fn feed(
             Err(_) if cancelled() => break,
             Err(error) => return Err(read_failed(error)),
         };
+        if cancelled() {
+            break;
+        }
         let Some(unit) = unit else {
             break;
         };
@@ -283,4 +286,63 @@ fn decode_failed(error: DecodeError) -> Refusal {
         _ => AnalysisFailure::Unsupported,
     };
     Refusal::new(code, format!("Cannot decode the replay unit. {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use studio_domain::blocks::{MAX_BLOCK_BYTES, MAX_BLOCK_RECORDS};
+    use studio_domain::layers::LayerDecodeSelection;
+
+    use super::*;
+
+    struct Interrupt<'a> {
+        source: &'a [u8],
+        flag: &'a AtomicBool,
+    }
+
+    impl Read for Interrupt<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let count = self.source.read(buffer)?;
+            self.flag.store(true, Ordering::SeqCst);
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn cancellation_during_read_stops_before_decoder_submission() -> Result<(), String> {
+        let source =
+            include_bytes!("../../../tests/inspect/fixtures/syn-2tile-zone1-edge-128x64-q192.ivf");
+        let requested = Arc::new(AtomicBool::new(false));
+        let input = Interrupt {
+            source,
+            flag: &requested,
+        };
+        let query = BlockQuery {
+            coded_offset: 60,
+            selection: LayerDecodeSelection::Default,
+            kind: BlockEvidenceKind::Structure,
+            region: None,
+            max_events: MAX_BLOCK_RECORDS,
+            max_bytes: MAX_BLOCK_BYTES,
+        };
+        let evidence = replay(
+            input,
+            source.len() as u64,
+            false,
+            query,
+            Cancellation {
+                stopped: Arc::default(),
+                requested: Arc::clone(&requested),
+            },
+        )
+        .map_err(|error| error.message)?;
+        assert_eq!(evidence.coverage, BlockCoverage::Cancelled);
+        assert_eq!(evidence.replayed_through, 0);
+        assert!(evidence.records.is_empty());
+        Ok(())
+    }
 }

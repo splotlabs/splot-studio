@@ -3,14 +3,24 @@
 
 //! Presents the bounded decoder records for the selected coded frame.
 
+use slint::ComponentHandle;
 use studio_domain::blocks::{
     BlockCoverage, BlockData, BlockMotion, BlockPrediction, BlockRecord, BlockRect, BlockTree,
     BlockVector, IntraPredictor,
 };
 
 use super::{model, references::output_text};
-use crate::analysis::{Document, blocks::TAB};
-use crate::ui::{BlockTableRow, Blocks};
+use crate::analysis::{Document, Input, blocks::TAB};
+use crate::ui::{AppWindow, BlockTableRow, Blocks};
+
+pub(crate) fn bind(window: &AppWindow, send: impl Fn(Input) + Clone + 'static) {
+    let blocks = window.global::<Blocks>();
+    blocks.on_inspect({
+        let send = send.clone();
+        move || send(Input::InspectBlocks)
+    });
+    blocks.on_cancel(move || send(Input::StopBlocks));
+}
 
 pub(super) fn render_document(view: &Blocks<'_>, document: Option<&Document>) {
     let document = document.filter(|doc| doc.evidence.tab == TAB && !doc.layers.shown);
@@ -73,11 +83,9 @@ pub(super) fn render_document(view: &Blocks<'_>, document: Option<&Document>) {
         })
     });
     view.set_context(context.unwrap_or_default().into());
-    view.set_rows(model(
-        evidence
-            .map(|evidence| evidence.records.iter().map(row).collect())
-            .unwrap_or_default(),
-    ));
+    view.set_rows(model(evidence.map_or_default(|evidence| {
+        evidence.records.iter().map(row).collect()
+    })));
 }
 
 fn row(record: &BlockRecord) -> BlockTableRow {
