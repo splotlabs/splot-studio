@@ -3,13 +3,13 @@
 
 //! The worker session: framed commands in, framed events out.
 //!
-//! Three threads, and a fourth for live pictures. The caller's thread
-//! reads commands and never runs codec work, so `Cancel` is seen while the
-//! encoder is busy. One job thread runs the single job. One writer thread
-//! owns the output stream, so frames never interleave and a peer that stops
-//! reading blocks only the writer: the job only ever replaces a progress
-//! slot or appends one of its few stage and terminal events, and neither of
-//! those is dropped. With `Start.live`, the [`crate::live`] thread decodes
+//! The caller's thread reads commands and never runs codec work, so it can
+//! read `Cancel` while the encoder is busy. One thread resolves option
+//! queries and one job thread runs the single job. One writer thread
+//! owns the output stream so frames never interleave. A peer that stops
+//! reading can block command replies. The job can still replace the progress
+//! slot or append a stage or terminal event. With `Start.live`, the
+//! [`crate::live`] thread decodes
 //! the packets the job has written and replaces a one-picture slot, which
 //! the writer empties only when no event is waiting; the job hands it
 //! packets without ever waiting, and the thread ends with the job.
@@ -35,13 +35,14 @@ use std::io::{Read, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, Scope, ScopedJoinHandle};
 use std::time::{Duration, Instant};
 
 use splot_encode::CancelToken;
-use studio_domain::job::{Failure, FailureCode, JobSpec};
-use studio_domain::options::OPTIONS_SCHEMA_VERSION;
+use studio_domain::job::{Failure, FailureCode, JobSpec, SourceFacts};
+use studio_domain::options::{OPTIONS_SCHEMA_VERSION, OptionRequest};
 use studio_domain::preview::{
     MAX_PICTURE_HEIGHT, MAX_PICTURE_WIDTH, PictureBox, PictureFailure, PictureHeader,
 };
@@ -83,8 +84,9 @@ pub enum SessionError {
 }
 
 /// Serves commands from `input` until it ends, then waits for a running job
-/// to reach its terminal event (the end of input cancels it) and for every
-/// queued event to be written.
+/// to reach its terminal event (the end of input cancels it). It also waits
+/// for the option resolver to finish accepted requests and for the writer to
+/// send queued events.
 ///
 /// Every frame gets one reply, echoing its `request_id` (0 when the frame
 /// carries none), except `Start`, which is answered by its job's events, all
@@ -107,7 +109,15 @@ pub fn run(input: &mut impl Read, output: impl Write + Send) -> Result<(), Sessi
     let outbox = Outbox::default();
     thread::scope(|scope| {
         let writer = scope.spawn(|| outbox.write_all(output));
-        let (read, forced) = serve(input, &outbox, scope);
+        let (requests, pending) = sync_channel(1);
+        let replies = &outbox;
+        let resolver = scope.spawn(move || resolve_options(pending, replies));
+        let (read, forced) = serve(input, &outbox, scope, &requests);
+        drop(requests);
+        if !forced {
+            // Drain accepted queries before the writer closes.
+            let _ = resolver.join();
+        }
         outbox.close();
         let written = writer
             .join()
@@ -137,6 +147,7 @@ fn serve<'scope>(
     input: &mut impl Read,
     outbox: &'scope Outbox,
     scope: &'scope Scope<'scope, '_>,
+    requests: &SyncSender<Resolution>,
 ) -> (Result<(), ProtocolError>, bool) {
     let mut job: Option<ScopedJoinHandle<'scope, ()>> = None;
     let result = loop {
@@ -193,15 +204,26 @@ fn serve<'scope>(
                 first,
                 count,
             } => {
-                let event = match options::resolve(schema, &source, &settings, first, count) {
-                    Ok((total, values)) => Event::OptionsResolved {
-                        first,
-                        total,
-                        values,
-                    },
-                    Err(error) => Event::OptionsFailed { error },
+                let request = Resolution {
+                    id,
+                    schema,
+                    source,
+                    settings,
+                    first,
+                    count,
                 };
-                outbox.reply_options(id, event);
+                if let Err(error) = requests.try_send(request) {
+                    let event = match error {
+                        TrySendError::Full(_) => {
+                            refusal(ErrorCode::Busy, "Wait for a pending encoder option reply.")
+                        }
+                        TrySendError::Disconnected(_) => refusal(
+                            ErrorCode::WrongState,
+                            "The encoder option resolver stopped.",
+                        ),
+                    };
+                    outbox.reply(id, event);
+                }
             }
             // A probe runs here, in order with the other replies, bounded by
             // the media tools' timeout; the end of input is seen after it.
@@ -278,6 +300,45 @@ fn serve<'scope>(
         let _ = handle.join();
     }
     (result, false)
+}
+
+struct Resolution {
+    id: u64,
+    schema: u32,
+    source: Box<SourceFacts>,
+    settings: OptionRequest,
+    first: u32,
+    count: u32,
+}
+
+fn resolve_options(pending: Receiver<Resolution>, outbox: &Outbox) {
+    for request in pending {
+        let Resolution {
+            id,
+            schema,
+            source,
+            settings,
+            first,
+            count,
+        } = request;
+        let event = catch_unwind(AssertUnwindSafe(|| {
+            match options::resolve(schema, &source, &settings, first, count) {
+                Ok((total, values)) => Event::OptionsResolved {
+                    first,
+                    total,
+                    values,
+                },
+                Err(error) => Event::OptionsFailed { error },
+            }
+        }))
+        .unwrap_or_else(|_| {
+            refusal(
+                ErrorCode::WrongState,
+                "The encoder option query stopped unexpectedly.",
+            )
+        });
+        outbox.reply_options(id, event);
+    }
 }
 
 fn start<'scope>(

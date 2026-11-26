@@ -143,6 +143,8 @@ pub enum Command {
         count: u32,
     },
     /// Job worker only. Validates settings and lists their effective values.
+    /// The reply can arrive after replies to later commands. The worker
+    /// returns [`ErrorCode::Busy`] if one request is already waiting.
     ResolveOptions {
         /// The schema version from the handshake.
         schema: u32,
@@ -299,6 +301,8 @@ pub enum ErrorCode {
     Malformed,
     /// The reply exceeds the control message byte limit.
     PayloadLimit,
+    /// The encoder option resolver's one waiting slot is full.
+    Busy,
     /// A job is already running, there is none to cancel, or this kind of
     /// engine process does not serve the command.
     WrongState,
