@@ -127,14 +127,17 @@ impl Analysis {
             return;
         };
         let selection = doc.layer_decode_selection();
-        if let Some(place) = doc.history.get_mut(doc.at)
-            && (doc.evidence.tab == TAB || place.reference.is_some())
-        {
-            place.reference = Some(History {
-                view,
-                filter: doc.filter,
-                selection,
-            });
+        if let Some(place) = doc.history.get_mut(doc.at) {
+            if let Some(block) = &mut place.block {
+                block.view = view;
+            }
+            if doc.evidence.tab == TAB || place.reference.is_some() {
+                place.reference = Some(History {
+                    view,
+                    filter: doc.filter,
+                    selection,
+                });
+            }
         }
     }
 

@@ -28,6 +28,7 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
         analysis.overlay(),
     );
     super::timeline::render(window, analysis);
+    super::block_motion::render(window, analysis);
     super::blocks::render_document(&window.global::<crate::ui::Blocks>(), analysis.shown());
     super::layers::render(window, analysis.shown());
     let global = window.global::<Global>();

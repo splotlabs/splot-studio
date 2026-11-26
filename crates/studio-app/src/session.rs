@@ -459,7 +459,10 @@ impl Session {
         let source = self
             .analysis
             .shown()
-            .filter(|_| self.state.workspace() == Workspace::Analyze)
+            .filter(|_| {
+                self.state.workspace() == Workspace::Analyze
+                    && self.analysis.motion_preview_position().is_some()
+            })
             .and_then(|doc| {
                 let (frame, index) = doc.reference_preview_picture()?;
                 let target = document_subject(doc)?.target()?;
@@ -505,6 +508,8 @@ impl Session {
         if !effects.is_empty() {
             self.send_inspect(effects);
         }
+        self.analysis.discard_other_motion_preview();
+        self.sync_reference_preview();
     }
 
     /// Applies an action for the displayed block overlay.
@@ -567,7 +572,10 @@ impl Session {
         }
         if matches!(
             input,
-            analysis::Input::FollowReference(_) | analysis::Input::Back | analysis::Input::Forward
+            analysis::Input::FollowReference(_)
+                | analysis::Input::FollowBlockReference(_)
+                | analysis::Input::Back
+                | analysis::Input::Forward
         ) {
             let view = self
                 .analysis

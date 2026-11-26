@@ -3,12 +3,146 @@
 
 //! Numerical prediction and motion facts for the selected coding block.
 
+use slint::ComponentHandle;
 use studio_domain::blocks::{
     BlockBlend, BlockMotion, BlockPrediction, BlockRect, BlockReference, BlockRefinement,
     BlockVector, IntraAngleDelta, IntraPredictor,
 };
 
-use crate::ui::PredictionFact;
+use super::model;
+use crate::analysis::{Analysis, Input, SelectedMotion};
+use crate::ui::{AppWindow, BlockMotionView, PredictionFact, PredictorRow};
+
+pub(crate) fn bind(window: &AppWindow, send: impl Fn(Input) + Clone + 'static) {
+    let motion = window.global::<BlockMotionView>();
+    motion.on_inspect_references({
+        let send = send.clone();
+        move || send(Input::InspectBlockReferences)
+    });
+    motion.on_preview_reference({
+        let send = send.clone();
+        move |index| send(Input::PreviewBlockReference(index))
+    });
+    motion.on_follow_reference({
+        let send = send.clone();
+        move |index| send(Input::FollowBlockReference(index))
+    });
+    motion.on_set_overlay(move |show| send(Input::ShowBlockMotion(show)));
+}
+
+pub(super) fn render(window: &AppWindow, analysis: &Analysis) {
+    let view = window.global::<BlockMotionView>();
+    let selected = analysis.selected_motion();
+    view.set_active(selected.is_some());
+    view.set_show_overlay(analysis.show_motion());
+    let Some(selected) = selected else {
+        view.set_facts(model(Vec::new()));
+        view.set_predictors(model(Vec::new()));
+        view.set_can_inspect_references(false);
+        view.set_reference_status("".into());
+        view.set_can_show_overlay(false);
+        return;
+    };
+    view.set_facts(model(facts(selected.prediction, selected.motion)));
+    view.set_predictors(model(predictors(&selected)));
+    view.set_can_show_overlay(selected.motion.is_some());
+    let has_frame = matches!(selected.prediction, Some(BlockPrediction::Inter { references, .. })
+        if references.iter().any(|reference| matches!(reference, Some(BlockReference::Frame { .. }))));
+    let references = &selected.document.references;
+    let need_references = has_frame && selected.references.is_none();
+    view.set_can_inspect_references(need_references && !references.busy());
+    let message = if need_references && references.busy() {
+        "Reading reference slots…"
+    } else if need_references {
+        references
+            .notice()
+            .unwrap_or("Read the coded frame's input slots to locate its reference pictures.")
+    } else {
+        selected.document.reference_preview_notice().unwrap_or("")
+    };
+    view.set_reference_status(message.into());
+}
+
+fn predictors(selected: &SelectedMotion<'_>) -> Vec<PredictorRow> {
+    let Some(BlockPrediction::Inter {
+        references,
+        differences,
+        ..
+    }) = selected.prediction
+    else {
+        return Vec::new();
+    };
+    let (vectors, warp) = match selected.motion {
+        Some(BlockMotion::Inter { vectors, warp, .. }) => (vectors, warp),
+        _ => ([None; 2], [None; 2]),
+    };
+    references
+        .iter()
+        .enumerate()
+        .filter_map(|(position, reference)| {
+            let reference = (*reference)?;
+            let mut detail = Vec::new();
+            let label = match reference {
+                BlockReference::Frame {
+                    list_index,
+                    slot,
+                    scaled,
+                } => {
+                    let scale = match scaled {
+                        Some(true) => "Scaled reference",
+                        Some(false) => "Unit scale",
+                        None => "Scale unavailable",
+                    };
+                    detail.push(scale.to_owned());
+                    format!("Reference {list_index} · slot {slot}")
+                }
+                BlockReference::Tip => {
+                    detail
+                        .push("Synthetic reference. No single coded picture to follow.".to_owned());
+                    "TIP".to_owned()
+                }
+            };
+            let target = selected
+                .retained_reference(position)
+                .map(|(_, frame)| frame);
+            if let Some(frame) = target {
+                let layers = frame.layers;
+                detail.push(format!(
+                    "Coded byte {}. Layer X{}/M{}/T{}. {} × {} luma samples",
+                    frame.coded_offset,
+                    layers.extended,
+                    layers.embedded,
+                    layers.temporal,
+                    frame.width,
+                    frame.height
+                ));
+            } else if selected.references.is_some()
+                && matches!(reference, BlockReference::Frame { .. })
+            {
+                detail.push("Retained picture identity unavailable".to_owned());
+            }
+            detail.push(match differences[position] {
+                Some(vector) => format!("Signaled difference. {}", vector_text(vector)),
+                None => "Signaled difference unused".to_owned(),
+            });
+            detail.push(match vectors[position] {
+                Some(vector) => format!("Resolved base vector. {}", vector_text(vector)),
+                None => "Resolved base vector unavailable".to_owned(),
+            });
+            if let Some(model) = warp[position] {
+                detail.push(format!(
+                    "Resolved affine model {model:?} in AV2 WarpParams units"
+                ));
+            }
+            Some(PredictorRow {
+                position: i32::try_from(position).ok()?,
+                label: label.into(),
+                detail: detail.join(". ").into(),
+                available: target.is_some(),
+            })
+        })
+        .collect()
+}
 
 pub(super) fn facts(
     prediction: Option<&BlockPrediction>,
