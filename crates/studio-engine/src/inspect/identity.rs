@@ -386,9 +386,8 @@ impl IdentityIndex {
             };
             let offset = obu.offset.get();
             let kind = obu.header.obu_type;
-            let mut state = self.state();
-            if kind == ObuType::TemporalDelimiter {
-                state.append(IdentityKind::Temporal, [offset, 0, 0, 0]);
+            let delimiter = kind == ObuType::TemporalDelimiter;
+            if delimiter {
                 access = is_random_access_point(&unit.bytes[prefix..]);
             }
             let marked = access
@@ -398,6 +397,10 @@ impl IdentityIndex {
                 );
             access &= !marked;
             let bytes = u64::from(obu.size);
+            let mut state = self.state();
+            if delimiter {
+                state.append(IdentityKind::Temporal, [offset, 0, 0, 0]);
+            }
             let result = state.timeline.obu(offset, bytes, pts, ambiguous, marked);
             state.timeline_result(result);
             prefix = usize::try_from(offset - unit.offset.get() + bytes)

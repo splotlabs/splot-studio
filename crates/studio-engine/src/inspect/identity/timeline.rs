@@ -78,7 +78,7 @@ impl TimelineIndex {
     }
 
     pub(super) fn frame(&mut self, offset: u64) -> io::Result<()> {
-        let (_, obu) = self.claim(offset, CODED_COUNTED)?;
+        let obu = self.claim(offset, CODED_COUNTED)?;
         self.budget(Table::<4>::BYTES)?;
         // The native observer visits coded frames in file order.
         self.coded
@@ -86,7 +86,7 @@ impl TimelineIndex {
     }
 
     pub(super) fn continuation(&mut self, coded: u64, offset: u64) -> io::Result<()> {
-        let (_, obu) = self.claim(offset, CODED_COUNTED)?;
+        let obu = self.claim(offset, CODED_COUNTED)?;
         let ordinal = self.coded_ordinal(coded)?;
         let mut record = self.coded.rows.at(ordinal)?;
         record[1] += obu[1];
@@ -100,7 +100,7 @@ impl TimelineIndex {
         interval: Option<(u64, u64)>,
     ) -> io::Result<()> {
         self.budget(Table::<6>::BYTES)?;
-        let (_, obu) = self.claim(showing, DISPLAY_COUNTED)?;
+        let obu = self.claim(showing, DISPLAY_COUNTED)?;
         let ordinal = self.coded_ordinal(coded)?;
         let mut coded = self.coded.rows.at(ordinal)?;
         if coded[2] == 0 {
@@ -118,7 +118,7 @@ impl TimelineIndex {
         Ok(())
     }
 
-    fn claim(&mut self, offset: u64, flag: u64) -> io::Result<(u64, [u64; 4])> {
+    fn claim(&mut self, offset: u64, flag: u64) -> io::Result<[u64; 4]> {
         let row = self.obus.lower_bound(|obu| obu[0] < offset)?;
         if row == self.obus.count {
             return Err(missing());
@@ -137,7 +137,7 @@ impl TimelineIndex {
                 self.assigned_obu_bytes += obu[1];
             }
         }
-        Ok((row, obu))
+        Ok(obu)
     }
 
     fn coded_ordinal(&mut self, offset: u64) -> io::Result<u64> {
@@ -515,9 +515,7 @@ impl IdentityIndex {
                         state.complete() && state.timeline.clock(clock) == TimelineClock::Ivf
                     })
                     .ok_or_else(|| {
-                        invalid(
-                            "Time search needs a complete IVF clock without timestamp decreases.",
-                        )
+                        invalid("Time search needs a complete, unambiguous IVF clock.")
                     })?;
                 let ticks = clock
                     .target_tick(time)
