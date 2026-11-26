@@ -270,25 +270,15 @@ pub(crate) struct HashReader<R> {
     inner: R,
     hash: Sha256,
     bytes: u64,
-    limit: u64,
 }
 
 impl<R> HashReader<R> {
-    pub(super) fn new(inner: R) -> Self {
-        Self::with_limit(inner, u64::MAX)
-    }
-
-    pub(crate) fn with_limit(inner: R, limit: u64) -> Self {
+    pub(crate) fn new(inner: R) -> Self {
         Self {
             inner,
             hash: Sha256::new(),
             bytes: 0,
-            limit,
         }
-    }
-
-    pub(crate) fn remaining(&self) -> u64 {
-        self.limit - self.bytes
     }
 
     pub(crate) fn finish(self) -> SourceDigest {
@@ -302,9 +292,8 @@ impl<R> HashReader<R> {
 impl<R: Read> Read for HashReader<R> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         let count = self.inner.read(buffer)?;
-        let hashed = count.min(usize::try_from(self.remaining()).unwrap_or(usize::MAX));
-        self.hash.update(&buffer[..hashed]);
-        self.bytes += hashed as u64;
+        self.hash.update(&buffer[..count]);
+        self.bytes += count as u64;
         Ok(count)
     }
 }

@@ -1084,25 +1084,28 @@ impl DocumentClock {
         time: Option<MediaTime>,
         interval: Option<MediaTime>,
     ) -> Duration {
-        if let Some((previous_unit, previous_time, previous_interval)) =
-            self.previous.replace((unit, time, interval))
-        {
-            let gap = previous_time
-                .zip(time)
-                // A PTS before the previous output is already due.
-                .map(|(start, end)| exact_elapsed(start, end).unwrap_or_default())
-                .or_else(|| {
-                    previous_interval.and_then(|step| {
+        let mut latest_time = time;
+        if let Some((previous_unit, previous_time, previous_interval)) = self.previous {
+            let gap = if let Some((start, end)) = previous_time.zip(time) {
+                // A reversed PTS is already due. Keep the last valid clock position.
+                exact_elapsed(start, end).unwrap_or_else(|| {
+                    latest_time = previous_time;
+                    Duration::ZERO
+                })
+            } else {
+                previous_interval
+                    .and_then(|step| {
                         if previous_unit == unit {
                             Some(Duration::ZERO)
                         } else {
                             exact_elapsed(MediaTime { num: 0, den: 1 }, step)
                         }
                     })
-                })
-                .unwrap_or(ASSUMED_INTERVAL);
+                    .unwrap_or(ASSUMED_INTERVAL)
+            };
             self.offset = self.offset.saturating_add(gap);
         }
+        self.previous = Some((unit, latest_time, interval));
         self.offset
     }
 }
@@ -1195,6 +1198,17 @@ fn out_of_range(index: u64, count: Option<u64>) -> Stopped {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reversed_pts_does_not_delay_later_pictures() {
+        let mut clock = DocumentClock::default();
+        for (unit, pts, due) in [(0, 0, 0), (1, 2, 2), (2, 1, 2), (3, 3, 3)] {
+            assert_eq!(
+                clock.advance(unit, Some(MediaTime { num: pts, den: 1 }), None),
+                Duration::from_secs(due)
+            );
+        }
+    }
 
     #[test]
     fn document_clock_uses_exact_pts_or_signaled_intervals() {
