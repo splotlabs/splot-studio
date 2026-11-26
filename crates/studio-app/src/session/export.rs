@@ -166,7 +166,11 @@ impl Session {
     }
 
     pub(super) fn advance_export(&mut self, now: Instant) {
-        if self.job.is_some() || self.export.is_some() || self.shut_down {
+        if self.job.is_some()
+            || self.encode_save.is_some()
+            || self.export.is_some()
+            || self.shut_down
+        {
             return;
         }
         let Some(id) = self.exports.next_queued() else {
@@ -348,8 +352,11 @@ impl Session {
                 }
             }
             Event::ExportStage { stage } => {
-                if stage == ExportStage::Publishing || matches!(job.phase, Phase::Running(_)) {
-                    job.phase = Phase::Running(stage);
+                if !job.set_stage(stage) {
+                    self.fail_export(
+                        id,
+                        "The worker reported an unexpected export stage.".to_owned(),
+                    );
                 }
             }
             Event::ExportProgress { progress } => {

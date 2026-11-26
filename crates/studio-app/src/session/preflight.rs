@@ -312,6 +312,7 @@ impl Session {
             Err(error) => return self.journal_failed(id, &error.to_string(), now),
         };
         let post = Arc::clone(&self.post);
+        self.encode_save = Some(id);
         writer.submit_confirmed(bytes, move |result| {
             post(Route::Journal(id), Delivery::JournalSaved(result));
         });

@@ -131,17 +131,20 @@ fn kill_before_proceed(
     source_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     rig.session().export_start(vec![request], Instant::now());
-    let temporary = loop {
+    let (temporary, can_remove) = loop {
         let (route, delivery) = rig.rx.recv_timeout(ANSWER_TIMEOUT)?;
         let partial = match &delivery {
             Delivery::Event(event) => match &event.body {
-                studio_domain::protocol::Event::ExportPrepared { files } => Some(
-                    files
-                        .first()
-                        .ok_or("no temporary file")?
-                        .partial
-                        .to_path_buf()?,
-                ),
+                studio_domain::protocol::Event::ExportPrepared { files } => {
+                    let file = files.first().ok_or("no temporary file")?;
+                    let known = file.identity.as_ref().and_then(|id| id.created).is_some()
+                        && file
+                            .parent_identity
+                            .as_ref()
+                            .and_then(|id| id.created)
+                            .is_some();
+                    Some((file.partial.to_path_buf()?, known))
+                }
                 _ => None,
             },
             _ => None,
@@ -169,7 +172,7 @@ fn kill_before_proceed(
         rig.session().jobs().last().map(|job| job.state),
         Some(State::Interrupted)
     );
-    assert!(!temporary.exists());
+    assert_eq!(temporary.exists(), !can_remove);
     assert!(!destination.exists());
     assert!(fs::read(source_path)?.starts_with(b"DKIF"));
     Ok(())

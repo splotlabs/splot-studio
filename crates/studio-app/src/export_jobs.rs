@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use studio_domain::analysis::IvfHeaderFact;
 use studio_domain::export::{
-    ExportArtifact, ExportDurability, ExportLayer, ExportOutcome, ExportProgress, ExportRequest,
-    ExportSampleFormat, ExportSource as Source, ExportStage, ExportTemp,
+    ExportArtifact, ExportDurability, ExportLayer, ExportOutcome, ExportProgress, ExportRange,
+    ExportRequest, ExportSampleFormat, ExportSource as Source, ExportStage, ExportTemp,
 };
 use studio_domain::job::{Failure, FailureCode, WirePath};
 use studio_domain::preview::GrainPolicy;
@@ -164,6 +164,7 @@ impl ExportJob {
 
     pub(crate) fn prepared(&self, files: &[ExportTemp]) -> Result<(), String> {
         if !matches!(self.phase, Phase::Running(ExportStage::Checking))
+            || self.publication_possible
             || files.len() != self.request.format.destinations().count()
             || files.len() != self.temporary.len()
             || !self.temporary.iter().all(|file| files.contains(file))
@@ -175,11 +176,37 @@ impl ExportJob {
         Ok(())
     }
 
+    pub(crate) fn set_stage(&mut self, stage: ExportStage) -> bool {
+        use ExportStage::{Checking, Decoding, Publishing, Verifying};
+        let allowed = match self.phase {
+            Phase::Running(current) => {
+                current == stage
+                    || self.publication_possible
+                        && matches!(
+                            (current, stage),
+                            (Checking, Decoding) | (Decoding, Verifying) | (Verifying, Publishing)
+                        )
+            }
+            Phase::Cancelling => {
+                if stage != Publishing {
+                    return true;
+                }
+                self.publication_possible
+            }
+            _ => false,
+        };
+        if allowed {
+            self.phase = Phase::Running(stage);
+        }
+        allowed
+    }
+
     pub(crate) fn published(&mut self, file: ExportArtifact) -> bool {
-        if !self
-            .temporary
-            .iter()
-            .any(|temp| temp.kind == file.kind && temp.destination == file.path)
+        if self.phase != Phase::Running(ExportStage::Publishing)
+            || !self
+                .temporary
+                .iter()
+                .any(|temp| temp.kind == file.kind && temp.destination == file.path)
             || self.published.iter().any(|known| known.kind == file.kind)
         {
             return false;
@@ -199,13 +226,16 @@ impl ExportJob {
             && self.published.iter().all(|file| reported.contains(file));
         let complete = match &outcome {
             ExportOutcome::Completed { frames, .. } => {
-                *frames > 0
+                self.frames_match(*frames)
                     && reported.len() == self.request.format.destinations().count()
                     && reported
                         .iter()
                         .all(|file| file.durability == ExportDurability::Confirmed)
             }
-            _ => true,
+            ExportOutcome::Partial { frames, .. } => {
+                !reported.is_empty() && self.frames_match(*frames)
+            }
+            ExportOutcome::Failed { .. } | ExportOutcome::Cancelled => true,
         };
         if same_files && complete {
             self.phase = Phase::Finished(outcome);
@@ -216,6 +246,23 @@ impl ExportJob {
         }
     }
 
+    fn frames_match(&self, frames: u64) -> bool {
+        if frames == 0 {
+            return false;
+        }
+        let ExportRange::Inclusive { first, last } = self.request.range else {
+            return true;
+        };
+        let count = last
+            .checked_sub(first)
+            .and_then(|difference| difference.checked_add(1));
+        if self.request.layer.is_some() {
+            count.is_none_or(|count| frames <= count)
+        } else {
+            count == Some(frames)
+        }
+    }
+
     pub(crate) fn reveal_path(&self) -> Option<PathBuf> {
         self.published.first()?.path.to_path_buf().ok()
     }
@@ -223,6 +270,30 @@ impl ExportJob {
     pub(crate) fn cleanup_partials(&mut self) {
         let format = &self.request.format;
         let source = &self.request.source.path;
+        if self.publication_possible && matches!(self.phase, Phase::Interrupted(_)) {
+            for file in &self.temporary {
+                if self
+                    .published
+                    .iter()
+                    .any(|artifact| artifact.kind == file.kind)
+                    || !format
+                        .destinations()
+                        .any(|(kind, path)| file.kind == kind && &file.destination == path)
+                {
+                    continue;
+                }
+                if let Ok(path) = file.destination.to_path_buf()
+                    && let Some(metadata) = identified_output(file, &path)
+                {
+                    self.published.push(ExportArtifact {
+                        kind: file.kind,
+                        path: file.destination.clone(),
+                        bytes: metadata.len(),
+                        durability: ExportDurability::Unconfirmed,
+                    });
+                }
+            }
+        }
         self.temporary.retain(|file| {
             if &file.partial == source
                 || !format.destinations().any(|(kind, destination)| {
@@ -258,30 +329,32 @@ fn remove_export_partial(file: &ExportTemp, partial: &Path, destination: &Path) 
     if !matches!(planned, PartialFate::Pending(_)) {
         return planned;
     }
-    if file
-        .identity
-        .as_ref()
-        .and_then(|identity| identity.created)
-        .is_none()
-        || file
-            .parent_identity
-            .as_ref()
-            .and_then(|identity| identity.created)
-            .is_none()
-        || file.identity != temp_identity(fs::symlink_metadata(partial).ok())
-        || file.parent_identity
-            != temp_identity(
-                partial
-                    .parent()
-                    .and_then(|parent| fs::metadata(parent).ok()),
-            )
-    {
+    if identified_output(file, partial).is_none() {
         return PartialFate::Kept {
             path: partial.to_path_buf(),
             reason: "Studio could not confirm the identity of the file or its folder.".to_owned(),
         };
     }
     recovery::remove_partial(partial, destination)
+}
+
+fn identified_output(file: &ExportTemp, path: &Path) -> Option<fs::Metadata> {
+    let identity = file.identity.as_ref()?;
+    let parent_identity = file.parent_identity.as_ref()?;
+    identity.created?;
+    parent_identity.created?;
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let parent = fs::metadata(path.parent()?).ok()?;
+    if temp_identity(Some(metadata.clone())).as_ref() == Some(identity)
+        && temp_identity(Some(parent)).as_ref() == Some(parent_identity)
+    {
+        Some(metadata)
+    } else {
+        None
+    }
 }
 
 fn temp_identity(
@@ -311,6 +384,10 @@ pub struct ExportJobs {
 }
 
 impl ExportJobs {
+    pub(crate) fn is_new(&self) -> bool {
+        self.next_id == 0 && self.rows.is_empty()
+    }
+
     pub(crate) fn rows(&self) -> &[ExportJob] {
         &self.rows
     }
@@ -474,6 +551,45 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn invalid_terminal_counts_do_not_claim_completion() {
+        let scratch = Scratch::new("export-outcome");
+        let path = WirePath::from_path(&scratch.path("out.y4m"));
+        let mut request = request(ExportFormat::Y4m { path: path.clone() }, &scratch);
+        request.range = ExportRange::Inclusive { first: 4, last: 4 };
+        let mut job = ExportJob::queued(1, request);
+        job.phase = Phase::Running(ExportStage::Checking);
+        assert!(!job.set_stage(ExportStage::Decoding));
+        job.publication_possible = true;
+        assert!(job.set_stage(ExportStage::Decoding));
+        assert!(!job.set_stage(ExportStage::Publishing));
+        assert!(job.set_stage(ExportStage::Verifying));
+        assert!(job.set_stage(ExportStage::Publishing));
+        let failure = Failure {
+            code: FailureCode::Output,
+            message: "test error".to_owned(),
+        };
+        job.finish(ExportOutcome::Partial {
+            frames: 1,
+            files: Vec::new(),
+            failure,
+        });
+        assert_eq!(export(&job).state, State::Failed);
+
+        let file = ExportArtifact {
+            kind: ExportArtifactKind::Video,
+            path,
+            bytes: 100,
+            durability: ExportDurability::Confirmed,
+        };
+        job.published.push(file.clone());
+        job.finish(ExportOutcome::Completed {
+            frames: 2,
+            files: vec![file],
+        });
+        assert_eq!(export(&job).state, State::Partial);
+    }
+
     #[cfg(unix)]
     #[test]
     fn cleanup_path_check_accepts_native_file_names() -> Result<(), String> {
@@ -522,13 +638,9 @@ mod tests {
             &samples,
         ))?;
         job.prepared(&job.temporary)?;
-        fs::write(&layout, b"published layout")?;
-        assert!(job.published(ExportArtifact {
-            kind: ExportArtifactKind::Layout,
-            path: WirePath::from_path(&layout),
-            bytes: 16,
-            durability: ExportDurability::Confirmed,
-        }));
+        let layout_has_identity = identified_output(&job.temporary[0], &layout_partial).is_some();
+        job.publication_possible = true;
+        fs::hard_link(&layout_partial, &layout)?;
         let moved = scratch.path("moved");
         fs::rename(&samples_partial, &moved)?;
         fs::write(&samples_partial, b"a different file")?;
@@ -538,12 +650,20 @@ mod tests {
         restored.recover();
         restored.clean_up();
         let job = &restored.rows()[0];
-        assert_eq!(export(job).state, State::Partial);
-        assert!(!layout_partial.exists());
+        if layout_has_identity {
+            assert_eq!(export(job).state, State::Partial);
+            assert_eq!(job.published[0].durability, ExportDurability::Unconfirmed);
+        } else {
+            assert_eq!(export(job).state, State::Interrupted);
+            assert_eq!(job.published, []);
+        }
+        assert_eq!(layout_partial.exists(), !layout_has_identity);
         assert_eq!(fs::read(&samples_partial)?, b"a different file");
         assert_eq!(fs::read(&moved)?, b"raw temp");
-        assert_eq!(fs::read(&layout)?, b"published layout");
-        assert!(job.cleanup[0].contains("could not confirm the identity"));
+        assert_eq!(fs::read(&layout)?, b"layout temp");
+        assert!(job.cleanup.iter().any(
+            |line| line.contains("out.raw") && line.contains("could not confirm the identity")
+        ));
         Ok(())
     }
 }

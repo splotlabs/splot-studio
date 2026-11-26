@@ -164,6 +164,7 @@ pub struct Session {
     advanced: advanced::Advanced,
     preflight_queue: VecDeque<preflight::Request>,
     prepared: Option<(u64, JobSpec)>,
+    encode_save: Option<u64>,
     confirming: Option<(u64, usize)>,
     preview: Preview,
     /// The open inspection read whose playback panel is visible.
@@ -217,6 +218,7 @@ impl Session {
             advanced: advanced::Advanced::default(),
             preflight_queue: VecDeque::new(),
             prepared: None,
+            encode_save: None,
             confirming: None,
             preview: Preview::new(),
             playback_document: None,
@@ -375,7 +377,8 @@ impl Session {
             if !counters && !batch_policy {
                 self.state.refresh_destinations(&RealDisk);
             }
-            let worker_available = self.job.is_none() && self.export.is_none();
+            let worker_available =
+                self.job.is_none() && self.encode_save.is_none() && self.export.is_none();
             let update = self
                 .state
                 .apply_with_worker(intent, now, &RealDisk, worker_available);
@@ -709,17 +712,23 @@ impl Session {
             }
             Route::Job(id) => self.deliver_job(id, delivery, now),
             Route::Journal(id) => {
+                let Delivery::JournalSaved(result) = delivery else {
+                    return nothing;
+                };
+                if self.encode_save != Some(id) {
+                    return nothing;
+                }
+                self.encode_save = None;
                 if self
                     .prepared
                     .as_ref()
                     .is_none_or(|(current, _)| *current != id)
                 {
-                    return nothing;
+                    return self.dispatch(Intent::WorkerIdle, now);
                 }
-                match delivery {
-                    Delivery::JournalSaved(Ok(())) => self.start_prepared(id, now),
-                    Delivery::JournalSaved(Err(message)) => self.journal_failed(id, &message, now),
-                    _ => nothing,
+                match result {
+                    Ok(()) => self.start_prepared(id, now),
+                    Err(message) => self.journal_failed(id, &message, now),
                 }
             }
             Route::Advanced(generation) => self.deliver_advanced(generation, delivery),

@@ -74,7 +74,10 @@ pub struct Journal {
     #[serde(default)]
     pub view: JournalView,
     /// Queued and completed exports, absent before version 5.
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "crate::export_jobs::ExportJobs::is_new"
+    )]
     pub exports: crate::export_jobs::ExportJobs,
 }
 
