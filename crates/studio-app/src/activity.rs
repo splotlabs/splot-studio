@@ -305,6 +305,7 @@ impl Activity {
             | Event::AnalysisIdentityPage { .. }
             | Event::AnalysisTimeline { .. }
             | Event::AnalysisTimelineLocated { .. }
+            | Event::AnalysisReferencesReady { .. }
             | Event::BatchSettingsChecked
             | Event::BatchValidating { .. }
             | Event::BatchValidated { .. }

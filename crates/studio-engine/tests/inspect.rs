@@ -1411,3 +1411,86 @@ fn cancellation_targets_one_validation_request() -> TestResult {
     ));
     Ok(())
 }
+
+#[test]
+fn reference_replay_links_slots_to_coded_offsets_and_rejects_source_changes() -> TestResult {
+    use studio_domain::layers::LayerDecodeSelection;
+    use studio_domain::references::{ReferenceOrigin, ReferenceQuery, ReferenceSlotState};
+
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("references.ivf");
+    fs::write(
+        &path,
+        include_bytes!("inspect/fixtures/syn-bridge-celu-64x64.ivf"),
+    )?;
+    let mut inspect = Inspect::spawn()?;
+    let summary = inspect.open(1, &path)?;
+    let query = ReferenceQuery {
+        coded_offset: 85,
+        selection: LayerDecodeSelection::Default,
+        generation: 9,
+    };
+    let request = |query| Command::AnalysisReferences { document: 1, query };
+    let Event::AnalysisReferencesReady {
+        document: 1,
+        evidence,
+    } = inspect.ask(request(query))?
+    else {
+        return Err("Expected a reference snapshot.".into());
+    };
+    assert_eq!(evidence.query, query);
+    assert_eq!(evidence.frame.coded_offset, 85);
+    assert_eq!(evidence.frame.sequence_offset, 47);
+    assert!(!evidence.resets_sequence);
+    let [bridge] = evidence.dependencies.as_slice() else {
+        return Err("Expected one bridge reference.".into());
+    };
+    assert_eq!(bridge.origin, ReferenceOrigin::Bridge);
+    let Some(slot) = evidence.slots.get(usize::from(bridge.slot)) else {
+        return Err("Expected the bridge input slot.".into());
+    };
+    assert!(matches!(
+        slot.before,
+        ReferenceSlotState::Retained { frame, .. }
+            if frame.coded_offset == 71 && frame.width == 64 && frame.height == 64
+    ));
+    assert_eq!(
+        failure(&inspect.ask(request(ReferenceQuery {
+            coded_offset: 83,
+            ..query
+        }))?),
+        Some(AnalysisFailure::Unsupported)
+    );
+    assert_eq!(
+        failure(&inspect.ask(request(ReferenceQuery {
+            coded_offset: summary.fingerprint.len,
+            ..query
+        }))?),
+        Some(AnalysisFailure::InvalidRequest)
+    );
+    #[cfg(windows)]
+    {
+        let error = fs::write(&path, [])
+            .err()
+            .ok_or("A verified reader allowed a write.")?;
+        assert_eq!(error.raw_os_error(), Some(32)); // ERROR_SHARING_VIOLATION
+        assert!(matches!(
+            inspect.ask(Command::AnalysisClose { document: 1 })?,
+            Event::AnalysisClosed { document: 1 },
+        ));
+        fs::write(&path, [])?;
+    }
+    #[cfg(not(windows))]
+    {
+        fs::write(&path, [])?;
+        assert_eq!(
+            failure(&inspect.ask(request(query))?),
+            Some(AnalysisFailure::SourceChanged)
+        );
+    }
+    assert_eq!(
+        failure(&inspect.ask(request(query))?),
+        Some(AnalysisFailure::UnknownDocument)
+    );
+    Ok(())
+}

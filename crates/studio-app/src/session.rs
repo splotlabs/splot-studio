@@ -464,6 +464,9 @@ impl Session {
             self.playback_document = output.map(|_| document);
         }
         self.sync_preview();
+        if let Some((document, view)) = self.analysis.take_reference_view() {
+            self.preview.restore_history_view(document, view);
+        }
         if let Some((_, Some(index))) = navigation
             && let Some(output) = index.checked_add(1)
         {
@@ -508,6 +511,16 @@ impl Session {
                 outcome.ui.push(UiEffect::ShowLocateDialog);
             }
             return outcome;
+        }
+        if matches!(
+            input,
+            analysis::Input::FollowReference(_) | analysis::Input::Back | analysis::Input::Forward
+        ) {
+            let view = self
+                .analysis
+                .shown()
+                .and_then(|document| self.preview.history_view(document.id()));
+            self.analysis.save_reference_view(view);
         }
         let effects = self.analysis.input(input);
         self.send_inspect(effects);

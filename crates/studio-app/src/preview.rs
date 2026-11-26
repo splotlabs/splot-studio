@@ -47,6 +47,7 @@ mod viewer;
 
 use cache::Cache;
 pub use scene::{Scene, Subject, scene};
+pub(crate) use viewer::HistoryView;
 use viewer::Viewer;
 pub use viewer::{ViewerView, ZOOMS};
 

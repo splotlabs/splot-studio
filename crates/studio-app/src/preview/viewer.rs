@@ -15,6 +15,22 @@ use super::{Effect, Preview, Sent, StageView};
 /// The magnifications in the Analyze viewer. Zero represents Fit.
 pub const ZOOMS: [u8; 6] = [0, 1, 2, 4, 8, 16];
 
+/// The view of a picture in the current source and decode policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HistoryView {
+    output: Option<u64>,
+    options: PictureOptions,
+    zoom: u8,
+    origin: Option<(u32, u32)>,
+    info: Option<DocumentPictureInfo>,
+}
+
+impl HistoryView {
+    pub(crate) const fn output(self) -> Option<u64> {
+        self.output
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct Viewer {
     pub(super) options: PictureOptions,
@@ -112,6 +128,26 @@ impl Viewer {
 }
 
 impl Preview {
+    pub(crate) fn history_view(&self, document: u64) -> Option<HistoryView> {
+        (self.document_id() == Some(document)).then_some(HistoryView {
+            output: self.position,
+            options: self.viewer.options,
+            zoom: self.viewer.zoom,
+            origin: self.viewer.origin,
+            info: self.viewer.info,
+        })
+    }
+
+    pub(crate) fn restore_history_view(&mut self, document: u64, view: HistoryView) {
+        if self.document_id() == Some(document) && self.history_view(document) != Some(view) {
+            self.viewer.options = view.options;
+            self.viewer.zoom = view.zoom;
+            self.viewer.origin = view.origin;
+            self.viewer.info = view.info;
+            self.refresh_document_view();
+        }
+    }
+
     pub(super) fn choose_surface(&mut self, surface: PictureSurface) {
         if self.document_id().is_some() && self.viewer.options.surface != surface {
             self.viewer.options.surface = surface;

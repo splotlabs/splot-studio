@@ -106,6 +106,10 @@ codec is young.
   is unavailable, Studio gives the reason. Use **Copy Statistics** or **Save
   Statistics…** for exact values in the displayed range.
 
+- Select a coded frame and open **References** to inspect its input and refreshed buffer
+  slots. Use **Follow** on an available frame-level reference candidate. **Back** and
+  **Forward** restore the inspection. Studio replays the source to obtain this state.
+  The first indexed output appears when a verified timeline supplies that link.
 - Inspect a decoded picture in RGB or select an available Y, U, or V plane. Fit shows the whole
   picture. Use integer zoom to inspect individual samples. Select a sample with the pointer
   or enter its coordinates to read and copy its exact integer value. The viewer shows

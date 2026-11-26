@@ -1633,3 +1633,288 @@ fn resolve_timeline(
     let links = analysis.event(effects[0].request_id, timeline_reply(scan, selection));
     engine.settle(analysis, links);
 }
+
+#[test]
+fn reference_inspection_keeps_coded_identity_without_a_range_page() {
+    use studio_domain::timeline::{TimelineSelection, TimelineTarget, TimelineView};
+
+    let (mut analysis, engine) = opened(40);
+    let scan = start_timeline(&mut analysis);
+    let shown = TimelineSelection {
+        coded_ordinal: 7,
+        coded_offset: 19,
+        output_ordinal: Some(2),
+        showing_offset: Some(37),
+        time: None,
+    };
+    resolve_timeline(
+        &mut analysis,
+        &engine,
+        scan,
+        TimelineTarget::Output { index: 2 },
+        shown,
+    );
+    let effects = analysis.input(Input::EvidenceView(references::TAB));
+    engine.settle(&mut analysis, effects);
+    analysis.input(Input::TimelineRange {
+        view: TimelineView::Output,
+        first: 1,
+        limit: 2,
+        buckets: 1,
+    });
+    assert!(doc(&analysis).timeline().page().is_none());
+    assert_eq!(doc(&analysis).bytes().cursor, 37);
+
+    let inspection = analysis.input(Input::InspectReferences);
+    assert!(matches!(
+        commands(&inspection)[..],
+        [Command::AnalysisReferences { query, .. }] if query.coded_offset == 19
+    ));
+    let request = inspection[0].request_id;
+    let rebuild = analysis.input(Input::TimelineBuild);
+    assert!(matches!(
+        commands(&rebuild)[..],
+        [
+            Command::AnalysisCancelReferences { reference, .. },
+            Command::AnalysisIdentityScan { .. }
+        ] if *reference == request
+    ));
+    assert!(!doc(&analysis).references.busy());
+    assert_eq!(doc(&analysis).reference_offset(), Some(37));
+}
+
+#[test]
+fn reference_inspection_rejects_cancelled_and_mismatched_answers() {
+    let (mut analysis, engine) = opened(5);
+    let effects = analysis.input(Input::RowClicked(1));
+    engine.settle(&mut analysis, effects);
+    let effects = analysis.input(Input::EvidenceView(references::TAB));
+    engine.settle(&mut analysis, effects);
+
+    let (request, document, original) = inspect_reference(&mut analysis);
+    assert_eq!(original.coded_offset, 10);
+    let reply = |query| reference_reply(document, query);
+    let stop = analysis.input(Input::StopReferences);
+    assert!(stop.iter().any(|effect| matches!(
+        effect.command, Command::AnalysisCancelReferences { reference, .. } if reference == request
+    )));
+    assert_eq!(analysis.event(request, reply(original)), Vec::new());
+    assert!(doc(&analysis).references.evidence().is_none());
+
+    let (request, _, _) = inspect_reference(&mut analysis);
+    analysis.event(request, reply(original));
+    assert!(doc(&analysis).references.evidence().is_none());
+    assert!(!doc(&analysis).references.busy());
+
+    let (request, _, current) = inspect_reference(&mut analysis);
+    analysis.event(request, reply(current));
+    assert!(doc(&analysis).references.evidence().is_some());
+    let effects = analysis.input(Input::RowClicked(2));
+    engine.settle(&mut analysis, effects);
+    assert!(doc(&analysis).references.evidence().is_none());
+}
+
+#[test]
+fn following_a_reference_keeps_the_verified_index_while_its_page_loads() {
+    use studio_domain::timeline::{TimelineSelection, TimelineTarget, TimelineView};
+
+    let (mut analysis, engine) = opened(40);
+    let scan = analysis.input(Input::TimelineBuild)[0].request_id;
+    let mut finished = timeline_finished();
+    if let Event::AnalysisIdentityScanned { summary, .. } = &mut finished {
+        summary.matches_structure = true;
+    }
+    analysis.event(scan, finished);
+    let origin = TimelineSelection {
+        coded_ordinal: 7,
+        coded_offset: 19,
+        output_ordinal: Some(2),
+        showing_offset: Some(37),
+        time: None,
+    };
+    resolve_timeline(
+        &mut analysis,
+        &engine,
+        scan,
+        TimelineTarget::Output { index: 2 },
+        origin,
+    );
+    let effects = analysis.input(Input::EvidenceView(references::TAB));
+    engine.settle(&mut analysis, effects);
+    let (request, document, query) = inspect_reference(&mut analysis);
+    analysis.event(request, reference_reply(document, query));
+    analysis.input(Input::TimelineRange {
+        view: TimelineView::Output,
+        first: 1,
+        limit: 2,
+        buckets: 1,
+    });
+
+    assert!(doc(&analysis).timeline().page().is_none());
+    let effects = analysis.input(Input::FollowReference(0));
+    assert!(matches!(
+        commands(&effects)[..],
+        [Command::AnalysisTimelineLocate {
+            target: TimelineTarget::CodedOffset { offset: 10 },
+            ..
+        }]
+    ));
+    let referenced = TimelineSelection {
+        coded_ordinal: 4,
+        coded_offset: 10,
+        output_ordinal: Some(0),
+        showing_offset: Some(10),
+        time: None,
+    };
+    let links = analysis.event(effects[0].request_id, timeline_reply(scan, referenced));
+    engine.settle(&mut analysis, links);
+    assert_eq!(doc(&analysis).bytes().cursor, 10);
+    assert_eq!(analysis.take_timeline_picture(), Some((document, Some(0))));
+}
+
+#[test]
+fn opening_a_different_document_cancels_the_outgoing_reference_replay() {
+    let first = PathBuf::from("/media/clip.obu");
+    let second = PathBuf::from("/media/other.obu");
+    let (mut analysis, engine) = opened(5);
+
+    for path in [second, first] {
+        let effects = analysis.input(Input::RowClicked(1));
+        engine.settle(&mut analysis, effects);
+        let effects = analysis.input(Input::EvidenceView(references::TAB));
+        engine.settle(&mut analysis, effects);
+        let (request, document, query) = inspect_reference(&mut analysis);
+
+        let effects = analysis.input(Input::Open(vec![path.clone()]));
+        assert!(matches!(
+            effects.first().map(|effect| &effect.command),
+            Some(Command::AnalysisCancelReferences { document: d, reference })
+                if *d == document && *reference == request
+        ));
+        engine.settle(&mut analysis, effects);
+        assert_eq!(doc(&analysis).path, path);
+        assert_ne!(doc(&analysis).id, document);
+        assert_eq!(
+            analysis.event(request, reference_reply(document, query)),
+            []
+        );
+        assert!(analysis.documents.iter().all(|doc| !doc.references.busy()));
+    }
+}
+
+fn inspect_reference(
+    analysis: &mut Analysis,
+) -> (u64, u64, studio_domain::references::ReferenceQuery) {
+    analysis
+        .input(Input::InspectReferences)
+        .iter()
+        .find_map(|effect| match effect.command {
+            Command::AnalysisReferences { document, query } => {
+                Some((effect.request_id, document, query))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| unreachable!("expected a reference query"))
+}
+
+fn reference_reply(document: u64, query: studio_domain::references::ReferenceQuery) -> Event {
+    use studio_domain::identity::DecodeLayers;
+    use studio_domain::references::{
+        ReferenceDependency, ReferenceEvidence, ReferenceFrame, ReferenceOrigin, ReferenceSlot,
+        ReferenceSlotState,
+    };
+
+    let frame = ReferenceFrame {
+        coded_offset: query.coded_offset,
+        sequence_offset: 1,
+        layers: DecodeLayers {
+            extended: 0,
+            embedded: 0,
+            temporal: 0,
+        },
+        width: 64,
+        height: 64,
+    };
+    Event::AnalysisReferencesReady {
+        document,
+        evidence: Box::new(ReferenceEvidence {
+            query,
+            frame,
+            frame_obu_type: 7,
+            refresh_mask: 1,
+            resets_sequence: false,
+            allowed_input_slots: None,
+            required_long_term_ids: Vec::new(),
+            slots: vec![ReferenceSlot {
+                slot: 0,
+                before: ReferenceSlotState::Retained {
+                    frame: ReferenceFrame {
+                        coded_offset: 10,
+                        ..frame
+                    },
+                    long_term_id: None,
+                    restricted_order_hint: false,
+                },
+                after: ReferenceSlotState::Empty,
+            }],
+            dependencies: vec![ReferenceDependency {
+                index: Some(0),
+                slot: 0,
+                origin: ReferenceOrigin::Signaled,
+                scaled: false,
+            }],
+        }),
+    }
+}
+
+#[test]
+fn reference_history_restores_non_default_decode_policy_and_filter() {
+    use studio_domain::layers::{LayerDecodeSelection, LayerScope};
+
+    let (mut analysis, engine) = opened(5);
+    let requested = LayerDecodeSelection::OperatingPoint {
+        scope: LayerScope::Global,
+        set: 0,
+        point: 1,
+    };
+    for input in [
+        Input::RowClicked(1),
+        Input::EvidenceView(references::TAB),
+        Input::LayerFilter(1),
+    ] {
+        let effects = analysis.input(input);
+        engine.settle(&mut analysis, effects);
+    }
+    let filter = doc(&analysis).filter();
+    assert!(filter.layer.is_some());
+    analysis.documents[0].layers.selection = requested;
+    analysis.save_reference_view(None);
+
+    let effects = analysis.input(Input::RowClicked(2));
+    engine.settle(&mut analysis, effects);
+    let effects = analysis.input(Input::ClearFilters);
+    engine.settle(&mut analysis, effects);
+    analysis.documents[0].layers.selection = LayerDecodeSelection::Default;
+    analysis.save_reference_view(None);
+
+    let effects = analysis.input(Input::Back);
+    engine.settle(&mut analysis, effects);
+    assert_eq!(doc(&analysis).layer_decode_selection(), requested);
+    assert_eq!(doc(&analysis).filter(), filter);
+    assert_eq!(
+        doc(&analysis).selected().map(|selected| selected.row.index),
+        Some(1)
+    );
+
+    let effects = analysis.input(Input::Forward);
+    engine.settle(&mut analysis, effects);
+    assert_eq!(
+        doc(&analysis).layer_decode_selection(),
+        LayerDecodeSelection::Default
+    );
+    assert!(doc(&analysis).filter().is_all());
+    assert_eq!(
+        doc(&analysis).selected().map(|selected| selected.row.index),
+        Some(2)
+    );
+}

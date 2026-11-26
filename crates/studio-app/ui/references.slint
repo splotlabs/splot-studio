@@ -1,0 +1,135 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+import { ScrollView } from "std-widgets.slint";
+import { Caption, Label, LinkButton, SectionTitle } from "controls.slint";
+import { Tokens } from "tokens.slint";
+
+export struct ReferenceLinkRow {
+    label: string,
+    detail: string,
+    available: bool,
+}
+
+export struct ReferenceSlotRow {
+    slot: string,
+    before: string,
+    after: string,
+    changed: bool,
+}
+
+export global References {
+    in property <string> status;
+    in property <bool> busy;
+    in property <bool> can-inspect;
+    in property <string> frame;
+    in property <string> context;
+    in property <string> output;
+    in property <[ReferenceLinkRow]> links;
+    in property <[ReferenceSlotRow]> slots;
+    callback inspect();
+    callback follow(int);
+    callback cancel();
+}
+
+component CellText inherits Caption {
+    wrap: word-wrap;
+    color: Tokens.text;
+    accessible-role: none;
+}
+
+export component ReferencePane inherits VerticalLayout {
+    spacing: Tokens.space-2;
+
+    if References.status != "" || References.busy: HorizontalLayout {
+        spacing: Tokens.space-2;
+        Caption {
+            horizontal-stretch: 1;
+            text: References.status;
+            wrap: word-wrap;
+            accessible-live-region: polite;
+        }
+        if References.can-inspect: LinkButton {
+            text: "Inspect";
+            description: "Read the selected coded frame's reference state.";
+            clicked => { References.inspect(); }
+        }
+        if References.busy: LinkButton {
+            text: "Stop";
+            description: "Stop reading reference state.";
+            clicked => { References.cancel(); }
+        }
+    }
+
+    if References.frame != "": ScrollView {
+        vertical-stretch: 1;
+        content-width: self.visible-width;
+
+        VerticalLayout {
+            width: parent.content-width;
+            padding-right: Tokens.space-2;
+            spacing: Tokens.space-2;
+
+            Label { text: References.frame; wrap: word-wrap; }
+            Caption { text: References.context; wrap: word-wrap; }
+            if References.output != "": Caption { text: References.output; wrap: word-wrap; }
+
+            SectionTitle { text: "Frame references"; }
+            Caption {
+                text: References.links.length == 0
+                    ? "The decoder reported no frame references."
+                    : "These are frame-level references. Individual blocks can use fewer references.";
+                wrap: word-wrap;
+            }
+
+            VerticalLayout {
+                spacing: Tokens.space-1;
+                for link[index] in References.links: Rectangle {
+                    background: Tokens.surface;
+                    HorizontalLayout {
+                        padding: Tokens.space-2;
+                        spacing: Tokens.space-2;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            Label { text: link.label; wrap: word-wrap; }
+                            Caption { text: link.detail; wrap: word-wrap; }
+                        }
+                        if link.available: LinkButton {
+                            text: "Follow";
+                            description: "Follow reference. " + link.label + ". " + link.detail;
+                            clicked => { References.follow(index); }
+                        }
+                    }
+                }
+            }
+
+            SectionTitle { text: "Reference buffer"; }
+            HorizontalLayout {
+                spacing: Tokens.space-2;
+                Caption { text: "Slot"; width: 42px; }
+                Caption { text: "Before"; horizontal-stretch: 1; }
+                Caption { text: "After"; horizontal-stretch: 1; }
+            }
+
+            VerticalLayout {
+                spacing: Tokens.space-1;
+                accessible-role: list;
+                accessible-label: "Reference buffer slots before and after the coded frame.";
+                for row[index] in References.slots: Rectangle {
+                    accessible-role: list-item;
+                    accessible-label: "Slot " + row.slot + ". Before. " + row.before + ". After. " + row.after;
+                    accessible-item-index: index;
+                    accessible-item-count: References.slots.length;
+                    background: row.changed ? Tokens.row-selected : Tokens.surface;
+                    HorizontalLayout {
+                        padding: Tokens.space-2;
+                        spacing: Tokens.space-2;
+                        CellText { width: 42px; text: row.slot; }
+                        CellText { text: row.before; horizontal-stretch: 1; }
+                        CellText { text: row.after; horizontal-stretch: 1; }
+                    }
+                }
+            }
+        }
+    }
+}

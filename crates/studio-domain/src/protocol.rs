@@ -34,6 +34,7 @@ use crate::preview::{
     GrainPolicy, MAX_PICTURE_BYTES, PictureBox, PictureFailure, PictureFrame, PictureHeader,
     PictureOptions, PictureStage, PictureTarget, PictureView, SamplePoint,
 };
+use crate::references::{ReferenceEvidence, ReferenceQuery};
 use crate::settings::OutputKind;
 use crate::syntax::{SyntaxEvent, SyntaxSummary};
 use crate::timeline::{TimelinePage, TimelineSelection, TimelineTarget, TimelineView};
@@ -42,7 +43,7 @@ use crate::validation::{
 };
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -493,6 +494,20 @@ pub enum Command {
         /// Maximum number of rows.
         count: u32,
     },
+    /// Inspect process only. Replay the source to inspect the selected frame's references.
+    AnalysisReferences {
+        /// The document generation.
+        document: u64,
+        /// The selected coded frame and decoder policy.
+        query: ReferenceQuery,
+    },
+    /// Inspect process only. Stop a pending reference request.
+    AnalysisCancelReferences {
+        /// The document generation.
+        document: u64,
+        /// The request ID of the reference query to stop.
+        reference: u64,
+    },
     /// Inspect process only. Checks validation options before starting a batch.
     BatchCheckSettings {
         /// The options to check.
@@ -880,6 +895,13 @@ pub enum Event {
         total: u64,
         /// Rows from the inspection.
         rows: Vec<LayerRow>,
+    },
+    /// Terminal answer to [`Command::AnalysisReferences`].
+    AnalysisReferencesReady {
+        /// The document generation.
+        document: u64,
+        /// Reference state and direct dependency candidates.
+        evidence: Box<ReferenceEvidence>,
     },
     /// Answers [`Command::BatchCheckSettings`] when the options are valid.
     BatchSettingsChecked,

@@ -91,6 +91,11 @@ pub enum TimelineTarget {
         /// Index in coded order.
         index: u64,
     },
+    /// Resolve a coded row by its source OBU offset and find its first indexed output.
+    CodedOffset {
+        /// File offset where the coded OBU starts.
+        offset: u64,
+    },
     /// Resolve an output row and its coded frame.
     Output {
         /// Index in output order.

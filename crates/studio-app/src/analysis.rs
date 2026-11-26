@@ -63,6 +63,7 @@ use timeline_links::Request as TimelineRequest;
 pub use timeline_links::{Timeline, TimelineRange};
 pub(crate) mod evidence;
 pub(crate) mod layers;
+pub(crate) mod references;
 #[cfg(test)]
 mod tests;
 
@@ -247,6 +248,12 @@ pub enum Input {
     TimelineStep(i32),
     /// Show the findings for the selected timeline entry.
     TimelineLinkFindings,
+    /// Request reference evidence for the selected coded frame.
+    InspectReferences,
+    /// Stop reading the reference evidence.
+    StopReferences,
+    /// Follow the direct dependency at this row.
+    FollowReference(i32),
     /// Remove the indexes saved on disk.
     ClearCache,
 }
@@ -259,6 +266,7 @@ enum Asked {
     Timeline(TimelineRequest),
     Layers(layers::Request),
     CancelLayers,
+    References(studio_domain::references::ReferenceQuery),
     Cancel,
     Close,
     Page { generation: u64, first: u64 },
@@ -303,6 +311,7 @@ pub struct Analysis {
     /// Why the documents cannot be saved, while that is so.
     storage: Option<String>,
     dirty: bool,
+    reference_view: Option<(u64, crate::preview::HistoryView)>,
 }
 
 impl Analysis {
@@ -527,27 +536,11 @@ impl Analysis {
                     .ok()
                     .filter(|i| *i < self.documents.len())
                 {
-                    self.shown = index;
+                    self.show_document(index, &mut out);
                 }
             }
             Input::Close => self.close(&mut out),
-            Input::Reopen => {
-                let at = self.shown;
-                if self.can_read_again() {
-                    // The engine still holds the part that was read.
-                    self.restore_from_live(at);
-                    let document = self.documents[at].id;
-                    self.pending.retain(|_, (d, _)| *d != document);
-                    let validation = self.documents[at].evidence.running;
-                    self.release(document, validation, &mut out);
-                    self.read(at, &mut out);
-                } else if matches!(
-                    self.documents.get(at).map(Document::phase),
-                    Some(Phase::Failed { .. })
-                ) {
-                    self.read(at, &mut out);
-                }
-            }
+            Input::Reopen => self.reopen(&mut out),
             Input::Cancel => self.cancel(self.shown, &mut out),
             Input::CancelDocument(index) => {
                 if let Ok(at) = usize::try_from(index) {
@@ -575,7 +568,7 @@ impl Analysis {
                     }
                     doc.path = to;
                     doc.phase = Phase::Unread;
-                    self.shown = at;
+                    self.show_document(at, &mut out);
                 }
             }
             Input::PlaybackByte { document, offset } => {
@@ -609,6 +602,24 @@ impl Analysis {
         }
         self.ensure_layers(&mut out);
         out
+    }
+
+    fn reopen(&mut self, out: &mut Vec<Effect>) {
+        let at = self.shown;
+        if self.can_read_again() {
+            // The engine still holds the part that was read.
+            self.restore_from_live(at);
+            let document = self.documents[at].id;
+            self.pending.retain(|_, (d, _)| *d != document);
+            let validation = self.documents[at].evidence.running;
+            self.release(document, validation, out);
+            self.read(at, out);
+        } else if matches!(
+            self.documents.get(at).map(Document::phase),
+            Some(Phase::Failed { .. })
+        ) {
+            self.read(at, out);
+        }
     }
 
     /// The shown document's index, when it is open.
@@ -676,6 +687,9 @@ impl Analysis {
             Input::Back => self.travel(at, false, out),
             Input::Forward => self.travel(at, true, out),
             Input::GoTo(text) => self.go_to(at, &text, out),
+            Input::InspectReferences => self.request_references(at, out),
+            Input::StopReferences => self.stop_references(at, out),
+            Input::FollowReference(index) => self.follow_reference(at, index, out),
             Input::TypeFilter(index) => self.choose_kind(at, index, out),
             Input::LayerFilter(index) => self.choose_layer(at, index, out),
             Input::ClearFilters => self.refilter(at, RowFilter::default(), out),
@@ -739,12 +753,15 @@ impl Analysis {
     fn evidence_input(&mut self, at: usize, input: Input, out: &mut Vec<Effect>) {
         match input {
             Input::EvidenceView(tab) => {
+                if tab != references::TAB && self.documents[at].evidence.tab == references::TAB {
+                    self.cancel_references(at, out);
+                }
                 self.documents[at].layers.shown = tab == layers::TAB;
                 if tab == layers::TAB {
                     return;
                 }
                 let evidence = &mut self.documents[at].evidence;
-                evidence.tab = tab.clamp(0, 2);
+                evidence.tab = tab.clamp(0, references::TAB);
                 let doc = &mut self.documents[at];
                 if doc.evidence.selected.is_none()
                     && let Some(place) = doc.history.get_mut(doc.at)
@@ -834,6 +851,18 @@ impl Analysis {
         }
     }
 
+    fn show_document(&mut self, at: usize, out: &mut Vec<Effect>) {
+        if at != self.shown
+            && self
+                .documents
+                .get(self.shown)
+                .is_some_and(|document| document.references.busy())
+        {
+            self.cancel_references(self.shown, out);
+        }
+        self.shown = at;
+    }
+
     /// Opens `path`, or shows it when it is already open or opening.
     fn open(&mut self, path: PathBuf, origin: Origin, out: &mut Vec<Effect>) {
         if let Some(at) = self.documents.iter().position(|d| {
@@ -841,7 +870,7 @@ impl Analysis {
                 && !matches!(d.phase, Phase::Failed { .. } | Phase::Missing)
                 && d.origin == origin
         }) {
-            self.shown = at;
+            self.show_document(at, out);
             return;
         }
         if self.documents.len() >= MAX_DOCUMENTS {
@@ -853,13 +882,14 @@ impl Analysis {
         }
         self.notice = None;
         self.documents.push(Document::new(path, origin, None));
-        self.shown = self.documents.len() - 1;
+        self.show_document(self.documents.len() - 1, out);
         self.read(self.shown, out);
     }
 
     /// Starts a new read of document `at` with a new engine id. Everything
     /// the last read showed is dropped; its view stays in `restore`.
     fn read(&mut self, at: usize, out: &mut Vec<Effect>) {
+        self.cancel_references(at, out);
         self.next_document += 1;
         let id = self.next_document;
         let old = &self.documents[at];
@@ -898,6 +928,7 @@ impl Analysis {
         if self.shown >= self.documents.len() {
             return;
         }
+        self.cancel_references(self.shown, out);
         let doc = self.documents.remove(self.shown);
         // Its answers have nobody to go to now.
         self.pending.retain(|_, (document, _)| *document != doc.id);
@@ -974,6 +1005,19 @@ impl Analysis {
             return out;
         };
         self.dirty = true;
+        self.event_for_document(at, request_id, asked, event, &mut out);
+        self.ensure_layers(&mut out);
+        out
+    }
+
+    fn event_for_document(
+        &mut self,
+        at: usize,
+        request_id: u64,
+        asked: Asked,
+        event: Event,
+        out: &mut Vec<Effect>,
+    ) {
         match (asked, event) {
             (Asked::Open, Event::AnalysisOpenProgress { summary, .. }) => {
                 let doc = &mut self.documents[at];
@@ -983,12 +1027,12 @@ impl Analysis {
                         .is_none_or(|view| same_file(view.fingerprint, summary.fingerprint))
                 {
                     doc.update_partial(summary);
-                    self.fill(at, &mut out);
-                    self.fetch_bytes(at, &mut out);
+                    self.fill(at, out);
+                    self.fetch_bytes(at, out);
                 }
             }
             (Asked::Open, Event::AnalysisOpened { summary, .. }) => {
-                self.opened(at, summary, &mut out);
+                self.opened(at, summary, out);
             }
             (
                 Asked::Page { generation, first },
@@ -1000,7 +1044,7 @@ impl Analysis {
                 },
             ) => {
                 let asked = (generation, first);
-                self.paged(at, asked, answered, total, rows, &mut out);
+                self.paged(at, asked, answered, total, rows, out);
             }
             (
                 Asked::Locate {
@@ -1009,7 +1053,7 @@ impl Analysis {
                 },
                 Event::AnalysisLocated { row, found, .. },
             ) => {
-                self.located(at, request_id, generation, purpose, row, *found, &mut out);
+                self.located(at, request_id, generation, purpose, row, *found, out);
             }
             (Asked::Bytes { offset, len }, Event::AnalysisBytes { bytes, .. }) => {
                 let doc = &mut self.documents[at];
@@ -1017,40 +1061,46 @@ impl Analysis {
                     doc.bytes.asked = None;
                 }
                 if bytes.len() != len as usize {
-                    self.broken(
-                        at,
-                        "a byte range of another length than asked for",
-                        &mut out,
-                    );
+                    self.broken(at, "a byte range of another length than asked for", out);
                 } else if doc.bytes.offset == offset {
                     doc.bytes.data = Some(bytes);
                 }
             }
+            (Asked::References(query), Event::AnalysisReferencesReady { evidence, .. }) => {
+                let references = &mut self.documents[at].references;
+                if evidence.query == query && evidence.frame.coded_offset == query.coded_offset {
+                    references.accept(request_id, evidence);
+                } else {
+                    references.fail(
+                        request_id,
+                        None,
+                        "The result had a different frame or selection.",
+                    );
+                }
+            }
             (_, Event::AnalysisFailed { code, message, .. }) => {
                 self.failed(at, request_id, asked, Some(code), message);
-                self.retry_timeline_after_failure(at, asked, &mut out);
+                self.retry_timeline_after_failure(at, asked, out);
             }
             // A refused cancel: the open was answered first, and decides.
             (Asked::Cancel, Event::Error { .. }) => {}
             (_, Event::Error { message, .. }) => {
                 self.failed(at, request_id, asked, None, message);
-                self.retry_timeline_after_failure(at, asked, &mut out);
+                self.retry_timeline_after_failure(at, asked, out);
             }
             (Asked::Timeline(request), event) => {
-                self.timeline_event(at, request_id, request, event, &mut out);
+                self.timeline_event(at, request_id, request, event, out);
             }
             (Asked::Layers(request), event) => {
-                self.layer_event(at, request_id, request, event, &mut out);
+                self.layer_event(at, request_id, request, event, out);
             }
             (Asked::Evidence(request), event) => {
-                self.evidence_event(at, request_id, request, event, &mut out);
+                self.evidence_event(at, request_id, request, event, out);
             }
             // An answer of the wrong kind breaks the protocol.
             (Asked::Cancel | Asked::Close | Asked::CancelLayers, _) => {}
-            _ => self.broken(at, "an answer of the wrong kind", &mut out),
+            _ => self.broken(at, "an answer of the wrong kind", out),
         }
-        self.ensure_layers(&mut out);
-        out
     }
 
     fn cache_clear_event(&mut self, event: Event) {
@@ -1296,6 +1346,16 @@ impl Analysis {
                     doc.layers.fail(request_id, request, message);
                 }
             }
+            Asked::References(_) => {
+                if matches!(
+                    code,
+                    Some(AnalysisFailure::SourceChanged | AnalysisFailure::UnknownDocument)
+                ) {
+                    fail_or_notice(doc, code, &message);
+                } else {
+                    doc.references.fail(request_id, code, &message);
+                }
+            }
             Asked::Cancel | Asked::Close | Asked::CancelLayers => {}
         }
     }
@@ -1400,6 +1460,8 @@ impl Analysis {
             }
             return;
         }
+        self.cancel_references(at, out);
+        let doc = &mut self.documents[at];
         // A new selection replaces a restored view kept; the restored
         // element's own locate puts it back (`Purpose::Restore`).
         doc.restore = None;
@@ -1434,6 +1496,8 @@ impl Analysis {
         let Some(place) = doc.history.get(to).cloned() else {
             return;
         };
+        self.cancel_references(at, out);
+        let doc = &mut self.documents[at];
         doc.at = to;
         doc.wanted = None;
         doc.locating = None;
@@ -1451,15 +1515,40 @@ impl Analysis {
         });
         doc.evidence.tab = place.evidence_tab;
         doc.bytes.shown = place.bytes_shown;
+        let mut filter = None;
+        let mut policy_changed = false;
+        if let Some(reference) = place.reference {
+            doc.layers.shown = false;
+            if doc.layer_decode_selection() != reference.selection {
+                doc.layers.selection = reference.selection;
+                doc.layers.decode = None;
+                policy_changed = true;
+            }
+            self.reference_view = reference.view.map(|view| (doc.id, view));
+            filter = Some(reference.filter).filter(|filter| *filter != doc.filter);
+        }
+        if policy_changed {
+            self.invalidate_timeline_policy(at, out);
+        }
+        let doc = &mut self.documents[at];
         let timeline = place
             .timeline
             .filter(|(scan, _)| Some(*scan) == doc.timeline.scan());
         doc.timeline.restore_selection(timeline);
         if let Some((_, selection)) = timeline {
             self.timeline_picture = Some((doc.id, selection.output_ordinal));
+        } else if let Some(reference) = place.reference {
+            self.timeline_picture = Some((
+                doc.id,
+                reference.view.and_then(crate::preview::HistoryView::output),
+            ));
         }
         doc.evidence.reveal_selection();
-        self.position_selection(at, out);
+        if let Some(filter) = filter {
+            self.refilter(at, filter, out);
+        } else {
+            self.position_selection(at, out);
+        }
         self.fetch_bytes(at, out);
         self.ensure_syntax(at, out);
     }
@@ -1708,6 +1797,7 @@ fn reply_document(event: &Event) -> Option<u64> {
         | Event::AnalysisLayersReady { document: d, .. }
         | Event::AnalysisLayerPage { document: d, .. }
         | Event::AnalysisSyntaxReady { document: d, .. }
+        | Event::AnalysisReferencesReady { document: d, .. }
         | Event::AnalysisSyntaxPage { document: d, .. }
         | Event::AnalysisValidated { document: d, .. }
         | Event::AnalysisFindings { document: d, .. }

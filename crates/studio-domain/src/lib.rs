@@ -21,6 +21,7 @@ pub mod layers;
 pub mod options;
 pub mod preview;
 pub mod protocol;
+pub mod references;
 pub mod settings;
 pub mod syntax;
 pub mod timeline;

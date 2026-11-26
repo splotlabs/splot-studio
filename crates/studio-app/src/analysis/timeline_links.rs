@@ -44,13 +44,20 @@ pub(super) enum Request {
     Locate { scan: u64, target: TimelineTarget },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScanOutcome {
+    completion: IdentityCompletion,
+    matches_structure: bool,
+}
+
 /// The timeline state of one open source generation.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Timeline {
     scan: Option<u64>,
+    decode_selection: Option<LayerDecodeSelection>,
     collecting: bool,
     cancelling: bool,
-    completion: Option<IdentityCompletion>,
+    outcome: Option<ScanOutcome>,
     range: TimelineRange,
     reading: Option<u64>,
     refresh_after_finish: bool,
@@ -75,6 +82,14 @@ impl Timeline {
         self.scan
     }
 
+    pub(crate) fn has_verified_index(&self, policy: LayerDecodeSelection) -> bool {
+        self.scan.is_some()
+            && self.decode_selection == Some(policy)
+            && self.outcome.as_ref().is_some_and(|outcome| {
+                outcome.completion == IdentityCompletion::Complete && outcome.matches_structure
+            })
+    }
+
     /// Whether an identity scan or timeline request is active.
     #[must_use]
     pub const fn busy(&self) -> bool {
@@ -93,7 +108,10 @@ impl Timeline {
     /// The final scan outcome, when the engine has returned it.
     #[must_use]
     pub const fn completion(&self) -> Option<&IdentityCompletion> {
-        self.completion.as_ref()
+        match &self.outcome {
+            Some(outcome) => Some(&outcome.completion),
+            None => None,
+        }
     }
 
     /// Whether a visible timeline can refresh its partial rows.
@@ -118,6 +136,12 @@ impl Timeline {
     #[must_use]
     pub const fn selection(&self) -> Option<&TimelineSelection> {
         self.selection.as_ref()
+    }
+
+    pub(super) fn selection_for(&self, policy: LayerDecodeSelection) -> Option<&TimelineSelection> {
+        self.decode_selection
+            .filter(|selection| *selection == policy)?;
+        self.selection()
     }
 
     /// The latest timeline error, when applicable.
@@ -236,7 +260,8 @@ impl Analysis {
             Input::TimelineBuild if !doc.timeline.collecting => {
                 let document = doc.id;
                 let selection = doc.layer_decode_selection();
-                doc.timeline = Timeline::default();
+                self.cancel_references(at, out);
+                self.documents[at].timeline = Timeline::default();
                 let id = self.send(
                     document,
                     Asked::Timeline(Request::Build(selection)),
@@ -249,6 +274,7 @@ impl Analysis {
                 );
                 let timeline = &mut self.documents[at].timeline;
                 timeline.scan = Some(id);
+                timeline.decode_selection = Some(selection);
                 timeline.collecting = true;
             }
             Input::TimelineCancel if doc.timeline.can_cancel() => {
@@ -396,7 +422,10 @@ impl Analysis {
             {
                 timeline.collecting = false;
                 timeline.cancelling = false;
-                timeline.completion = Some(summary.completion);
+                timeline.outcome = Some(ScanOutcome {
+                    completion: summary.completion,
+                    matches_structure: summary.matches_structure,
+                });
                 timeline.refresh_after_finish = timeline.reading.is_some();
                 self.request_timeline_range(at, out);
             }
@@ -449,7 +478,9 @@ impl Analysis {
                     return;
                 }
                 let offset = match target {
-                    TimelineTarget::Coded { .. } => selection.coded_offset,
+                    TimelineTarget::Coded { .. } | TimelineTarget::CodedOffset { .. } => {
+                        selection.coded_offset
+                    }
                     _ => selection.showing_offset.unwrap_or(selection.coded_offset),
                 };
                 timeline.next_selection = Some((*selection, offset));
@@ -470,6 +501,7 @@ impl Analysis {
     fn timeline_target_matches(target: TimelineTarget, selection: &TimelineSelection) -> bool {
         match target {
             TimelineTarget::Coded { index } => selection.coded_ordinal == index,
+            TimelineTarget::CodedOffset { offset } => selection.coded_offset == offset,
             TimelineTarget::Output { index } => selection.output_ordinal == Some(index),
             TimelineTarget::Time { .. } => {
                 selection.time.is_some() && selection.output_ordinal.is_some()
@@ -530,6 +562,10 @@ impl Analysis {
                 .selected
                 .as_ref()
                 .is_none_or(|selected| selected.row.index != row.index);
+        if changed {
+            self.cancel_references(at, out);
+        }
+        let doc = &mut self.documents[at];
         doc.timeline.selection = Some(selection);
         doc.restore = None;
         doc.wanted = None;
