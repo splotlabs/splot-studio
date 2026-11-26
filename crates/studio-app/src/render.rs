@@ -518,6 +518,7 @@ pub fn render_preview(window: &AppWindow, state: &AppState, preview: &Preview, d
         playback.set_can_play(view.can_play);
         playback.set_playing(view.playing);
         playback.set_play_note(view.play_note.into());
+        playback.set_seek_error(view.seek_error.into());
         playback.set_can_compare(view.can_compare);
         playback.set_comparing(view.comparing);
         playback.set_can_native(view.can_native);

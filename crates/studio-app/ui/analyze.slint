@@ -1073,6 +1073,12 @@ export component AnalyzeView inherits VerticalLayout {
                 }
             }
 
+            if Playback.seek-error != "": Caption {
+                text: Playback.seek-error;
+                color: Tokens.warning;
+                accessible-live-region: polite;
+            }
+
             if Playback.output-unit != "": HorizontalLayout {
                 spacing: Tokens.space-2;
 

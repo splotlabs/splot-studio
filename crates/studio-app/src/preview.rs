@@ -168,6 +168,8 @@ pub struct StageView {
     pub playing: bool,
     /// The timing assumption or a playback problem.
     pub play_note: String,
+    /// Why Analyze could not use the entered output number.
+    pub seek_error: String,
     /// The current file scan or decode work in Analyze.
     pub decode_work: String,
     /// Output identity for the current Analyze picture.
@@ -1119,6 +1121,7 @@ impl Preview {
             can_play: false,
             playing: self.playing,
             play_note: String::new(),
+            seek_error: String::new(),
             decode_work: String::new(),
             output: None,
             can_compare: false,

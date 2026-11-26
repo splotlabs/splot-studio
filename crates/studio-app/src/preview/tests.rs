@@ -904,3 +904,23 @@ fn document_timing_and_output_count_use_only_decoder_evidence() {
     none(preview.playback_ended(play, Some(4)));
     assert_eq!(preview.view().frame_text, "Output 5 / 5");
 }
+
+#[test]
+fn invalid_output_number_preserves_the_assumed_playback_rate() {
+    let (mut preview, opening) = shown(document_subject(7));
+    preview.picture(output_picture(only(&opening).request_id, 0, None));
+    let play = only(&preview.input(Input::PlayPause)).request_id;
+
+    none(preview.input(Input::SeekOutput(0)));
+    preview.picture(output_picture(play, 1, None));
+    let view = preview.view();
+    assert!(view.playing);
+    assert_eq!(view.seek_error, "Enter a positive output number.");
+    assert!(view.play_note.contains("assumes 30 fps"));
+
+    let request = only(&preview.input(Input::SeekOutput(3))).request_id;
+    preview.picture(output_picture(request, 2, None));
+    let view = preview.view();
+    assert_eq!(view.seek_error, "");
+    assert!(view.play_note.contains("assumes 30 fps"));
+}

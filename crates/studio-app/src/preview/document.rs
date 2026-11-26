@@ -186,6 +186,7 @@ impl Preview {
     }
 
     pub(super) fn document_view(&self, view: &mut StageView) {
+        view.seek_error.clone_from(&self.document_notice);
         view.position = self.current_frame().unwrap_or(0);
         view.frames = self.frames.unwrap_or(0);
         view.frame_text = format!(
@@ -205,9 +206,6 @@ impl Preview {
     }
 
     pub(super) fn document_play_note(&self) -> String {
-        if !self.document_notice.is_empty() {
-            return self.document_notice.clone();
-        }
         if let Some(shown) = &self.shown {
             let header = &shown.picture.header;
             if header.time.is_some_and(|time| time.den > 0)
