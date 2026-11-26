@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
 import { ComboBox } from "std-widgets.slint";
+import { BlockMotionPane, BlockMotionView } from "block-motion.slint";
 import { Caption, LinkButton } from "controls.slint";
 import { FocusRing, KeyboardFocus } from "focus.slint";
 import { Tokens } from "tokens.slint";
@@ -190,6 +191,8 @@ export component BlockOverlayPanel inherits VerticalLayout {
             accessible-live-region: polite;
         }
     }
+
+    if BlockMotionView.active: BlockMotionPane { }
 }
 
 // The stage and picture use the same physical rectangle and clip.

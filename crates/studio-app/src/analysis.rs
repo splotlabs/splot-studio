@@ -55,6 +55,7 @@ use studio_domain::protocol::{Command, Event};
 use studio_domain::timeline::{TimelineTarget, TimelineView};
 
 mod batch;
+mod block_motion;
 pub(crate) mod block_overlay;
 pub(crate) mod blocks;
 mod bytes;
@@ -69,6 +70,7 @@ pub(crate) mod references;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use block_motion::SelectedMotion;
 pub use block_overlay::BlockOverlayInput;
 pub use document::{
     Bytes, Document, Origin, Phase, Position, ReadEnd, Restore, ResultOf, Saved, Selected, extent,
@@ -261,6 +263,14 @@ pub enum Input {
     StopBlocks,
     /// Follow the direct dependency at this row.
     FollowReference(i32),
+    /// Read the selected block's coded-frame input slots.
+    InspectBlockReferences,
+    /// Preview the selected block's reference at this predictor position.
+    PreviewBlockReference(i32),
+    /// Follow the selected block's reference at this predictor position.
+    FollowBlockReference(i32),
+    /// Show or hide the selected block's motion on the picture.
+    ShowBlockMotion(bool),
     /// Remove the indexes saved on disk.
     ClearCache,
 }
@@ -323,6 +333,8 @@ pub struct Analysis {
     dirty: bool,
     reference_view: Option<(u64, crate::preview::HistoryView)>,
     overlay: block_overlay::Overlay,
+    motion_preview: Option<block_motion::PreviewSelection>,
+    show_motion: bool,
 }
 
 impl Analysis {
@@ -703,6 +715,10 @@ impl Analysis {
             Input::InspectReferences => self.request_references(at, out),
             Input::StopReferences => self.stop_references(at, out),
             Input::FollowReference(index) => self.follow_reference(at, index, out),
+            Input::InspectBlockReferences
+            | Input::PreviewBlockReference(_)
+            | Input::FollowBlockReference(_)
+            | Input::ShowBlockMotion(_) => self.block_motion_input(at, input, out),
             Input::TypeFilter(index) => self.choose_kind(at, index, out),
             Input::LayerFilter(index) => self.choose_layer(at, index, out),
             Input::ClearFilters => self.refilter(at, RowFilter::default(), out),
