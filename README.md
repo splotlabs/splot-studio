@@ -70,14 +70,17 @@ codec is young.
   selects which decoded samples the viewer shows. Native planes remain available for
   sample inspection when the viewer cannot display the signaled colors in RGB.
 - In Analyze, use **Export Decoded Video** for a stream or range, **Export Frame** for
-  the displayed output, or **Frame Hashes** for a report. Select the layer and
-  grain policy before export. Frames needed to decode the selection are excluded from
-  the files unless they are also in the selection.
+  the displayed output, or **Frame Hashes** for a report. A frame export keeps the
+  displayed layer and grain policy. Jobs writes only the selected outputs, even
+  when the decoder must read earlier pictures first.
 - Y4M stores native samples with a constant frame rate. For a source with unknown
-  timing, enter a rate to use for the export. Use raw planes for variable timing.
-  The companion JSON file describes the plane layout and timing. Ten-bit raw samples
+  timing, enter a rate to use for the export. Use raw planes for variable timing
+  or picture metadata that Y4M cannot represent. The companion JSON file describes
+  the plane layout and timing. Ten-bit raw samples
   occupy little-endian 16-bit words. Frame Hashes uses Splot's pre-grain
   `splot-dfh-sha256-v1` contract to compare decoded sample bytes.
+- Jobs reports each published file. If part of a batch fails, the completed files
+  stay on disk. Choose an unused destination before retrying a collision.
 - Open a validation result in Analyze to inspect its findings without running validation
   again. From Jobs, export the complete retained report as JSON or plain text. The report
   records scope, interruptions, and omitted findings. When validation runs, the report
