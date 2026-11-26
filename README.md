@@ -55,7 +55,7 @@ codec is young.
   policy treats errors as failures. Strict policy also treats warnings as failures and
   preserves their warning severity. You can supply local Annex B sequence headers and
   operating point sets for streams that require external context.
-- Jobs lists each conversion, stream read, and validation. Stop Validation Batch stops the
+- Jobs lists conversions, stream reads, validations, and decoded exports. Stop Validation Batch stops the
   current file and cancels files still waiting. Completed reports stay available until you
   remove them or close Studio. The session holds at most 32 validation jobs.
 - In Analyze, play a supported AV2 document, step through decoded pictures, or seek to
@@ -69,6 +69,15 @@ codec is young.
   plane dimensions, bit depth, and available color and chroma information. The grain control
   selects which decoded samples the viewer shows. Native planes remain available for
   sample inspection when the viewer cannot display the signaled colors in RGB.
+- In Analyze, use **Export Decoded Video** for a stream or range, **Export Frame** for
+  the displayed output, or **Frame Hashes** for a report. Select the output layers and
+  grain policy before export. Frames needed to decode the selection are excluded from
+  the files unless they are also in the selection.
+- Y4M stores native samples with a constant frame rate. For a source with unknown
+  timing, enter a rate to use for the export. Use raw planes for variable timing.
+  The companion JSON file describes the plane layout and timing. Ten-bit raw samples
+  occupy little-endian 16-bit words. Frame Hashes uses Splot's pre-grain
+  `splot-dfh-sha256-v1` contract. A matching hash identifies equal sample bytes.
 - Open a validation result in Analyze to inspect its findings without running validation
   again. From Jobs, export the complete retained report as JSON or plain text. The report
   records scope, interruptions, and omitted findings. When validation runs, the report
