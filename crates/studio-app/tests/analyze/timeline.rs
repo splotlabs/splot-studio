@@ -95,6 +95,30 @@ pub(super) fn controls(rig: &mut Rig, scratch: &Scratch) {
     rig.idle("the visible zoom range");
     assert_eq!(rig.window.global::<TimelineUi>().get_bars().row_count(), 2);
     check_output_order(rig);
+    check_stopped_timeline(rig, scratch);
+}
+
+fn check_stopped_timeline(rig: &mut Rig, scratch: &Scratch) {
+    use studio_app::TimelineUi;
+
+    rig.session.analysis_input(Input::Close);
+    let source = scratch.0.join("partial IVF record.ivf");
+    let mut bytes = include_bytes!(
+        "../../../studio-engine/tests/preview/fixtures/syn-luma-palette2-row-mono-16x16-q0.ivf"
+    )
+    .to_vec();
+    bytes.push(1);
+    fs::write(&source, bytes).unwrap_or_else(|error| unreachable!("{error}"));
+    rig.session.analysis_input(Input::Open(vec![source]));
+    rig.idle("the source with an incomplete last record");
+    rig.window.global::<TimelineUi>().invoke_build();
+    rig.idle("the retained timeline after a scan error");
+
+    let timeline = rig.window.global::<TimelineUi>();
+    let reason = "The IVF file ends inside a record.";
+    assert_eq!(timeline.get_bars().row_count(), 1);
+    assert!(timeline.get_status().contains(reason));
+    assert!(timeline.get_exact_statistics().contains(reason));
 }
 
 fn check_lossless_quantizer(rig: &mut Rig, scratch: &Scratch) {

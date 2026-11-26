@@ -3,10 +3,12 @@
 
 //! Presents the bounded timeline page and relays view changes.
 
+use std::borrow::Cow;
 use std::fmt::Write;
 use std::path::Path;
 
 use slint::{ComponentHandle, SharedString};
+use studio_domain::identity::IdentityCompletion;
 use studio_domain::timeline::{
     ByteDistribution, TimelineBucket, TimelineClock, TimelineEntry, TimelinePage,
     TimelineQuantizer, TimelineSelection, TimelineTarget, TimelineTime, TimelineView,
@@ -34,12 +36,8 @@ pub(super) fn render(window: &AppWindow, analysis: &Analysis) {
     ui.set_can_build(!timeline.busy());
     ui.set_can_cancel(timeline.can_cancel());
     ui.set_can_refresh(timeline.can_refresh());
-    ui.set_status(
-        timeline
-            .notice()
-            .unwrap_or_else(|| status(page, timeline.busy()))
-            .into(),
-    );
+    let coverage = status(page, timeline.busy(), timeline.completion());
+    ui.set_status(timeline.notice().unwrap_or(coverage.as_ref()).into());
     let range = timeline.range();
     let view = range.view;
     let first = range.first;
@@ -64,6 +62,7 @@ pub(super) fn render(window: &AppWindow, analysis: &Analysis) {
         limit,
         selection,
         doc.path(),
+        timeline.completion(),
     );
 }
 
@@ -74,6 +73,7 @@ fn render_page(
     limit: u64,
     selection: Option<TimelineSelection>,
     source: &Path,
+    completion: Option<&IdentityCompletion>,
 ) {
     let total = page.map_or(0, |page| page.total);
     let visible = total.saturating_sub(first).min(limit);
@@ -124,10 +124,23 @@ fn render_page(
     }
     let summary = statistics(page);
     ui.set_summary(summary.clone().into());
-    ui.set_exact_statistics(report(page, &label, &summary, selection, source).into());
+    ui.set_exact_statistics(report(page, &label, &summary, selection, source, completion).into());
 }
 
-fn status(page: Option<&TimelinePage>, busy: bool) -> &'static str {
+fn status(
+    page: Option<&TimelinePage>,
+    busy: bool,
+    completion: Option<&IdentityCompletion>,
+) -> Cow<'static, str> {
+    match completion {
+        Some(IdentityCompletion::Stopped { message }) => {
+            return format!("Timeline scan stopped. {message}").into();
+        }
+        Some(IdentityCompletion::Cancelled) => {
+            return "Timeline scan cancelled. The timeline shows partial coverage.".into();
+        }
+        _ => {}
+    }
     match page {
         Some(page) if page.complete && page.verified => "Timeline complete. Source verified.",
         Some(page) if page.complete => {
@@ -138,6 +151,7 @@ fn status(page: Option<&TimelinePage>, busy: bool) -> &'static str {
         None if busy => "Reading picture identities…",
         None => "Build a timeline to inspect coded frames and output pictures.",
     }
+    .into()
 }
 
 const fn scope(view: TimelineView) -> &'static str {
@@ -343,11 +357,12 @@ fn report(
     summary: &str,
     selection: Option<TimelineSelection>,
     source: &Path,
+    completion: Option<&IdentityCompletion>,
 ) -> String {
     let mut report = format!(
         "Source {}\n{label}\n{}\n{}\n{summary}\n",
         source.display(),
-        status(Some(page), false),
+        status(Some(page), false, completion),
         scope(page.view)
     );
     if let Some(selection) = selection {

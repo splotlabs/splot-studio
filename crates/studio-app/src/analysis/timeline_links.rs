@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
 use studio_domain::analysis::{Element, LocateTarget, Row};
+use studio_domain::identity::IdentityCompletion;
 use studio_domain::preview::GrainPolicy;
 use studio_domain::protocol::{Command, Event};
 use studio_domain::timeline::{TimelinePage, TimelineSelection, TimelineTarget, TimelineView};
@@ -48,6 +49,7 @@ pub struct Timeline {
     scan: Option<u64>,
     collecting: bool,
     cancelling: bool,
+    completion: Option<IdentityCompletion>,
     range: TimelineRange,
     reading: Option<u64>,
     refresh_after_finish: bool,
@@ -85,6 +87,12 @@ impl Timeline {
     #[must_use]
     pub const fn can_cancel(&self) -> bool {
         self.collecting && !self.cancelling
+    }
+
+    /// The final scan outcome, when the engine has returned it.
+    #[must_use]
+    pub const fn completion(&self) -> Option<&IdentityCompletion> {
+        self.completion.as_ref()
     }
 
     /// Whether a visible timeline can refresh its partial rows.
@@ -355,11 +363,12 @@ impl Analysis {
     ) {
         let timeline = &mut self.documents[at].timeline;
         match (request, event) {
-            (Request::Build, Event::AnalysisIdentityScanned { .. })
+            (Request::Build, Event::AnalysisIdentityScanned { summary, .. })
                 if timeline.scan == Some(id) =>
             {
                 timeline.collecting = false;
                 timeline.cancelling = false;
+                timeline.completion = Some(summary.completion);
                 timeline.refresh_after_finish = timeline.reading.is_some();
                 self.request_timeline_range(at, out);
             }
