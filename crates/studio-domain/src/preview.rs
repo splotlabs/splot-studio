@@ -202,6 +202,9 @@ pub struct OutputEvent {
     pub showing_offset: Option<u64>,
     /// Sequence header that applies to the coded frame, when known.
     pub sequence_offset: Option<u64>,
+    /// Signaled interval between pictures from consecutive output temporal units.
+    /// Pictures in the same unit can share a presentation time.
+    pub interval: Option<MediaTime>,
 }
 
 /// Work that precedes a requested document picture.
