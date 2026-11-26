@@ -1151,8 +1151,10 @@ export component AppWindow inherits Window {
     property <length> main-width: root.show-advanced && !root.compact-advanced
         ? min(416px, root.advanced-window-width - 540px) : 416px;
     property <bool> show-advanced: root.advanced-open && root.workspace == WorkspaceView.encode;
-    property <length> advanced-window-width: min(960px, root.max-window-width);
-    property <bool> compact-advanced: root.show-advanced && root.advanced-window-width < 900px;
+    property <length> advanced-min-width: min(640px, root.max-window-width);
+    property <length> measured-window-width;
+    property <length> advanced-window-width: clamp(root.measured-window-width, root.advanced-min-width, root.max-window-width);
+    out property <bool> compact-advanced: root.show-advanced && root.advanced-window-width < 900px;
     property <length> scroll-gutter: Tokens.space-6;
     property <length> advanced-card-width: root.advanced-window-width - root.scroll-gutter;
     property <length> advanced-content-width: root.advanced-card-width - 2 * root.card-padding;
@@ -1165,13 +1167,9 @@ export component AppWindow inherits Window {
     title: root.view-mode == ViewMode.list ? root.list-title + " — Splot Studio"
         : root.has-source ? root.source-name + " — Splot Studio" : "Splot Studio";
     background: Tokens.raised;
-    // The window is the card: its size is pinned (min == max) to the content
-    // plus whatever sits above it (the in-window menu bar, if any), so it is
-    // not resizable, Advanced widens it and the height fits the text at any
-    // font scale. The menu bar's layout reports no maximum height, so the size
-    // is pinned explicitly; the offset above the content is copied by
-    // `changed`/`init`, outside the layout bindings, so the constraints do not
-    // depend on the window's own layout.
+    // Simple and Analyze fit their content. Advanced can resize horizontally
+    // between its compact and split layouts. In-window menu bars add to the
+    // fitted height. Copy that offset outside the layout bindings.
     //
     // The window is never taller than `max-window-height`, so it fits a
     // 1366x768 display under a task bar and a title bar. Content taller than
@@ -1196,12 +1194,16 @@ export component AppWindow inherits Window {
     changed fitted-width => {
         root.fit-changed();
     }
+    changed width => {
+        root.measured-window-width = root.width;
+    }
     init => {
+        self.measured-window-width = self.width;
         self.fit-height = self.fitted-height;
         self.fit-offset = frame.absolute-position.y;
     }
-    min-width: root.fitted-width;
-    max-width: root.fitted-width;
+    min-width: root.show-advanced ? root.advanced-min-width : root.fitted-width;
+    max-width: root.show-advanced ? root.max-window-width : root.fitted-width;
     min-height: self.fit-height > 0 ? self.fit-height : content.preferred-height;
     max-height: self.fit-height > 0 ? self.fit-height : content.preferred-height;
 
@@ -1261,8 +1263,8 @@ export component AppWindow inherits Window {
     }
 
     frame := VerticalLayout {
-        min-width: root.fitted-width;
-        max-width: root.fitted-width;
+        min-width: root.show-advanced ? root.advanced-min-width : root.fitted-width;
+        max-width: root.show-advanced ? root.max-window-width : root.fitted-width;
         min-height: root.visible-content-height;
         max-height: root.visible-content-height;
 

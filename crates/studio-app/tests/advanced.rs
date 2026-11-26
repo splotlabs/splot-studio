@@ -181,6 +181,24 @@ fn edit(window: &AppWindow, id: &str, value: &str) {
     window.invoke_advanced_edit(id.into(), value.into());
 }
 
+fn check_native_width(rig: &Rig) {
+    let window = rig.window();
+    let native = window.window();
+    for (width, compact) in [(640.0, true), (920.0, false), (640.0, true)] {
+        let scale = native.scale_factor();
+        let height = native.size().to_logical(scale).height;
+        let size = LogicalSize::new(width, height);
+        native.set_size(size);
+        // The controller repeats its fit after the compositor settles.
+        let settled = Instant::now() + Duration::from_millis(350);
+        rig.until("the resized Advanced layout", || {
+            Instant::now() >= settled && window.get_compact_advanced() == compact
+        });
+        assert_eq!(native.size().width, size.to_physical(scale).width);
+        assert!(!rig.pixels().is_empty());
+    }
+}
+
 fn change_key_interval(rig: &Rig) {
     let window = rig.window();
     for query in ["keyint", "Keyframe interval"] {
@@ -369,6 +387,7 @@ fn advanced_edits_and_submits_the_displayed_policy() {
     window.set_advanced_open(true);
     rig.until("the option catalog", || !keys(window).is_empty());
     assert!(simple != rig.pixels(), "The window did not show Advanced.");
+    check_native_width(&rig);
 
     change_key_interval(&rig);
     check_context_edits(&rig);

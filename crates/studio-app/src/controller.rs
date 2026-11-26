@@ -121,12 +121,16 @@ fn physical(logical: f32, scale: f32) -> i64 {
     }
 }
 
-/// Sizes the window to its content (the window is the card).
+/// Fits the card without requesting a size the window already has.
 fn fit(window: &slint::Weak<AppWindow>) {
     if let Some(window) = window.upgrade() {
         let size = slint::LogicalSize::new(window.get_fitted_width(), window.get_fitted_height());
-        if size.width > 0.0 && size.height > 0.0 {
-            window.window().set_size(size);
+        let native = window.window();
+        if size.width > 0.0
+            && size.height > 0.0
+            && size.to_physical(native.scale_factor()) != native.size()
+        {
+            native.set_size(size);
         }
     }
 }
