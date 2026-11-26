@@ -1189,7 +1189,7 @@ mod tests {
         waiting["video_stream"] = Value::Null;
         waiting["facts"] = json!({
             "reader": "ffmpeg",
-            "fingerprint": {"len": 4096, "modified": [1795352441, 421141523]},
+            "fingerprint": {"len": 4096, "modified": [1_795_352_441, 421_141_523]},
             "video_stream": 1,
             "video_tracks": [],
             "omissions": {"other_video": 0, "audio": 2, "subtitles": 1, "attachments": 0, "other": 0, "chapters": 3},
