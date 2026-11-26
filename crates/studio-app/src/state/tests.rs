@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use studio_domain::job::{
-    ChromaLayout, Failure, FailureCode, JobReport, JobSpec, Omissions, Rational, SourceFacts,
-    SourceFingerprint, SourceReader, Stage, VideoTrack, WirePath,
+    ChromaLayout, Failure, FailureCode, JobReport, JobSpec, Omissions, Rational, SourceColor,
+    SourceFacts, SourceFingerprint, SourceReader, Stage, VideoTrack, WirePath,
 };
 use studio_domain::protocol::{Capabilities, Event, MediaTool, MediaToolOrigin};
 use studio_domain::settings::{Crf, EncoderSettings, OutputKind, SpeedPreset};
@@ -66,7 +66,7 @@ fn facts(frame_count: Option<u64>) -> SourceFacts {
             den: 1001,
         },
         pixel_aspect: None,
-        color: Default::default(),
+        color: SourceColor::default(),
         bit_depth: 10,
         chroma: ChromaLayout::Yuv420,
         frame_count,

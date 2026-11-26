@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use common::{Clip, TestResult, leftovers, settings, spec};
 use studio_domain::job::{FailureCode, Stage, WirePath};
 use studio_domain::options::{
-    MAX_OPTIONS_PAGE_ITEMS, OPTIONS_SCHEMA_VERSION, OptionRequest, OptionValue,
+    EffectiveOption, MAX_OPTIONS_PAGE_ITEMS, OPTIONS_SCHEMA_VERSION, OptionRequest, OptionValue,
 };
 use studio_domain::protocol::{
     BuildIdentity, Command, Envelope, ErrorCode, Event, MAX_MESSAGE_BYTES, PROTOCOL_VERSION,
@@ -339,37 +339,7 @@ fn resolve_options_pages_fit_the_control_budget() -> TestResult {
                     saw_requested_value = true;
                 }
                 if value.key == "content" {
-                    let OptionValue::Record(content) = &value.value else {
-                        return Err("expected effective content fields".into());
-                    };
-                    let OptionValue::Record(origin) = &value.origin else {
-                        return Err("expected content origins".into());
-                    };
-                    let (siting, siting_origin) = if color == "420mpeg2" {
-                        (OptionValue::Choice("left".into()), "source")
-                    } else {
-                        (OptionValue::None, "codec default")
-                    };
-                    assert_eq!(content["chroma_sample_position"], siting);
-                    assert_eq!(content["full_range"], OptionValue::Bool(false));
-                    assert_eq!(
-                        origin["full_range"],
-                        OptionValue::Choice(siting_origin.into())
-                    );
-                    assert_eq!(
-                        origin["chroma_sample_position"],
-                        OptionValue::Choice(siting_origin.into())
-                    );
-                    assert_eq!(content["color_primaries"], OptionValue::Integer(2));
-                    assert_eq!(
-                        origin["color_primaries"],
-                        OptionValue::Choice("codec default".into())
-                    );
-                    assert_eq!(content["timing_info"], OptionValue::Bool(false));
-                    assert_eq!(
-                        origin["timing_info"],
-                        OptionValue::Choice("explicit".into())
-                    );
+                    check_resolved_source_content(value, color == "420mpeg2")?;
                     saw_content = true;
                 }
             }
@@ -400,6 +370,41 @@ fn resolve_options_pages_fit_the_control_budget() -> TestResult {
         ));
         assert_eq!(live.child.wait()?.code(), Some(0));
     }
+    Ok(())
+}
+
+fn check_resolved_source_content(value: &EffectiveOption, stated: bool) -> TestResult {
+    let OptionValue::Record(content) = &value.value else {
+        return Err("expected effective content fields".into());
+    };
+    let OptionValue::Record(origin) = &value.origin else {
+        return Err("expected content origins".into());
+    };
+    let (siting, siting_origin) = if stated {
+        (OptionValue::Choice("left".into()), "source")
+    } else {
+        (OptionValue::None, "codec default")
+    };
+    assert_eq!(content["chroma_sample_position"], siting);
+    assert_eq!(content["full_range"], OptionValue::Bool(false));
+    assert_eq!(
+        origin["full_range"],
+        OptionValue::Choice(siting_origin.into())
+    );
+    assert_eq!(
+        origin["chroma_sample_position"],
+        OptionValue::Choice(siting_origin.into())
+    );
+    assert_eq!(content["color_primaries"], OptionValue::Integer(2));
+    assert_eq!(
+        origin["color_primaries"],
+        OptionValue::Choice("codec default".into())
+    );
+    assert_eq!(content["timing_info"], OptionValue::Bool(false));
+    assert_eq!(
+        origin["timing_info"],
+        OptionValue::Choice("explicit".into())
+    );
     Ok(())
 }
 

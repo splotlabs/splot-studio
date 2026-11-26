@@ -567,7 +567,7 @@ pub fn progress_text(activity: &Activity) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use studio_domain::job::SourceFingerprint;
+    use studio_domain::job::{SourceColor, SourceFingerprint};
     use studio_domain::protocol::MediaTool;
 
     #[test]
@@ -636,7 +636,7 @@ mod tests {
                 den: 1001,
             },
             pixel_aspect: None,
-            color: Default::default(),
+            color: SourceColor::default(),
             bit_depth: 10,
             chroma: ChromaLayout::Yuv420,
             frame_count: None,
@@ -670,7 +670,7 @@ mod tests {
             height: 720,
             frame_rate: Rational { num: 25, den: 1 },
             pixel_aspect: None,
-            color: Default::default(),
+            color: SourceColor::default(),
             bit_depth: 8,
             chroma: ChromaLayout::Yuv420,
             frame_count: None,
@@ -829,7 +829,7 @@ mod tests {
             height: 1080,
             frame_rate: Rational { num: 25, den: 1 },
             pixel_aspect: None,
-            color: Default::default(),
+            color: SourceColor::default(),
             bit_depth: 8,
             chroma: ChromaLayout::Yuv420,
             frame_count: None,

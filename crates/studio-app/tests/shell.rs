@@ -25,7 +25,7 @@ use studio_app::state::{AppState, Effect, Intent};
 use studio_app::workspace::Workspace;
 use studio_app::{AppWindow, WorkspaceView};
 use studio_domain::job::{
-    ChromaLayout, Omissions, Rational, SourceFacts, SourceFingerprint, SourceReader,
+    ChromaLayout, Omissions, Rational, SourceColor, SourceFacts, SourceFingerprint, SourceReader,
 };
 
 struct Headless(Rc<MinimalSoftwareWindow>);
@@ -68,7 +68,7 @@ fn facts() -> SourceFacts {
         height: 48,
         frame_rate: Rational { num: 25, den: 1 },
         pixel_aspect: None,
-        color: Default::default(),
+        color: SourceColor::default(),
         bit_depth: 8,
         chroma: ChromaLayout::Yuv420,
         frame_count: Some(10),

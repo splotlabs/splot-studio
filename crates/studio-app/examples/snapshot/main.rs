@@ -57,8 +57,8 @@ use studio_app::state::{AppState, Effect, Intent, Startup};
 use studio_app::{NoticeWindow, Palette};
 use studio_domain::job::{
     Check, CheckKind, CheckOutcome, ChromaLayout, Disclosure, Failure, FailureCode, JobReport,
-    JobSpec, Omissions, Progress, Rational, SourceFacts, SourceFingerprint, SourceReader, Stage,
-    VideoTrack, WirePath,
+    JobSpec, Omissions, Progress, Rational, SourceColor, SourceFacts, SourceFingerprint,
+    SourceReader, Stage, VideoTrack, WirePath,
 };
 use studio_domain::preview::{
     ColorBasis, ColorMatrix, MediaTime, PictureBox, PictureFailure, PictureFrame, PictureHeader,
@@ -88,7 +88,7 @@ fn facts(frame_count: Option<u64>) -> SourceFacts {
             den: 1001,
         },
         pixel_aspect: Some(Rational { num: 1, den: 1 }),
-        color: Default::default(),
+        color: SourceColor::default(),
         bit_depth: 10,
         chroma: ChromaLayout::Yuv420,
         frame_count,

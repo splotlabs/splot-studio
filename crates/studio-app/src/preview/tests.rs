@@ -7,8 +7,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use studio_domain::job::{
-    ChromaLayout, JobReport, Omissions, Rational, SourceFacts, SourceFingerprint, SourceReader,
-    Stage, WirePath,
+    ChromaLayout, JobReport, Omissions, Rational, SourceColor, SourceFacts, SourceFingerprint,
+    SourceReader, Stage, WirePath,
 };
 use studio_domain::preview::{ColorBasis, ColorMatrix, MediaTime, PictureHeader};
 use studio_domain::protocol::Event;
@@ -686,7 +686,7 @@ fn facts() -> SourceFacts {
         height: 360,
         frame_rate: Rational { num: 25, den: 1 },
         pixel_aspect: None,
-        color: Default::default(),
+        color: SourceColor::default(),
         bit_depth: 8,
         chroma: ChromaLayout::Yuv420,
         frame_count: Some(30),
