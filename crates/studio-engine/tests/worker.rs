@@ -349,27 +349,36 @@ fn resolve_options_pages_fit_the_control_budget() -> TestResult {
             }
         }
         assert!(saw_requested_value && saw_content);
-        live.send(
-            u64::MAX,
-            Command::ResolveOptions {
-                schema: OPTIONS_SCHEMA_VERSION,
-                source: Box::new(facts),
-                settings: request,
-                first: 0,
-                count: 1,
-            },
-        )?;
-        drop(live.stdin.take());
-        assert!(matches!(
-            live.next()?,
-            Envelope {
-                request_id: u64::MAX,
-                body: Event::OptionsResolved { first: 0, .. },
-                ..
-            }
-        ));
-        assert_eq!(live.child.wait()?.code(), Some(0));
+        check_resolve_at_eof(live, facts, request)?;
     }
+    Ok(())
+}
+
+fn check_resolve_at_eof(
+    mut live: Live,
+    facts: studio_domain::job::SourceFacts,
+    request: OptionRequest,
+) -> TestResult {
+    live.send(
+        u64::MAX,
+        Command::ResolveOptions {
+            schema: OPTIONS_SCHEMA_VERSION,
+            source: Box::new(facts),
+            settings: request,
+            first: 0,
+            count: 1,
+        },
+    )?;
+    drop(live.stdin.take());
+    assert!(matches!(
+        live.next()?,
+        Envelope {
+            request_id: u64::MAX,
+            body: Event::OptionsResolved { first: 0, .. },
+            ..
+        }
+    ));
+    assert_eq!(live.child.wait()?.code(), Some(0));
     Ok(())
 }
 
