@@ -1873,7 +1873,7 @@ fn dismissing_a_related_check_keeps_its_worker_slot_until_the_reply() {
     app.apply(Intent::RelatedDeclined);
     assert_eq!(app.state.related(), Some(&RelatedPreview::Cancelling));
     assert!(!app.state.can_generate_pass());
-    assert!(app.apply(prepare.clone()).effects.is_empty());
+    assert_eq!(app.apply(prepare.clone()).effects, []);
     app.apply(Intent::RelatedPrepared {
         request: request + 1,
         result: Ok((Box::new(facts(None)), Vec::new())),

@@ -232,6 +232,7 @@ pub(super) fn workflow(rig: Rig, scratch: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 fn long_jobs(rig: &Rig) -> Result<(), Box<dyn Error>> {
+    const ROWS: usize = 16;
     let window = rig.window();
     let native = window.window();
     let press = |key: Key| {
@@ -239,7 +240,6 @@ fn long_jobs(rig: &Rig) -> Result<(), Box<dyn Error>> {
         native.dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
         native.dispatch_event(WindowEvent::KeyReleased { text });
     };
-    const ROWS: usize = 16;
     let template = window
         .get_jobs()
         .row_data(0)
