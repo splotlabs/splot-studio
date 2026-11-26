@@ -105,7 +105,7 @@ fn record_error(evidence: &mut SyntaxEvidence, error: &Error) -> SyntaxStatus {
     let status = match error {
         Error::InvalidObuExtension { .. } => SyntaxStatus::UnknownExtension,
         Error::Unimplemented { feature, .. } => SyntaxStatus::Unsupported {
-            feature: feature.to_owned(),
+            feature: (*feature).to_owned(),
         },
         _ => SyntaxStatus::Malformed,
     };
