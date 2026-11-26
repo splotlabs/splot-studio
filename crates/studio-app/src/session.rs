@@ -43,6 +43,7 @@ use crate::workspace::Workspace;
 
 mod advanced;
 mod batch;
+mod export;
 mod preflight;
 mod related;
 
@@ -70,6 +71,10 @@ pub enum Route {
     Inspect(u64),
     /// The batch validation process, by spawn number.
     Batch(u64),
+    /// The export worker for this job ID.
+    Export(u64),
+    /// The confirmed journal write for this export job.
+    ExportSaved(u64),
 }
 
 /// How worker deliveries leave their reader threads.
@@ -97,6 +102,8 @@ pub enum UiEffect {
     /// Arm the [`activity::CANCEL_TIMEOUT`] timer for job `0`; when it
     /// fires, dispatch [`activity::Input::CancelTimedOut`] for it.
     CancelTimer(u64),
+    /// Arm the cancellation deadline for this export job.
+    ExportCancelTimer(u64),
     /// Show this file in the file manager.
     Reveal(PathBuf),
     /// The startup handshake answered.
@@ -157,6 +164,7 @@ pub struct Session {
     advanced: advanced::Advanced,
     preflight_queue: VecDeque<preflight::Request>,
     prepared: Option<(u64, JobSpec)>,
+    encode_save: Option<u64>,
     confirming: Option<(u64, usize)>,
     preview: Preview,
     /// The open inspection read whose playback panel is visible.
@@ -166,6 +174,9 @@ pub struct Session {
     previewers_started: u64,
     analysis: Analysis,
     batch: crate::batch::Batch,
+    exports: crate::export_jobs::ExportJobs,
+    export: Option<export::Active>,
+    export_notice: Option<String>,
     batch_worker: Option<(u64, Worker)>,
     batch_workers_started: u64,
     /// The inspect process, started on first need, with its spawn number.
@@ -195,6 +206,7 @@ impl Session {
         journal: Option<Writer>,
     ) -> Self {
         let view = state.take_restored_view();
+        let exports = state.take_restored_exports();
         let mut session = Self {
             state,
             engine,
@@ -206,6 +218,7 @@ impl Session {
             advanced: advanced::Advanced::default(),
             preflight_queue: VecDeque::new(),
             prepared: None,
+            encode_save: None,
             confirming: None,
             preview: Preview::new(),
             playback_document: None,
@@ -213,6 +226,9 @@ impl Session {
             previewers_started: 0,
             analysis: Analysis::restored(view),
             batch: crate::batch::Batch::default(),
+            exports,
+            export: None,
+            export_notice: None,
             batch_worker: None,
             batch_workers_started: 0,
             inspector: None,
@@ -361,7 +377,21 @@ impl Session {
             if !counters && !batch_policy {
                 self.state.refresh_destinations(&RealDisk);
             }
-            let update = self.state.apply(intent, now, &RealDisk);
+            let worker_available =
+                self.job.is_none() && self.encode_save.is_none() && self.export.is_none();
+            let worker_ended = matches!(
+                intent,
+                Intent::Job {
+                    input: activity::Input::WorkerEnded { .. },
+                    ..
+                }
+            );
+            let update = self
+                .state
+                .apply_with_worker(intent, now, &RealDisk, worker_available);
+            if worker_ended && worker_available && update.changed != Changed::Phase {
+                pending.push_back(Intent::WorkerIdle);
+            }
             outcome.changed = more(outcome.changed, update.changed);
             for effect in update.effects {
                 self.perform(effect, &mut pending, &mut outcome.ui);
@@ -381,6 +411,7 @@ impl Session {
         if outcome.changed == Changed::Phase || self.state.workspace() != workspace {
             self.sync_preview();
         }
+        self.advance_export(now);
         outcome.preview = self.preview.take_dirty();
         outcome
     }
@@ -476,6 +507,7 @@ impl Session {
     pub fn jobs(&self) -> Vec<jobs::Job<'_>> {
         let mut jobs = jobs::list(&self.state, &self.analysis);
         jobs.extend(self.batch.files.iter().map(jobs::validation));
+        jobs.extend(self.exports.rows().iter().map(jobs::export));
         jobs
     }
 
@@ -489,6 +521,13 @@ impl Session {
             .map(|job| job.work);
         let target = match target {
             Some(Work::Validate(file)) => return self.show_batch(file.id, now),
+            Some(Work::Export(job)) => {
+                let mut outcome = Outcome::nothing();
+                if let Some(path) = job.reveal_path() {
+                    outcome.ui.push(UiEffect::Reveal(path));
+                }
+                return outcome;
+            }
             Some(Work::Convert(item)) => Some((Workspace::Encode, self.index_of_item(item.id()))),
             Some(Work::Inspect(at, _)) => Some((Workspace::Analyze, Some(at))),
             None => None,
@@ -523,6 +562,7 @@ impl Session {
                 self.analysis_input(analysis::Input::CancelDocument(int(at)))
             }
             Some(Work::Validate(file)) => self.cancel_batch_file(file.id, now),
+            Some(Work::Export(job)) => self.cancel_export_file(job.id, now),
             None => Outcome::nothing(),
         }
     }
@@ -682,17 +722,23 @@ impl Session {
             }
             Route::Job(id) => self.deliver_job(id, delivery, now),
             Route::Journal(id) => {
+                let Delivery::JournalSaved(result) = delivery else {
+                    return nothing;
+                };
+                if self.encode_save != Some(id) {
+                    return nothing;
+                }
+                self.encode_save = None;
                 if self
                     .prepared
                     .as_ref()
                     .is_none_or(|(current, _)| *current != id)
                 {
-                    return nothing;
+                    return self.dispatch(Intent::WorkerIdle, now);
                 }
-                match delivery {
-                    Delivery::JournalSaved(Ok(())) => self.start_prepared(id, now),
-                    Delivery::JournalSaved(Err(message)) => self.journal_failed(id, &message, now),
-                    _ => nothing,
+                match result {
+                    Ok(()) => self.start_prepared(id, now),
+                    Err(message) => self.journal_failed(id, &message, now),
                 }
             }
             Route::Advanced(generation) => self.deliver_advanced(generation, delivery),
@@ -705,11 +751,18 @@ impl Session {
             Route::Preview(spawn) => self.deliver_preview(spawn, delivery),
             Route::Inspect(spawn) => self.deliver_inspect(spawn, delivery),
             Route::Batch(spawn) => self.deliver_batch(spawn, delivery, now),
+            Route::Export(id) => self.deliver_export(id, delivery, now),
+            Route::ExportSaved(id) => self.export_saved(id, delivery, now),
         }
     }
 
     fn deliver_job(&mut self, id: u64, delivery: Delivery, now: Instant) -> Outcome {
         let nothing = Outcome::nothing();
+        let reaped = matches!(delivery, Delivery::Ended(_))
+            && self.job.as_ref().is_some_and(|(current, _)| *current == id);
+        if reaped {
+            self.job = None;
+        }
         if self
             .preflight
             .as_ref()
@@ -753,8 +806,7 @@ impl Session {
                 return self.preview_outcome();
             }
             Delivery::Ended(ending) => {
-                if self.job.as_ref().is_some_and(|(current, _)| *current == id) {
-                    self.job = None;
+                if reaped {
                     self.clear_preflight();
                 }
                 activity::Input::WorkerEnded {
@@ -925,7 +977,7 @@ impl Session {
                             .is_some_and(|(current, _)| *current == id))
                 {
                     self.clear_preflight();
-                    self.job.take();
+                    self.stop_preflight_worker(id);
                     pending.push_back(Intent::Job {
                         id,
                         input: activity::Input::Event(Event::Cancelled),
@@ -1009,12 +1061,7 @@ impl Session {
         let Some(writer) = &self.journal else {
             return;
         };
-        let journal = journal::snapshot(
-            self.state.next_id(),
-            self.state.option_request().clone(),
-            self.state.items(),
-            view.clone(),
-        );
+        let journal = self.journal_snapshot(view.clone());
         self.saved_view = Some(view);
         let Ok(bytes) = journal::encode(&journal) else {
             return;
@@ -1023,6 +1070,17 @@ impl Session {
             writer.submit(bytes.clone());
             self.saved = Some(bytes);
         }
+    }
+
+    fn journal_snapshot(&self, view: JournalView) -> journal::Journal {
+        let mut snapshot = journal::snapshot(
+            self.state.next_id(),
+            self.state.option_request().clone(),
+            self.state.items(),
+            view,
+        );
+        snapshot.exports = self.exports.clone();
+        snapshot
     }
 
     /// Stops everything: the converting file is journalled as interrupted
@@ -1035,6 +1093,7 @@ impl Session {
         }
         self.close_advanced();
         self.state.interrupt_for_shutdown();
+        self.interrupt_exports();
         self.persist();
         if let Some(writer) = &self.journal {
             writer.flush();
@@ -1047,11 +1106,17 @@ impl Session {
             self.previewer.take().map(|(_, w)| w),
             self.inspector.take().map(|(_, w)| w),
             self.batch_worker.take().map(|(_, w)| w),
+            self.take_export_worker(),
         ];
         for worker in workers.into_iter().flatten() {
             worker.shutdown(engine::EXIT_GRACE);
         }
         let _ = self.cleanup_batch_partial();
+        self.exports.clean_up();
+        self.persist();
+        if let Some(writer) = &self.journal {
+            writer.flush();
+        }
     }
 }
 

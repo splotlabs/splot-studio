@@ -27,7 +27,9 @@ thiserror = "2"
 splot-core = { git = "https://github.com/splotlabs/splot", branch = "main" }
 splot-decode = { git = "https://github.com/splotlabs/splot", branch = "main" }
 splot-encode = { git = "https://github.com/splotlabs/splot", branch = "main" }
+splot-recon = { git = "https://github.com/splotlabs/splot", branch = "main" }
 tempfile = "3.27"
+winapi-util = "0.1.11"
 splot-validate = { git = "https://github.com/splotlabs/splot", branch = "main" }
 # GUI only (studio-app). Feature choices are explained in crates/studio-app/Cargo.toml.
 slint = { version = "=1.19.0", default-features = false }

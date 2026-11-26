@@ -102,19 +102,17 @@ pub fn check_partial_path(partial: &Path, destination: &Path) -> Result<(), Stri
     if partial.parent() != destination.parent() {
         return Err("it is not in the output file's folder".to_owned());
     }
-    let (Some(name), Some(target)) = (
-        partial.file_name().and_then(|n| n.to_str()),
-        destination.file_name().and_then(|n| n.to_str()),
-    ) else {
+    let (Some(name), Some(target)) = (partial.file_name(), destination.file_name()) else {
         return Err("its name is not the engine's temporary file name".to_owned());
     };
     let random = name
-        .strip_prefix('.')
-        .and_then(|n| n.strip_prefix(target))
-        .and_then(|n| n.strip_prefix('.'))
-        .and_then(|n| n.strip_suffix(".partial"));
+        .as_encoded_bytes()
+        .strip_prefix(b".")
+        .and_then(|n| n.strip_prefix(target.as_encoded_bytes()))
+        .and_then(|n| n.strip_prefix(b"."))
+        .and_then(|n| n.strip_suffix(b".partial"));
     match random {
-        Some(r) if !r.is_empty() && r.bytes().all(|b| b.is_ascii_alphanumeric()) => Ok(()),
+        Some(r) if !r.is_empty() && r.iter().all(u8::is_ascii_alphanumeric) => Ok(()),
         _ => Err("its name is not the engine's temporary file name".to_owned()),
     }
 }
@@ -182,6 +180,8 @@ pub struct Recovered {
     pub dropped: usize,
     /// The workspace and documents the window showed.
     pub view: RestoredView,
+    /// Export jobs and their recovery status.
+    pub exports: crate::export_jobs::ExportJobs,
 }
 
 /// The view the journal recorded. Its documents are only where to read
@@ -230,6 +230,8 @@ pub fn view(dto: &JournalView) -> RestoredView {
 #[must_use]
 pub fn recover(journal: Journal, disk: &dyn Disk) -> Recovered {
     let view = view(&journal.view);
+    let mut exports = journal.exports;
+    exports.recover();
     let mut items: Vec<Item> = Vec::with_capacity(journal.items.len());
     let mut dropped = 0;
     for dto in journal.items {
@@ -262,12 +264,14 @@ pub fn recover(journal: Journal, disk: &dyn Disk) -> Recovered {
         cleanups,
         dropped,
         view,
+        exports,
     }
 }
 
 /// Carries out `recovered`'s cleanups with [`remove_partial`] and records
 /// what became of each file in its item.
 pub fn clean_up(recovered: &mut Recovered) {
+    recovered.exports.clean_up();
     for cleanup in std::mem::take(&mut recovered.cleanups) {
         let fate = remove_partial(&cleanup.partial, &cleanup.destination);
         let ending = recovered
@@ -493,6 +497,7 @@ mod tests {
         Journal {
             version: VERSION,
             next_id: 2,
+            exports: crate::export_jobs::ExportJobs::default(),
             settings: INITIAL_SETTINGS.into(),
             view: JournalView::default(),
             items: vec![JournalItem {

@@ -3,7 +3,6 @@
 
 //! Streams a validation report and publishes it through the shared output transaction.
 
-use std::ffi::OsStr;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
@@ -161,32 +160,13 @@ pub(super) fn export(
 // The source can disappear after validation. Its directory entry still
 // identifies a location that a report must not occupy.
 fn check_source_slot(source: &Path, destination: &Path) -> Result<(), Stop> {
-    fn parent_identity(path: &Path) -> io::Result<FileId> {
-        let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty());
-        FileId::of_path(parent.unwrap_or_else(|| Path::new(".")))
-    }
-
-    let same_slot = source
-        .file_name()
-        .zip(destination.file_name())
-        .is_some_and(|(left, right)| same_name(left, right))
-        && parent_identity(source)
-            .is_ok_and(|left| parent_identity(destination).is_ok_and(|right| left == right));
-    if source == destination || same_slot {
+    if output::same_destination_slot(source, destination) {
         return Err(Stop::failed(
             FailureCode::SourceIsDestination,
             "Select a destination different from the source file.",
         ));
     }
     Ok(())
-}
-
-fn same_name(left: &OsStr, right: &OsStr) -> bool {
-    if cfg!(any(windows, target_os = "macos")) {
-        left.to_string_lossy().to_lowercase() == right.to_string_lossy().to_lowercase()
-    } else {
-        left == right
-    }
 }
 
 fn check_cancelled(cancelled: &dyn Fn() -> bool) -> Result<(), Stop> {

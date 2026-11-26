@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod analysis;
+pub mod export;
 pub mod job;
 pub mod options;
 pub mod preview;

@@ -1234,6 +1234,52 @@ impl Preview {
         });
     }
 
+    pub(crate) fn export_frame_source(
+        &self,
+        source: crate::export_jobs::ExportSource,
+    ) -> Option<crate::export_jobs::ExportFrameSource> {
+        use studio_domain::export::{ExportLayer, ExportSampleFormat};
+
+        let shown = self.shown.as_ref()?;
+        let header = &shown.picture.header;
+        if header.generation != self.stage_generation {
+            return None;
+        }
+        let PictureTarget::Document {
+            document,
+            path,
+            fingerprint,
+            digest,
+        } = shown.target.as_ref()?
+        else {
+            return None;
+        };
+        if *document != source.document
+            || *path != source.source.path
+            || *fingerprint != source.source.fingerprint
+            || **digest != source.source.digest
+        {
+            return None;
+        }
+        let output = header.output?;
+        let info = header.document_info.as_deref()?;
+        Some(crate::export_jobs::ExportFrameSource {
+            source,
+            generation: header.generation,
+            ordinal: output.ordinal,
+            layer: ExportLayer {
+                extended: output.extended_layer,
+                embedded: output.embedded_layer,
+                temporal: output.temporal_layer,
+            },
+            expected: ExportSampleFormat {
+                bit_depth: info.bit_depth,
+                chroma: info.chroma,
+            },
+            grain: header.options.grain,
+        })
+    }
+
     /// The picture area as it should be drawn now.
     #[must_use]
     pub fn view(&self) -> StageView {

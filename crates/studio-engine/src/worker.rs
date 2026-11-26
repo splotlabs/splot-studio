@@ -52,6 +52,9 @@ use studio_domain::protocol::{
 };
 use thiserror::Error;
 
+mod export;
+
+use self::export::ExportRun;
 use crate::job::{self, Control, JOB_STACK_BYTES, Stop};
 use crate::{build_identity, capabilities, live, options, source};
 
@@ -173,18 +176,15 @@ fn serve<'scope>(
                 first,
                 count,
             } => {
-                queue_resolution(
-                    requests,
-                    outbox,
-                    Resolution {
-                        id,
-                        schema,
-                        source,
-                        settings,
-                        first,
-                        count,
-                    },
-                );
+                let request = Resolution {
+                    id,
+                    schema,
+                    source,
+                    settings,
+                    first,
+                    count,
+                };
+                queue_resolution(requests, outbox, request);
             }
             // A probe runs here, in order with the other replies, bounded by
             // the media tools' timeout; the end of input is seen after it.
@@ -203,10 +203,13 @@ fn serve<'scope>(
             Command::ConfirmPolicy => {
                 outbox.confirm(id);
             }
+            Command::ExportPrepare { export } => {
+                export::start(scope, outbox, id, *export, &mut job);
+            }
+            Command::ExportProceed => export::proceed(outbox, id),
+            Command::ExportPublish => export::permit(outbox, id),
             Command::Cancel => {
-                if !outbox.cancel(id) {
-                    outbox.reply(id, refusal(ErrorCode::WrongState, "no job is running"));
-                } else if outbox.settle(CANCEL_GRACE) {
+                if cancel_job(outbox, id) {
                     return (Ok(()), true);
                 }
             }
@@ -251,6 +254,17 @@ fn serve<'scope>(
         }
     };
     (result, stop_job(outbox, job))
+}
+
+fn cancel_job(outbox: &Outbox, id: u64) -> bool {
+    let message = match outbox.cancel(id) {
+        Cancel::Accepted => return outbox.settle(CANCEL_GRACE),
+        Cancel::Inactive => "no job is running",
+        Cancel::WrongExport => "Use the request ID of the running export.",
+        Cancel::Publishing => "The export is publishing.",
+    };
+    outbox.reply(id, refusal(ErrorCode::WrongState, message));
+    false
 }
 
 fn stop_job(outbox: &Outbox, job: Option<ScopedJoinHandle<'_, ()>>) -> bool {
@@ -543,6 +557,7 @@ struct State {
     job_id: u64,
     /// The job's temporary file, while it exists.
     temp: Option<PathBuf>,
+    export: Option<ExportRun>,
     /// Stops the job's encoder, once it exists.
     encoder: Option<CancelToken>,
     /// The job has claimed publication; it can no longer be cancelled.
@@ -559,6 +574,13 @@ enum JobState {
     None,
     Running,
     Ended,
+}
+
+enum Cancel {
+    Inactive,
+    WrongExport,
+    Publishing,
+    Accepted,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -680,12 +702,7 @@ impl Outbox {
     /// already abandoned by [`Self::settle`] has had its terminal event.
     fn job_end(&self, request_id: u64, event: Event) {
         let mut state = self.lock();
-        if state.job != JobState::Ended {
-            state.flush_progress();
-            state.push(Envelope::new(request_id, event));
-            state.job = JobState::Ended;
-            state.picture = None;
-        }
+        state.end_job(request_id, event);
         drop(state);
         // Ends the live thread.
         self.feed().take();
@@ -721,8 +738,11 @@ impl Outbox {
         state.progress = None;
         state.picture = None;
         let id = state.job_id;
-        state.push(Envelope::new(id, Event::Cancelled));
-        state.job = JobState::Ended;
+        let event = state
+            .export
+            .take()
+            .map_or(Event::Cancelled, ExportRun::cancel);
+        state.end_job(id, event);
         drop(state);
         self.changed.notify_all();
         true
@@ -731,6 +751,9 @@ impl Outbox {
     /// Sets the cancel flag and stops a codec call in progress. Called under
     /// the lock (`state`), so [`Control::hold_encoder`] cannot miss it.
     fn stop(&self, state: &State) {
+        if state.publishing && state.export.is_some() {
+            return;
+        }
         self.cancel.store(true, Ordering::Relaxed);
         if let Some(token) = &state.encoder {
             token.cancel();
@@ -741,17 +764,25 @@ impl Outbox {
     /// Requests cancellation and acknowledges it, unless no job is running.
     /// Decided under the lock that orders the terminal event, so an
     /// acknowledgement never follows it.
-    fn cancel(&self, request_id: u64) -> bool {
+    fn cancel(&self, request_id: u64) -> Cancel {
         let mut state = self.lock();
         if state.job != JobState::Running {
-            return false;
+            return Cancel::Inactive;
+        }
+        if state.export.is_some() {
+            if state.job_id != request_id {
+                return Cancel::WrongExport;
+            }
+            if state.publishing {
+                return Cancel::Publishing;
+            }
         }
         self.stop(&state);
         state.flush_progress();
         state.push(Envelope::new(request_id, Event::CancelRequested));
         drop(state);
         self.changed.notify_all();
-        true
+        Cancel::Accepted
     }
 
     fn close(&self) {
@@ -884,6 +915,15 @@ impl Control for Outbox {
 }
 
 impl State {
+    fn end_job(&mut self, request_id: u64, event: Event) {
+        if self.job != JobState::Ended {
+            self.flush_progress();
+            self.push(Envelope::new(request_id, event));
+            self.job = JobState::Ended;
+            self.picture = None;
+        }
+    }
+
     fn push(&mut self, envelope: Envelope<Event>) {
         if !self.broken {
             self.queue.push_back(envelope);
@@ -1105,7 +1145,7 @@ mod tests {
         let early = CancelToken::default();
         outbox.hold_encoder(early.clone());
         assert!(!early.is_cancelled());
-        assert!(outbox.cancel(2));
+        assert!(matches!(outbox.cancel(2), Cancel::Accepted));
         assert!(early.is_cancelled());
         let late = CancelToken::default();
         outbox.hold_encoder(late.clone());
@@ -1129,7 +1169,7 @@ mod tests {
 
         let outbox = Outbox::default();
         outbox.begin_job(1, false);
-        assert!(outbox.cancel(2));
+        assert!(matches!(outbox.cancel(2), Cancel::Accepted));
         thread::scope(|scope| {
             scope.spawn(|| {
                 thread::sleep(Duration::from_millis(20));

@@ -8,6 +8,7 @@
 
 mod advanced;
 mod batch;
+mod export;
 mod presets;
 
 use std::cell::{Cell, RefCell};
@@ -45,6 +46,7 @@ pub struct Controller {
     advanced_settle: Timer,
     preset_files: presets::PresetFiles,
     batch_files: batch::BatchFiles,
+    export_draft: RefCell<Option<crate::export_setup::Draft>>,
     /// The window was not minimized when last looked at.
     visible: Cell<bool>,
 }
@@ -153,6 +155,7 @@ impl Controller {
             advanced_settle: Timer::default(),
             preset_files: presets::PresetFiles::default(),
             batch_files: batch::BatchFiles::default(),
+            export_draft: RefCell::default(),
             visible: Cell::new(true),
         });
         CONTROLLER.with(|c| *c.borrow_mut() = Rc::downgrade(&ctl));
@@ -233,6 +236,7 @@ impl Controller {
         ctl.wire_preview(window);
         ctl.wire_analysis(window);
         ctl.wire_batch(window);
+        ctl.wire_export(window);
 
         let client = BuildIdentity {
             name: APP_NAME.to_owned(),
@@ -518,6 +522,22 @@ impl Controller {
                         },
                     );
                 }
+                UiEffect::ExportCancelTimer(id) => {
+                    let weak = Rc::downgrade(self);
+                    self.cancel_deadline.start(
+                        TimerMode::SingleShot,
+                        activity::CANCEL_TIMEOUT,
+                        move || {
+                            with(&weak, |ctl| {
+                                let outcome = ctl
+                                    .session
+                                    .borrow_mut()
+                                    .export_cancel_timed_out(id, Instant::now());
+                                ctl.handle(outcome);
+                            });
+                        },
+                    );
+                }
                 UiEffect::Reveal(path) => self.reveal(path),
                 UiEffect::Engine(status) => show_engine(&window, &status),
             }
@@ -534,7 +554,9 @@ impl Controller {
             }
         } else {
             self.clock.stop();
-            self.cancel_deadline.stop();
+            if !session.export_cancelling() {
+                self.cancel_deadline.stop();
+            }
         }
         let now = Instant::now();
         match outcome.changed {
@@ -551,6 +573,7 @@ impl Controller {
         if outcome.analysis {
             render_analysis(&window, session.analysis());
         }
+        export::render_export_status(&window, &session);
         window.set_validation_active(session.batch_active());
         window.set_validation_job_notice(session.batch_notice().unwrap_or_default().into());
         if outcome.analysis || outcome.changed != Changed::Nothing {
@@ -704,6 +727,7 @@ impl Controller {
     /// Stops the timers and the session (see [`Session::shutdown`]).
     pub fn shutdown(&self) {
         self.preset_files.invalidate();
+        self.export_draft.borrow_mut().take();
         self.clock.stop();
         self.cancel_deadline.stop();
         self.resize_settle.stop();

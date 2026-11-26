@@ -467,6 +467,7 @@ fn restored_scenario(now: Instant) -> AppState {
         pass_artifact: None,
     };
     let journal = Journal {
+        exports: studio_app::export_jobs::ExportJobs::default(),
         view: studio_app::journal::JournalView::default(),
         version: studio_app::journal::VERSION,
         next_id: 4,
@@ -753,31 +754,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             analyze.session.state().clone()
         };
         studio_app::render(&window, analyze.session.state(), now);
-        if matches!(name, "analyze-playback" | "analyze-sample") {
-            window.show()?;
-            let stage = PictureBox::clamped(
-                u32::try_from(window.get_stage_px_width()).unwrap_or(1),
-                u32::try_from(window.get_stage_px_height()).unwrap_or(1),
-            );
-            analyze.playback(stage, name == "analyze-sample")?;
-            studio_app::render_preview(
-                &window,
-                analyze.session.state(),
-                analyze.session.preview(),
-                preview::Dirty {
-                    picture: true,
-                    view: true,
-                    thumbs: false,
-                },
-            );
-        }
+        analyze.render_picture(&window, name)?;
         studio_app::render_analysis(&window, analyze.session.analysis());
         studio_app::render_jobs(
             &window,
             &studio_app::jobs::list(&encode, analyze.session.analysis()),
         );
         window.show()?;
-        if jobs {
+        if name == "analyze-export-setup" {
+            window.invoke_show_export_setup();
+        } else if jobs {
             window.invoke_show_jobs();
         }
         return capture(&window, out);

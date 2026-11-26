@@ -16,12 +16,14 @@
 //! (nothing is at its path any more). `analyze-playback` decodes an AV2 file
 //! from `STUDIO_PLAYBACK_FIXTURE` with the real preview engine. `analyze-sample`
 //! shows a decoded Y plane at 4× and an exact sample value.
+//! `analyze-export-setup` shows the export dialog for a real decoded frame.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
+use slint::ComponentHandle;
 use studio_app::analysis::{Input, Origin, Phase, Restore, Saved};
 use studio_app::engine::{Delivery, ENGINE_NAME};
 use studio_app::preview::{self, StageState};
@@ -106,7 +108,48 @@ impl Scenario {
         Ok(())
     }
 
-    pub fn playback(&mut self, stage: PictureBox, inspect_sample: bool) -> Result<(), String> {
+    pub fn render_picture(
+        &mut self,
+        window: &studio_app::AppWindow,
+        name: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if matches!(
+            name,
+            "analyze-playback" | "analyze-sample" | "analyze-export-setup"
+        ) {
+            window.show()?;
+            let stage = PictureBox::clamped(
+                u32::try_from(window.get_stage_px_width()).unwrap_or(1),
+                u32::try_from(window.get_stage_px_height()).unwrap_or(1),
+            );
+            self.playback(stage, name == "analyze-sample")?;
+            if name == "analyze-export-setup" {
+                studio_app::export_setup::Draft::new(
+                    studio_app::ExportPurpose::Frame,
+                    self.session.export_sources(),
+                    self.session
+                        .analysis()
+                        .shown()
+                        .map(studio_app::analysis::Document::id),
+                    self.session.export_frame_source().as_ref(),
+                )?
+                .render(window);
+            }
+            studio_app::render_preview(
+                window,
+                self.session.state(),
+                self.session.preview(),
+                preview::Dirty {
+                    picture: true,
+                    view: true,
+                    thumbs: false,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn playback(&mut self, stage: PictureBox, inspect_sample: bool) -> Result<(), String> {
         let path = std::env::var_os("STUDIO_PLAYBACK_FIXTURE")
             .map(PathBuf::from)
             .ok_or("Set STUDIO_PLAYBACK_FIXTURE to an AV2 file.")?;
@@ -195,6 +238,7 @@ fn restored(path: PathBuf) -> AppState {
     };
     AppState::new(Startup {
         recovered: Some(Recovered {
+            exports: studio_app::export_jobs::ExportJobs::default(),
             items: Vec::new(),
             next_id: 1,
             settings: INITIAL_SETTINGS.into(),
@@ -249,7 +293,7 @@ pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
         Instant::now(),
     );
     match name {
-        "analyze-empty" | "analyze-playback" | "analyze-sample" => {}
+        "analyze-empty" | "analyze-playback" | "analyze-sample" | "analyze-export-setup" => {}
         "analyze-opening" => {
             // Asked for, and never answered here.
             let path = scenario.file("park walk.ivf", &ivf())?;

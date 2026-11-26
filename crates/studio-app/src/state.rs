@@ -190,6 +190,8 @@ pub enum Intent {
     },
     /// Saving the journal started failing (`Err`) or works again.
     JournalSaved(Result<(), String>),
+    /// The shared worker is available for a waiting job.
+    WorkerIdle,
 }
 
 /// What the caller must do for an [`AppState::apply`].
@@ -428,6 +430,7 @@ pub struct AppState {
     /// The Analyze documents the journal recorded, until the session takes
     /// them.
     restored_view: RestoredView,
+    restored_exports: crate::export_jobs::ExportJobs,
 }
 
 impl Default for AppState {
@@ -463,6 +466,7 @@ impl AppState {
             next_request: 1,
             workspace: Workspace::Encode,
             restored_view: RestoredView::default(),
+            restored_exports: crate::export_jobs::ExportJobs::default(),
         };
         if let Some(recovered) = startup.recovered {
             let interrupted = recovered
@@ -488,6 +492,7 @@ impl AppState {
                 state.workspace = recovered.view.workspace;
             }
             state.restored_view = recovered.view;
+            state.restored_exports = recovered.exports;
         }
         state
     }
@@ -497,17 +502,31 @@ impl AppState {
         std::mem::take(&mut self.restored_view)
     }
 
+    pub(crate) fn take_restored_exports(&mut self) -> crate::export_jobs::ExportJobs {
+        std::mem::take(&mut self.restored_exports)
+    }
+
     /// Applies one intent at time `now`, judging destinations on `disk`.
     /// Out-of-range values, stale answers and edits of a converting file
     /// leave the state unchanged.
     pub fn apply(&mut self, intent: Intent, now: Instant, disk: &dyn Disk) -> Update {
+        self.apply_with_worker(intent, now, disk, true)
+    }
+
+    pub(crate) fn apply_with_worker(
+        &mut self,
+        intent: Intent,
+        now: Instant,
+        disk: &dyn Disk,
+        worker_available: bool,
+    ) -> Update {
         let mut update = Update {
             effects: Vec::new(),
             changed: Changed::Phase,
         };
         self.apply_inner(intent, now, disk, &mut update);
         if update.changed == Changed::Phase {
-            self.settle(now, &mut update);
+            self.settle(now, &mut update, worker_available);
         }
         update
     }
@@ -597,7 +616,7 @@ impl AppState {
             }
             Intent::EngineAnswered(answer) => self.engine = Some(answer),
             Intent::ConvertRequested if self.related.is_none() => self.convert(disk),
-            Intent::ConvertRequested => {}
+            Intent::ConvertRequested | Intent::WorkerIdle => {}
             Intent::PrepareRelated { item, action } => {
                 update.effects.extend(self.prepare_related(item, action));
             }
@@ -639,7 +658,7 @@ impl AppState {
     /// Brings derived state up to date after a change: acknowledgements
     /// and the confirmation that no longer hold are dropped, the next probe
     /// is sent and the run moves on.
-    fn settle(&mut self, now: Instant, update: &mut Update) {
+    fn settle(&mut self, now: Instant, update: &mut Update, worker_available: bool) {
         let settings = self.draft_settings().base;
         for item in &mut self.items {
             let judged = item.facts.is_some() && item.state != ItemState::Probing;
@@ -655,7 +674,7 @@ impl AppState {
         if let Some(effect) = self.next_probe() {
             update.effects.push(effect);
         }
-        self.advance(now, update);
+        self.advance(now, update, worker_available);
         if !self.items.iter().any(|i| i.state == ItemState::Waiting) {
             self.paused = false;
         }

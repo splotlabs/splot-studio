@@ -1,0 +1,298 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+import { Button, CheckBox, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
+import { Caption, Label } from "controls.slint";
+import { Tokens } from "tokens.slint";
+
+export enum ExportPurpose { video, frame, hashes }
+
+export struct ExportSourceRow {
+    name: string,
+    path: string,
+    selected: bool,
+    depth: int,
+    chroma: int,
+}
+
+export struct ExportForm {
+    raw: bool,
+    use-range: bool,
+    first: string,
+    last: string,
+    use-layer: bool,
+    extended: string,
+    embedded: string,
+    temporal: string,
+    apply-grain: bool,
+    use-rate: bool,
+    numerator: string,
+    denominator: string,
+}
+
+export global DecodeExport {
+    in property <bool> can-start;
+    in property <bool> can-frame;
+    in property <bool> active;
+    in property <string> job-notice;
+
+    in property <ExportPurpose> purpose;
+    in property <[ExportSourceRow]> sources;
+    in property <string> frame-details;
+    in property <bool> initial-grain: true;
+    in property <bool> busy;
+    in property <string> notice;
+    in property <int> selected-count;
+
+    callback open(ExportPurpose);
+    callback cancel();
+    callback choose-destination(ExportForm);
+    callback source-changed(int, bool);
+    callback depth-changed(int, int);
+    callback chroma-changed(int, int);
+    callback cancel-batch();
+}
+
+component ExportTextField inherits LineEdit {
+    in property <string> label;
+    width: 84px;
+    accessible-label: root.label;
+    placeholder-text: root.label;
+    enabled: !DecodeExport.busy;
+}
+
+export component ExportSetup inherits Rectangle {
+    property <bool> frame: DecodeExport.purpose == ExportPurpose.frame;
+    property <bool> hashes: DecodeExport.purpose == ExportPurpose.hashes;
+    property <string> title: root.frame ? "Export Frame" : root.hashes ? "Frame Hashes" : "Export Decoded Video";
+    property <int> format-index: root.frame ? 1 : 0;
+    property <int> range-index;
+    property <bool> layer-selected;
+    property <bool> apply-grain: DecodeExport.initial-grain;
+    property <bool> fallback-selected;
+    property <string> first: "1";
+    property <string> last: "1";
+    property <string> extended: "0";
+    property <string> embedded: "0";
+    property <string> temporal: "0";
+    property <string> numerator;
+    property <string> denominator;
+
+    background: Tokens.dark ? #00000080 : #18181d40;
+    TouchArea { }
+
+    FocusScope {
+        focus-on-tab-navigation: false;
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                DecodeExport.cancel();
+                return accept;
+            }
+            reject
+        }
+
+        Rectangle {
+            width: min(568px, root.width - 2 * Tokens.space-3);
+            height: min(root.height - 2 * Tokens.space-3, card.preferred-height);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Tokens.raised;
+            border-color: Tokens.border;
+            border-width: 1px;
+            border-radius: Tokens.radius-large;
+            accessible-role: groupbox;
+            accessible-label: root.title;
+
+            ScrollView {
+                horizontal-scrollbar-policy: always-off;
+                vertical-scrollbar-policy: root.height - 2 * Tokens.space-3 < card.preferred-height ? always-on : always-off;
+                content-width: self.visible-width;
+                content-height: card.preferred-height;
+
+                card := VerticalLayout {
+                    width: parent.visible-width;
+                    height: self.preferred-height;
+                    padding: Tokens.space-4;
+                    spacing: Tokens.space-3;
+
+                    Text {
+                        text: root.title;
+                        color: Tokens.text;
+                        font-size: Tokens.type-title * 1rem;
+                        font-weight: Tokens.weight-semibold;
+                    }
+
+                    if root.frame: Caption {
+                        text: DecodeExport.frame-details;
+                        wrap: word-wrap;
+                    }
+
+                    if !root.frame: VerticalLayout {
+                        spacing: Tokens.space-1;
+
+                        Label { text: "Sources and decoded sample formats"; }
+
+                        for source[i] in DecodeExport.sources: HorizontalLayout {
+                            spacing: Tokens.space-1;
+
+                            CheckBox {
+                                horizontal-stretch: 1;
+                                text: source.name;
+                                accessible-label: "Export " + source.name;
+                                accessible-description: source.path;
+                                checked: source.selected;
+                                enabled: !DecodeExport.busy;
+                                toggled => { DecodeExport.source-changed(i, self.checked); }
+                            }
+
+                            ComboBox {
+                                width: 112px;
+                                model: ["Bit depth", "8-bit", "10-bit"];
+                                current-index: source.depth;
+                                accessible-label: "Decoded bit depth of " + source.name;
+                                enabled: source.selected && !DecodeExport.busy;
+                                selected => { DecodeExport.depth-changed(i, self.current-index); }
+                            }
+
+                            ComboBox {
+                                width: 130px;
+                                model: ["Chroma layout", "Monochrome", "4:2:0", "4:2:2", "4:4:4"];
+                                current-index: source.chroma;
+                                accessible-label: "Decoded chroma layout of " + source.name;
+                                enabled: source.selected && !DecodeExport.busy;
+                                selected => { DecodeExport.chroma-changed(i, self.current-index); }
+                            }
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: Tokens.space-2;
+
+                        if !root.hashes: ComboBox {
+                            width: 168px;
+                            model: ["Y4M", "Raw planes + layout"];
+                            current-index <=> root.format-index;
+                            accessible-label: "Export format";
+                            enabled: !DecodeExport.busy;
+                        }
+
+                        if !root.frame: ComboBox {
+                            width: 164px;
+                            model: ["Whole stream", "Output range"];
+                            current-index <=> root.range-index;
+                            accessible-label: "Output selection";
+                            enabled: !DecodeExport.busy;
+                        }
+
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+
+                    if !root.frame && root.range-index == 1: HorizontalLayout {
+                        spacing: Tokens.space-2;
+                        alignment: start;
+                        ExportTextField { label: "First output"; text <=> root.first; }
+                        ExportTextField { label: "Last output"; text <=> root.last; }
+                        Caption {
+                            text: "Output numbers start at 1, before the layer filter.";
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    if !root.frame: CheckBox {
+                        text: "Export one layer";
+                        accessible-description: "Filter by extended, embedded and temporal layer IDs.";
+                        checked <=> root.layer-selected;
+                        enabled: !DecodeExport.busy;
+                    }
+
+                    if !root.frame && root.layer-selected: HorizontalLayout {
+                        spacing: Tokens.space-2;
+                        alignment: start;
+                        ExportTextField { label: "Extended"; text <=> root.extended; }
+                        ExportTextField { label: "Embedded"; text <=> root.embedded; }
+                        ExportTextField { label: "Temporal"; text <=> root.temporal; }
+                    }
+
+                    if !root.hashes && !root.frame: CheckBox {
+                        text: "Apply film grain";
+                        checked <=> root.apply-grain;
+                        enabled: !DecodeExport.busy;
+                    }
+
+                    Caption {
+                        text: root.hashes ? "The report uses canonical SHA-256 hashes of samples before film grain."
+                            : root.format-index == 1
+                                ? "Studio writes packed native planes and a layout JSON file beside each raw file."
+                                : "Y4M requires a constant frame rate and consistent dimensions.";
+                        wrap: word-wrap;
+                    }
+
+                    if !root.hashes: CheckBox {
+                        text: "Set a fallback frame rate";
+                        accessible-description: "Apply this rate only if stream timing is unavailable.";
+                        checked <=> root.fallback-selected;
+                        enabled: !DecodeExport.busy;
+                    }
+
+                    if !root.hashes && root.fallback-selected: HorizontalLayout {
+                        spacing: Tokens.space-2;
+                        alignment: start;
+                        ExportTextField { label: "Numerator"; text <=> root.numerator; }
+                        ExportTextField { label: "Denominator"; text <=> root.denominator; }
+                        Caption {
+                            text: "Frames per second. This rate applies only if stream timing is unavailable.";
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                        }
+                    }
+
+                    if DecodeExport.selected-count > 1: Caption {
+                        text: "Choose one folder. Studio adds export suffixes to the source names.";
+                        wrap: word-wrap;
+                    }
+
+                    if DecodeExport.notice != "": Caption {
+                        text: DecodeExport.notice;
+                        color: Tokens.error;
+                        wrap: word-wrap;
+                        accessible-live-region: polite;
+                    }
+
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: Tokens.space-2;
+
+                        Button {
+                            text: "Cancel";
+                            init => { self.focus(); }
+                            clicked => { DecodeExport.cancel(); }
+                        }
+
+                        Button {
+                            text: DecodeExport.selected-count > 1 ? "Choose Folder…" : "Choose Destination…";
+                            enabled: DecodeExport.selected-count > 0 && !DecodeExport.busy;
+                            clicked => {
+                                DecodeExport.choose-destination({
+                                    raw: root.format-index == 1,
+                                    use-range: root.range-index == 1,
+                                    first: root.first,
+                                    last: root.last,
+                                    use-layer: root.layer-selected,
+                                    extended: root.extended,
+                                    embedded: root.embedded,
+                                    temporal: root.temporal,
+                                    apply-grain: root.apply-grain,
+                                    use-rate: root.fallback-selected,
+                                    numerator: root.numerator,
+                                    denominator: root.denominator
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

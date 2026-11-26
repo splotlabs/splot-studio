@@ -10,6 +10,7 @@
 
 import { Button, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 import { Tokens } from "tokens.slint";
+import { DecodeExport, ExportPurpose } from "export-setup.slint";
 import { FocusRing, KeyboardFocus } from "focus.slint";
 import { Caption, LinkButton, WorkspaceSwitch } from "controls.slint";
 import { IconButton, Playback, PlaybackPanel, StageState, ToggleChip } from "stage.slint";
@@ -1032,6 +1033,35 @@ export component AnalyzeView inherits VerticalLayout {
                 clicked => {
                     Analysis.reopen();
                 }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: Tokens.space-3;
+            alignment: start;
+
+            LinkButton {
+                min-height: 20px;
+                text: "Export Decoded Video…";
+                description: "Export native decoded samples from the open streams.";
+                enabled: DecodeExport.can-start;
+                clicked => { DecodeExport.open(ExportPurpose.video); }
+            }
+
+            LinkButton {
+                min-height: 20px;
+                text: "Export Frame…";
+                description: "Export the displayed output picture. Pause playback to select a picture.";
+                enabled: DecodeExport.can-frame;
+                clicked => { DecodeExport.open(ExportPurpose.frame); }
+            }
+
+            LinkButton {
+                min-height: 20px;
+                text: "Frame Hashes…";
+                description: "Export a SHA-256 report for decoded samples.";
+                enabled: DecodeExport.can-start;
+                clicked => { DecodeExport.open(ExportPurpose.hashes); }
             }
         }
 

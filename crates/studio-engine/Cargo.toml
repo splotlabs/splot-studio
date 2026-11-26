@@ -25,9 +25,13 @@ sha2.workspace = true
 splot-core.workspace = true
 splot-decode.workspace = true
 splot-encode.workspace = true
+splot-recon.workspace = true
 splot-validate.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winapi-util.workspace = true
 
 [lints]
 workspace = true

@@ -25,6 +25,23 @@ use crate::source::{FRAMES_IN_FLIGHT, MEMORY_BUDGET_BYTES};
 /// running encode takes at most this many cores from it.
 pub const PREVIEW_DECODE_THREADS: usize = 2;
 
+/// The largest temporal unit used for document decoding.
+pub(crate) const MAX_UNIT_BYTES: usize = 64 << 20;
+
+/// The maximum number of temporal units or pictures for document decoding.
+pub(crate) const MAX_DOCUMENT_UNITS: usize = 1 << 20;
+
+pub(crate) fn document_decoder(
+    threads: usize,
+    grain: GrainPolicy,
+) -> splot_decode::Result<Decoder> {
+    let limit = DecodeLimitThreshold::max(MAX_DOCUMENT_UNITS as u64);
+    let limits = DecodeLimits::DEFAULT
+        .with_max_frames_to_decode(limit)
+        .with_max_output_frames(limit);
+    preview_decoder(threads, limits, grain)
+}
+
 /// The most bytes of decoded frames a preview decoder may keep alive:
 /// references, frames in flight and pictures being shown.
 pub const DECODE_STORE_BYTES: u64 = 1 << 30;

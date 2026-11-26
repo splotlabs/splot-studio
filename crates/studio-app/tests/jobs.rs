@@ -41,6 +41,9 @@ use studio_domain::protocol::BuildIdentity;
 use studio_domain::validation::{ReportFormat, ValidationSettings};
 
 /// Long enough for a debug-build encode of a small clip.
+#[path = "jobs/export.rs"]
+mod export;
+
 const JOB_TIMEOUT: Duration = Duration::from_secs(600);
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
 const SIZE: (u32, u32) = (900, 680);
@@ -361,6 +364,7 @@ fn jobs_and_documents_survive_cancel_close_worker_death_and_restart() {
     let mut rig = Rig::new();
     let scratch = Scratch::new("lifecycle");
     validation_setup_keyboard(&rig);
+    export::shared_worker_and_restore(&mut rig).unwrap_or_else(|error| unreachable!("{error}"));
     batch_reports_in_jobs_and_analyze(&mut rig);
     partial_batch_reports_can_export_without_attaching(&mut rig);
     concurrent_encode_and_inspection(&mut rig, &scratch);
@@ -478,7 +482,7 @@ fn batch_reports_in_jobs_and_analyze(rig: &mut Rig) {
     batch_report_refuses_rewritten_source(rig, &source);
 
     let last = rig.session().jobs().len() - 1;
-    rig.session().batch_remove(last);
+    rig.session().remove_job(last);
     assert_eq!(
         rig.states(),
         [
@@ -784,6 +788,11 @@ fn inspect_child() -> u32 {
 
 #[cfg(unix)]
 fn inspect_children() -> Option<Vec<u32>> {
+    engine_children("inspect")
+}
+
+#[cfg(unix)]
+fn engine_children(role: &str) -> Option<Vec<u32>> {
     let listing = std::process::Command::new("ps")
         .args(["-A", "-o", "pid=,ppid=,args="])
         .output()
@@ -796,8 +805,8 @@ fn inspect_children() -> Option<Vec<u32>> {
             let pid = words.next()?.parse::<u32>().ok()?;
             let parent = words.next()?.parse::<u32>().ok()?;
             let args: Vec<&str> = words.collect();
-            let inspect = args.first().is_some_and(|a| a.contains(ENGINE_NAME))
-                && args.get(1) == Some(&"inspect");
+            let inspect =
+                args.first().is_some_and(|a| a.contains(ENGINE_NAME)) && args.get(1) == Some(&role);
             (parent == me && inspect).then_some(pid)
         })
         .collect();

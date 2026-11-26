@@ -22,6 +22,7 @@ use crate::activity::Phase as JobPhase;
 use crate::analysis::{Analysis, Document, Phase, ReadEnd};
 pub use crate::batch::File as ValidationFile;
 use crate::batch::Phase as ValidationPhase;
+use crate::export_jobs::{ExportJob, Phase as ExportPhase};
 use crate::queue::{Ending, Item, ItemState};
 use crate::state::AppState;
 
@@ -36,6 +37,8 @@ pub enum State {
     Cancelling,
     /// Finished.
     Completed,
+    /// Some outputs reached their destination before a failure.
+    Partial,
     /// A read that ended where the file stopped parsing: what came before
     /// is kept, the rest is not read.
     Stopped,
@@ -65,6 +68,8 @@ pub enum Work<'a> {
     Inspect(usize, &'a Document),
     /// A local file in the validation queue.
     Validate(&'a ValidationFile),
+    /// An export from Analyze.
+    Export(&'a ExportJob),
 }
 
 /// One job.
@@ -115,6 +120,7 @@ impl Job<'_> {
     pub fn can_show(&self) -> bool {
         match self.work {
             Work::Validate(file) => file.can_open_report(),
+            Work::Export(file) => file.reveal_path().is_some(),
             Work::Convert(_) | Work::Inspect(..) => true,
         }
     }
@@ -128,7 +134,7 @@ impl Job<'_> {
     /// The file validation ended and can be removed from Jobs.
     #[must_use]
     pub const fn can_remove(&self) -> bool {
-        matches!(self.work, Work::Validate(_)) && !self.state.is_active()
+        matches!(self.work, Work::Validate(_) | Work::Export(_)) && !self.state.is_active()
     }
 
     /// Cancel applies: it is running or queued.
@@ -138,6 +144,15 @@ impl Job<'_> {
             // Cancel stops the converting file; a queued one is removed in
             // Encode instead.
             Work::Convert(_) => matches!(self.state, State::Running),
+            Work::Export(file) => matches!(
+                file.phase,
+                ExportPhase::Queued
+                    | ExportPhase::Running(
+                        studio_domain::export::ExportStage::Checking
+                            | studio_domain::export::ExportStage::Decoding
+                            | studio_domain::export::ExportStage::Verifying
+                    )
+            ),
             Work::Inspect(..) | Work::Validate(_) => {
                 matches!(self.state, State::Running | State::Queued)
             }
@@ -201,6 +216,25 @@ pub(crate) fn validation(file: &ValidationFile) -> Job<'_> {
     Job {
         state,
         work: Work::Validate(file),
+    }
+}
+
+pub(crate) fn export(file: &ExportJob) -> Job<'_> {
+    use studio_domain::export::ExportOutcome;
+    let state = match &file.phase {
+        ExportPhase::Queued => State::Queued,
+        ExportPhase::Running(_) => State::Running,
+        ExportPhase::Cancelling => State::Cancelling,
+        ExportPhase::Finished(ExportOutcome::Completed { .. }) => State::Completed,
+        ExportPhase::Finished(ExportOutcome::Partial { .. }) => State::Partial,
+        ExportPhase::Finished(ExportOutcome::Failed { .. }) => State::Failed,
+        ExportPhase::Finished(ExportOutcome::Cancelled) => State::Cancelled,
+        ExportPhase::Interrupted(_) if !file.published.is_empty() => State::Partial,
+        ExportPhase::Interrupted(_) => State::Interrupted,
+    };
+    Job {
+        state,
+        work: Work::Export(file),
     }
 }
 

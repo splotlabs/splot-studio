@@ -4,6 +4,8 @@
 //! Process tests: spawn the real engine binary and speak the framed protocol.
 
 mod common;
+#[path = "worker/export.rs"]
+mod export;
 
 use std::error::Error;
 use std::io::{Read, Write};

@@ -351,6 +351,7 @@ fn concurrent(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let stream = scratch.join("stream.obu");
     fs::write(&stream, [0x01_u8, 0x08].repeat(obus))?;
     let saved = journal::Journal {
+        exports: studio_app::export_jobs::ExportJobs::default(),
         version: journal::VERSION,
         next_id: 1,
         settings: studio_app::state::INITIAL_SETTINGS.into(),

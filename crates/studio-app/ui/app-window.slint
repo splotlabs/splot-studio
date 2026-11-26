@@ -17,6 +17,9 @@ import { Caption, Label, LinkButton, SectionTitle, WorkspaceSwitch } from "contr
 import { IconButton, Playback, PlaybackPanel, StageState } from "stage.slint";
 import { AnalyzeView } from "analyze.slint";
 import { ValidationSetup } from "validation-setup.slint";
+import { DecodeExport, ExportForm, ExportPurpose, ExportSetup, ExportSourceRow } from "export-setup.slint";
+
+export { DecodeExport, ExportForm, ExportPurpose, ExportSourceRow }
 import { AdvancedEditor, AdvancedOptionRow, FieldRow } from "advanced.slint";
 
 export { AdvancedOptionRow, FieldRow }
@@ -450,9 +453,12 @@ component JobList inherits VerticalLayout {
 
             if job.can-show: LinkButton {
                 min-height: 0;
-                text: job.kind == "Validate" ? "Open in Analyze" : "Show";
+                property <bool> export-file: job.kind == "Export Y4M" || job.kind == "Export raw" || job.kind == "Frame hashes";
+                text: job.kind == "Validate" ? "Open in Analyze" : self.export-file ? "Show in Folder" : "Show";
                 quiet: true;
-                description: job.kind == "Validate" ? "Open validation for " + job.name + " in Analyze" : "Show " + job.name + " in its workspace";
+                description: job.kind == "Validate" ? "Open validation for " + job.name + " in Analyze"
+                    : self.export-file ? "Show the export of " + job.name + " in its folder"
+                    : "Show " + job.name + " in its workspace";
                 clicked => {
                     root.show(i);
                 }
@@ -472,7 +478,7 @@ component JobList inherits VerticalLayout {
                 min-height: 0;
                 text: "Remove";
                 quiet: true;
-                description: "Remove the validation result for " + job.name;
+                description: "Remove this job from the list. Published files stay in their folders.";
                 clicked => { root.remove(i); }
             }
         }
@@ -993,6 +999,7 @@ export component AppWindow inherits Window {
     // Platform button order: Windows puts the confirming button first.
     in property <bool> confirm-first;
     out property <bool> sheet-open;
+    out property <bool> export-open;
 
     // Simple controls: views of the same settings as the raw fields.
     in property <[string]> quality-labels;
@@ -1199,6 +1206,16 @@ export component AppWindow inherits Window {
         jobs-popup.show();
     }
 
+    public function show-export-setup() {
+        root.export-open = true;
+        export-setup.show();
+    }
+
+    public function close-export-setup() {
+        root.export-open = false;
+        export-setup.close();
+    }
+
     public function show-validation-setup() {
         root.validation-open = true;
         validation-setup.show();
@@ -1288,7 +1305,7 @@ export component AppWindow inherits Window {
             MenuItem {
                 title: "Open to Convert…";
                 shortcut: root.open-keys;
-                enabled: root.can-add && !root.sheet-open && !root.validation-open;
+                enabled: root.can-add && !root.sheet-open && !root.validation-open && !root.export-open;
                 activated => {
                     root.open-requested();
                 }
@@ -1296,14 +1313,14 @@ export component AppWindow inherits Window {
             MenuItem {
                 title: "Open to Analyze…";
                 shortcut: root.analyze-keys;
-                enabled: !root.sheet-open && !root.validation-open;
+                enabled: !root.sheet-open && !root.validation-open && !root.export-open;
                 activated => {
                     root.analyze-open-requested();
                 }
             }
             MenuItem {
                 title: "Validate Files…";
-                enabled: !root.sheet-open && !root.validation-open && !root.validation-active;
+                enabled: !root.sheet-open && !root.validation-open && !root.export-open && !root.validation-active;
                 activated => { root.validate-files-requested(); }
             }
             MenuSeparator { }
@@ -1323,7 +1340,7 @@ export component AppWindow inherits Window {
                 title: label;
                 checkable: true;
                 checked: i == root.workspace-index;
-                enabled: !root.sheet-open && !root.validation-open;
+                enabled: !root.sheet-open && !root.validation-open && !root.export-open;
                 activated => {
                     root.workspace-chosen(i);
                 }
@@ -2512,6 +2529,16 @@ export component AppWindow inherits Window {
         }
     }
 
+    export-setup := PopupWindow {
+        close-policy: no-auto-close;
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+
+        ExportSetup { }
+    }
+
     jobs-popup := PopupWindow {
         close-policy: close-on-click-outside;
         width: min(420px, root.width - 2 * Tokens.space-3);
@@ -2565,7 +2592,7 @@ export component AppWindow inherits Window {
 
                     Caption {
                         text: root.jobs.length == 0
-                            ? "Encodes, first passes, stream reads and validations appear here."
+                            ? "Encodes, stream reads, validations and exports appear here."
                             : "Jobs run while the window is open.";
                     }
 
@@ -2581,6 +2608,24 @@ export component AppWindow inherits Window {
                             description: "Cancel the remaining validation files and keep completed results";
                             clicked => {
                                 root.stop-validation-batch();
+                                jobs-close.focus();
+                            }
+                        }
+                    }
+
+                    if DecodeExport.job-notice != "": Caption {
+                        text: DecodeExport.job-notice;
+                        wrap: word-wrap;
+                        accessible-live-region: polite;
+                    }
+
+                    if DecodeExport.active: HorizontalLayout {
+                        alignment: start;
+                        LinkButton {
+                            text: "Stop Export Batch";
+                            description: "Cancel remaining exports and keep completed files.";
+                            clicked => {
+                                DecodeExport.cancel-batch();
                                 jobs-close.focus();
                             }
                         }

@@ -10,63 +10,159 @@
 //! itself, and an existing file there is never replaced.
 
 use std::cell::Cell;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use splot_encode::ivf::IvfWriter;
 use splot_encode::{Config, Packet};
+use studio_domain::export::{ExportArtifactKind, ExportProgress, ExportStage, ExportTempIdentity};
 use studio_domain::job::FailureCode;
 use studio_domain::settings::OutputKind;
 use tempfile::NamedTempFile;
 
 use crate::job::Stop;
 
+/// Synchronous worker services for the decoded export job.
+pub(crate) trait ExportControl {
+    /// Whether the worker accepted a cancellation.
+    fn cancelled(&self) -> bool;
+
+    /// Creates an exclusive temporary file and registers it with the worker.
+    fn create_temp(
+        &self,
+        kind: ExportArtifactKind,
+        destination: &Path,
+        source: &FileId,
+    ) -> Result<NamedTempFile, Stop>;
+
+    /// Waits for the app to save the temporary paths. Call before writing output.
+    fn await_prepared(&self) -> Result<(), Stop>;
+
+    /// Reports the current phase. The publication claim reports `Publishing`.
+    fn stage(&self, stage: ExportStage);
+
+    /// Reports counts. The worker may replace a progress event that is still pending.
+    fn progress(&self, progress: ExportProgress);
+
+    /// Waits for permission to publish the full batch.
+    /// Flush, sync and verify the files first.
+    fn claim_publish(&self, frames: u64) -> Result<(), Stop>;
+
+    /// Publishes one verified file. Records its path even if a directory sync fails.
+    fn publish(
+        &self,
+        kind: ExportArtifactKind,
+        temp: NamedTempFile,
+        destination: &Path,
+    ) -> Result<(), Stop>;
+}
+
 /// Which file a path names.
 ///
-/// Unix compares device and inode, so hard links and symlinks to the source
-/// are caught. Windows compares canonical paths, which resolves symlinks but
-/// not hard links; since an existing destination is refused anyway, a missed
-/// hard link is reported as [`FailureCode::DestinationExists`], never written.
+/// Unix compares device and inode. Windows uses the volume and file index
+/// when available. A canonical path is sufficient for legacy path checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileId(#[cfg(unix)] (u64, u64), #[cfg(not(unix))] PathBuf);
+pub struct FileId(FileIdentity);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FileIdentity {
+    #[cfg(any(unix, windows))]
+    Native { device: u64, inode: u64 },
+    #[cfg(not(unix))]
+    Canonical(PathBuf),
+}
 
 impl FileId {
+    /// File identity that remains usable across a new process on this platform.
+    #[cfg_attr(
+        unix,
+        expect(
+            clippy::unnecessary_wraps,
+            reason = "other platforms can lack a stable identity"
+        )
+    )]
+    pub(crate) fn export_identity(
+        &self,
+        created: Option<SystemTime>,
+    ) -> Option<ExportTempIdentity> {
+        match &self.0 {
+            #[cfg(any(unix, windows))]
+            FileIdentity::Native { device, inode } => Some(ExportTempIdentity {
+                device: *device,
+                inode: *inode,
+                created: created.filter(|time| *time >= UNIX_EPOCH),
+            }),
+            #[cfg(not(unix))]
+            FileIdentity::Canonical(_) => None,
+        }
+    }
+
     /// The identity of the already opened `file` at `path`.
     ///
     /// # Errors
-    /// Any error from reading its metadata or canonicalizing `path`.
+    /// Any error from reading its identity or resolving the fallback path.
     #[allow(unused_variables)] // each platform reads one of the two arguments
     pub fn of_file(file: &File, path: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
-            let metadata = file.metadata()?;
-            Ok(Self((metadata.dev(), metadata.ino())))
+            Ok(Self::from_metadata(&file.metadata()?))
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            Ok(Self(fs::canonicalize(path)?))
+            if let Ok(info) = winapi_util::file::information(file)
+                && ExportTempIdentity::is_known_windows_index(info.file_index())
+            {
+                return Ok(Self(FileIdentity::Native {
+                    device: info.volume_serial_number(),
+                    inode: info.file_index(),
+                }));
+            }
+            Self::canonical(path)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Self::canonical(path)
         }
     }
 
-    /// The identity of the file `path` names, following symlinks.
+    /// The identity of the file or directory `path` names, following symlinks.
     ///
     /// # Errors
-    /// Any error from reading its metadata or canonicalizing `path`.
+    /// Any error from opening `path` or reading its identity.
     pub fn of_path(path: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
-            let metadata = fs::metadata(path)?;
-            Ok(Self((metadata.dev(), metadata.ino())))
+            Ok(Self::from_metadata(&fs::metadata(path)?))
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            Ok(Self(fs::canonicalize(path)?))
+            match winapi_util::Handle::from_path_any(path) {
+                Ok(handle) => Self::of_file(handle.as_file(), path),
+                Err(_) => Self::canonical(path),
+            }
         }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Self::canonical(path)
+        }
+    }
+
+    #[cfg(unix)]
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self(FileIdentity::Native {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn canonical(path: &Path) -> io::Result<Self> {
+        Ok(Self(FileIdentity::Canonical(fs::canonicalize(path)?)))
     }
 }
 
@@ -133,6 +229,35 @@ pub fn check_destination(destination: &Path, source: &FileId) -> Result<(), Stop
     check_absent(destination)
 }
 
+/// Whether two paths refer to the same directory entry, even before a file exists.
+pub(crate) fn same_destination_slot(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    let parent_id = |path: &Path| {
+        let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty());
+        FileId::of_path(parent.unwrap_or_else(|| Path::new(".")))
+    };
+    left.file_name()
+        .zip(right.file_name())
+        .is_some_and(|(left, right)| same_name(left, right))
+        && parent_id(left).is_ok_and(|left| parent_id(right).is_ok_and(|right| left == right))
+}
+
+fn same_name(left: &OsStr, right: &OsStr) -> bool {
+    if cfg!(any(windows, target_os = "macos")) {
+        left.to_str().zip(right.to_str()).map_or_else(
+            || {
+                left.as_encoded_bytes()
+                    .eq_ignore_ascii_case(right.as_encoded_bytes())
+            },
+            |(left, right)| left.to_uppercase() == right.to_uppercase(),
+        )
+    } else {
+        left == right
+    }
+}
+
 fn check_absent(destination: &Path) -> Result<(), Stop> {
     match fs::symlink_metadata(destination) {
         Ok(_) => Err(exists()),
@@ -148,24 +273,61 @@ fn check_absent(destination: &Path) -> Result<(), Stop> {
 /// [`FailureCode::DestinationExists`] when the destination appeared, or
 /// [`FailureCode::Output`]. The temporary file is removed in both cases.
 pub fn publish(temp: NamedTempFile, destination: &Path) -> Result<u64, Stop> {
-    let file = temp.persist_noclobber(destination).map_err(|e| {
+    let publication = publish_recorded(temp, destination)?;
+    publication.sync?;
+    Ok(publication.bytes)
+}
+
+/// The file exists at its final path. A sync error does not remove it.
+pub(crate) struct Publication {
+    pub(crate) bytes: u64,
+    pub(crate) sync: Result<(), Stop>,
+}
+
+/// Publishes without replacing another file. Keeps sync errors separate from rename errors.
+pub(crate) fn publish_recorded(
+    temp: NamedTempFile,
+    destination: &Path,
+) -> Result<Publication, Stop> {
+    #[cfg(unix)]
+    let sync = sync_parent;
+    #[cfg(not(unix))]
+    let sync = |_: &Path| Ok(());
+    publish_with_sync(temp, destination, sync)
+}
+
+fn publish_with_sync(
+    temp: NamedTempFile,
+    destination: &Path,
+    sync: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<Publication, Stop> {
+    let bytes = temp
+        .as_file()
+        .metadata()
+        .map_err(|e| output(format!("Cannot read the temporary file size. {e}")))?
+        .len();
+    let _file = temp.persist_noclobber(destination).map_err(|e| {
         if e.error.kind() == io::ErrorKind::AlreadyExists {
             exists()
         } else {
             output(format!("cannot publish the output: {}", e.error))
         }
     })?;
-    // Make the new name durable too. Directories cannot be opened for this
-    // outside Unix; there the rename's own durability applies.
-    #[cfg(unix)]
-    if let Some(dir) = destination.parent().filter(|d| !d.as_os_str().is_empty()) {
-        File::open(dir)
-            .and_then(|dir| dir.sync_all())
-            .map_err(|e| output(format!("published, but cannot sync its directory: {e}")))?;
-    }
-    file.metadata()
-        .map(|metadata| metadata.len())
-        .map_err(|e| output(format!("published, but cannot read its size: {e}")))
+    let sync = sync(destination).map_err(|e| {
+        output(format!(
+            "The file was published, but its folder sync failed. {e}"
+        ))
+    });
+    Ok(Publication { bytes, sync })
+}
+
+#[cfg(unix)]
+fn sync_parent(destination: &Path) -> io::Result<()> {
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    File::open(parent)?.sync_all()
 }
 
 /// Writes packets in one output format and counts the bytes.
@@ -330,5 +492,57 @@ mod tests {
         assert_eq!(sink.bytes(), 2 * packet.data.len() as u64);
         let bytes = sink.finish().unwrap_or_default();
         assert_eq!(bytes, [packet.data.clone(), packet.data].concat());
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_identities_follow_open_handles_and_hard_links() -> io::Result<()> {
+        let scratch = tempfile::tempdir()?;
+        let source = scratch.path().join("source.obu");
+        let link = scratch.path().join("link.obu");
+        let other = scratch.path().join("other.obu");
+        fs::write(&source, b"source")?;
+        fs::write(&other, b"other")?;
+        fs::hard_link(&source, &link)?;
+        let opened = File::open(&source)?;
+        let id = FileId::of_file(&opened, &source)?;
+        assert_eq!(FileId::of_path(&source)?, id);
+        assert_eq!(FileId::of_path(&link)?, id);
+        assert_ne!(FileId::of_path(&other)?, id);
+        assert!(
+            matches!(check_destination(&link, &id), Err(Stop::Failed(failure))
+            if failure.code == FailureCode::SourceIsDestination)
+        );
+        let directory = FileId::of_path(scratch.path())?;
+        assert_ne!(directory, id);
+        assert!(
+            directory
+                .export_identity(scratch.path().metadata()?.created().ok())
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_post_rename_sync_failure_preserves_the_published_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let destination = dir.path().join("export.yuv");
+        let mut temp = tempfile::NamedTempFile::new_in(dir.path())?;
+        temp.write_all(b"verified samples")?;
+        temp.as_file().sync_all()?;
+        let publication = publish_with_sync(temp, &destination, |_| {
+            Err(io::Error::other("injected folder sync failure"))
+        })
+        .map_err(|stop| io::Error::other(format!("{stop:?}")))?;
+        assert_eq!(publication.bytes, 16);
+        assert!(publication.sync.is_err());
+        assert_eq!(fs::read(&destination)?, b"verified samples");
+        Ok(())
     }
 }

@@ -114,11 +114,15 @@ struct Harness {
 
 impl Harness {
     fn open() -> Self {
+        Self::with_engine(engine())
+    }
+
+    fn with_engine(engine: PathBuf) -> Self {
         let (tx, rx) = mpsc::channel();
         let post = Arc::new(move |route, delivery| {
             let _ = tx.send((route, delivery));
         });
-        let session = Session::new(AppState::default(), Ok(engine()), post, None);
+        let session = Session::new(AppState::default(), Ok(engine), post, None);
         let mut harness = Self {
             session,
             rx,
@@ -174,6 +178,130 @@ impl Harness {
             .picture
             .map(|p| (p.header.origin, p.header.frame))
     }
+}
+
+#[cfg(unix)]
+fn preview_pid_launcher(dir: &Scratch) -> PathBuf {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let launcher = dir.path("launch");
+    symlink(engine(), dir.path("engine")).unwrap_or_else(|e| unreachable!("{e}"));
+    fs::write(
+        &launcher,
+        "#!/bin/sh\nif [ \"$1\" = preview ]; then printf '%s' \"$$\" > \"$0.pid\"; fi\nexec \"${0%/*}/engine\" \"$@\"\n",
+    )
+    .unwrap_or_else(|e| unreachable!("{e}"));
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700))
+        .unwrap_or_else(|e| unreachable!("{e}"));
+    launcher
+}
+
+#[cfg(unix)]
+#[test]
+fn a_killed_preview_cannot_show_old_pixels_in_a_new_document() {
+    use std::process::Command;
+    use studio_app::analysis::{Document, Input as Analyze};
+
+    let dir = Scratch::new("preview-death");
+    let launcher = preview_pid_launcher(&dir);
+    let pid_path = launcher.with_extension("pid");
+    let first = dir.path("first.ivf");
+    let mut input = include_bytes!(
+        "../../studio-engine/tests/preview/fixtures/syn-tlayer2-dependent-10bit.ivf"
+    )
+    .to_vec();
+    // Give the test time to kill the process while playback still waits for its next picture.
+    input[20..24].copy_from_slice(&1200_u32.to_le_bytes());
+    fs::write(&first, input).unwrap_or_else(|e| unreachable!("{e}"));
+    let second = dir.path("second.obu");
+    fs::write(
+        &second,
+        include_bytes!(
+            "../../studio-engine/tests/preview/fixtures/syn-mlayer2-derived-sef-8bit.obu"
+        ),
+    )
+    .unwrap_or_else(|e| unreachable!("{e}"));
+
+    let mut h = Harness::with_engine(launcher);
+    let open = |h: &mut Harness, path| {
+        h.session.analyze_open_requested(Instant::now());
+        h.session.analyze_picked(vec![path]);
+        h.until("the document was inspected", ANSWER_TIMEOUT, |h| {
+            h.session
+                .analysis()
+                .shown()
+                .and_then(Document::summary)
+                .is_some()
+        });
+        h.session.analysis_input(Analyze::TogglePlayback);
+        h.until("the document poster", ANSWER_TIMEOUT, |h| {
+            h.shown() == Some((PictureOrigin::Document, 0))
+        });
+        h.session
+            .analysis()
+            .shown()
+            .map_or_else(|| unreachable!(), Document::id)
+    };
+    let first_id = open(&mut h, first);
+    let old = h.view().picture.unwrap_or_else(|| unreachable!());
+    h.input(Input::PlayPause);
+    assert!(h.view().playing);
+    let (route, delayed) = loop {
+        let (route, delivery) =
+            h.rx.recv_timeout(ANSWER_TIMEOUT)
+                .unwrap_or_else(|e| unreachable!("{e}"));
+        if let (Route::Preview(0), Delivery::Pictures(_)) = (&route, &delivery) {
+            break (route, delivery);
+        }
+        h.session.deliver(route, delivery, Instant::now());
+    };
+    let pid = fs::read_to_string(&pid_path)
+        .unwrap_or_else(|e| unreachable!("{e}"))
+        .parse::<u32>()
+        .unwrap_or_else(|e| unreachable!("{e}"));
+    assert!(pid > 1);
+    let status = Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status();
+    assert!(status.is_ok_and(|status| status.success()));
+    loop {
+        let (ended_route, delivery) =
+            h.rx.recv_timeout(ANSWER_TIMEOUT)
+                .unwrap_or_else(|e| unreachable!("{e}"));
+        let ended = matches!((&ended_route, &delivery), (Route::Preview(0), Delivery::Ended(ending)) if ending.exit.contains("signal"));
+        h.session.deliver(ended_route, delivery, Instant::now());
+        if ended {
+            break;
+        }
+    }
+    assert_eq!(h.view().state, StageState::Unavailable);
+    assert!(!h.view().playing);
+    assert!(h.view().picture.is_none());
+    assert_eq!(h.session.preview().output_byte(0), None);
+
+    h.session.analysis_input(Analyze::Close);
+    let second_id = open(&mut h, second);
+    assert_ne!(first_id, second_id);
+    assert_eq!(
+        h.session.preview().output_byte(0).map(|(id, _)| id),
+        Some(second_id)
+    );
+    let new = h.view().picture.unwrap_or_else(|| unreachable!());
+    assert_ne!(new.pixels.as_bytes(), old.pixels.as_bytes());
+    assert!(
+        !h.session
+            .deliver(route, delayed, Instant::now())
+            .preview
+            .picture
+    );
+    assert_eq!(
+        h.view()
+            .picture
+            .unwrap_or_else(|| unreachable!())
+            .pixels
+            .as_bytes(),
+        new.pixels.as_bytes()
+    );
 }
 
 #[test]

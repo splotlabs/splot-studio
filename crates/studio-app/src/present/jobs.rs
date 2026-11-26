@@ -5,12 +5,14 @@
 //! reports no progress shows none, never an invented share.
 
 use studio_domain::analysis::{DocumentSummary, ScanOutcome};
+use studio_domain::export::{ExportFormat, ExportOutcome, ExportStage};
 use studio_domain::validation::{BatchOutcome, ValidationCompletion};
 
 use super::{Tone, analysis::plural, bytes, count, file_name, queue::is_first_pass};
 use crate::activity::Phase as JobPhase;
 use crate::analysis::Phase;
 use crate::batch::{File as ValidationFile, Phase as ValidationPhase};
+use crate::export_jobs::{ExportJob, Phase as ExportPhase};
 use crate::jobs::{Job, State, Work};
 use crate::queue::{Ending, Item};
 
@@ -48,6 +50,22 @@ pub fn line(job: &Job<'_>) -> Line {
         ),
         Work::Inspect(_, doc) => ("Inspect", file_name(doc.path()), read(doc, job.state), None),
         Work::Validate(file) => ("Validate", file_name(&file.path), validation(file), None),
+        Work::Export(file) => (
+            match file.request.format {
+                ExportFormat::Y4m { .. } => "Export Y4M",
+                ExportFormat::Raw { .. } => "Export raw",
+                ExportFormat::Hashes { .. } => "Frame hashes",
+            },
+            file.request
+                .source
+                .path
+                .to_path_buf()
+                .ok()
+                .as_deref()
+                .map_or_else(|| "Export source".to_owned(), file_name),
+            export_detail(file),
+            None,
+        ),
     };
     Line {
         kind,
@@ -81,6 +99,7 @@ pub const fn state_word(state: State) -> &'static str {
         State::Running => "Running",
         State::Cancelling => "Cancelling",
         State::Completed => "Completed",
+        State::Partial => "Partial",
         State::Stopped => "Stopped",
         State::Cancelled => "Cancelled",
         State::Failed => "Failed",
@@ -91,7 +110,7 @@ pub const fn state_word(state: State) -> &'static str {
 const fn tone(state: State) -> Tone {
     match state {
         State::Queued | State::Running | State::Cancelled => Tone::Neutral,
-        State::Cancelling | State::Stopped | State::Interrupted => Tone::Warning,
+        State::Cancelling | State::Stopped | State::Interrupted | State::Partial => Tone::Warning,
         State::Completed => Tone::Success,
         State::Failed => Tone::Error,
     }
@@ -109,9 +128,69 @@ pub fn entry(jobs: &[Job<'_>]) -> (String, String) {
         format!("Jobs · {active}")
     };
     let description = format!(
-        "{active} running or queued, {ended} ended. Opens encode, inspect and validation jobs."
+        "{active} running or queued, {ended} ended. Opens encode, inspect, validation and export jobs."
     );
     (label, description)
+}
+
+fn export_detail(file: &ExportJob) -> String {
+    let state = match &file.phase {
+        ExportPhase::Queued => "Waiting for the shared worker.".to_owned(),
+        ExportPhase::Running(ExportStage::Checking) => {
+            "Checking the source and output paths.".to_owned()
+        }
+        ExportPhase::Running(ExportStage::Decoding) => file.progress.as_ref().map_or_else(
+            || "Decoding frames.".to_owned(),
+            |p| {
+                format!(
+                    "Decoded {} outputs. Wrote {} selected frames and {}.",
+                    count(p.decoded),
+                    count(p.exported),
+                    bytes(p.bytes_written)
+                )
+            },
+        ),
+        ExportPhase::Running(ExportStage::Verifying) => {
+            "Checking the source and staged outputs.".to_owned()
+        }
+        ExportPhase::Running(ExportStage::Publishing) => {
+            "Publishing the verified outputs.".to_owned()
+        }
+        ExportPhase::Cancelling => "Stopping the export.".to_owned(),
+        ExportPhase::Finished(ExportOutcome::Completed { frames, .. }) => {
+            format!("Exported {}.", plural(*frames, "frame", "frames"))
+        }
+        ExportPhase::Finished(
+            ExportOutcome::Partial { failure, .. } | ExportOutcome::Failed { failure },
+        ) => failure.message.clone(),
+        ExportPhase::Finished(ExportOutcome::Cancelled) => {
+            "The export stopped before publication.".to_owned()
+        }
+        ExportPhase::Interrupted(message) => message.clone(),
+    };
+    let published = &file.published;
+    let mut lines = vec![state];
+    for (kind, path) in file.request.format.destinations() {
+        let Ok(path) = path.to_path_buf() else {
+            continue;
+        };
+        let status = match published.iter().find(|item| item.kind == kind) {
+            Some(item) if item.durability == studio_domain::export::ExportDurability::Confirmed => {
+                "Published"
+            }
+            Some(_) => "Published, sync unconfirmed",
+            None if file.publication_possible
+                && matches!(file.phase, ExportPhase::Interrupted(_)) =>
+            {
+                "Publication unconfirmed"
+            }
+            None if !file.phase.active() => "No publication recorded",
+            None => "Destination",
+        };
+        lines.push(format!("{status} · {}", path.display()));
+    }
+    lines.extend(file.cleanup.iter().cloned());
+    lines.join("\n")
 }
 
 fn conversion(item: &Item, state: State) -> String {

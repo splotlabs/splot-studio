@@ -6,6 +6,7 @@
 #[path = "samples.rs"]
 mod samples;
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -13,6 +14,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use studio_domain::{
     job::WirePath,
     preview::{
@@ -174,6 +176,56 @@ fn linear_and_random_document_outputs_match_avm() -> TestResult {
                 linear[usize::try_from(ordinal)?]
             );
         }
+    }
+    preview.finish()
+}
+
+#[test]
+fn document_playback_shows_avm_outputs_through_eof() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let mut preview = Preview::spawn()?;
+    for (generation, fixture) in (1..).zip([IVF_8, IVF_10, ANNEX_B_8, ANNEX_B_10]) {
+        let target = fixture.write(dir.path(), generation)?;
+        preview.send(generation, play(generation, &target, 0))?;
+        let mut ordinals = Vec::new();
+        let mut digest = Sha256::new();
+        loop {
+            let (envelope, pixels) = preview.picture_answer(generation)?;
+            assert_eq!(envelope.request_id, generation, "{}", fixture.name);
+            match envelope.body {
+                Event::Picture { picture } => {
+                    assert_eq!(picture.generation, generation);
+                    let ordinal = picture.frame;
+                    assert!(ordinal < fixture.outputs, "{}", fixture.name);
+                    assert!(ordinals.last().is_none_or(|&last| last < ordinal));
+                    let rgb = pixels.ok_or("a picture without pixels")?;
+                    check_picture(&picture, &rgb, &fixture, ordinal)?;
+                    ordinals.push(ordinal);
+                    digest.update(&rgb);
+                }
+                Event::PlaybackEnded {
+                    generation: ended,
+                    frame,
+                } => {
+                    assert_eq!(ended, generation);
+                    assert_eq!(frame, Some(fixture.outputs - 1), "{}", fixture.name);
+                    break;
+                }
+                other => return Err(format!("{}: unexpected {other:?}", fixture.name).into()),
+            }
+        }
+        assert_eq!(ordinals.first(), Some(&0), "{}", fixture.name);
+        assert_eq!(
+            ordinals.last(),
+            Some(&(fixture.outputs - 1)),
+            "{}",
+            fixture.name
+        );
+        let mut hex = String::new();
+        for byte in digest.finalize() {
+            write!(hex, "{byte:02x}")?;
+        }
+        eprintln!("{} {ordinals:?} {hex}", fixture.name);
     }
     preview.finish()
 }

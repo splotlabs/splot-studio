@@ -25,6 +25,7 @@
 
 mod artifact;
 pub mod cli;
+mod export;
 pub mod inspect;
 pub mod job;
 pub mod live;
