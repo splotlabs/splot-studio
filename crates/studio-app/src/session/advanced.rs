@@ -607,6 +607,72 @@ fn engine_error(message: impl Into<String>) -> FieldError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{AppState, Intent};
+    use std::time::Instant;
+    use studio_domain::options::OPTIONS_SCHEMA_VERSION;
+    use studio_domain::protocol::Capabilities;
+
+    #[test]
+    fn stale_validation_cannot_reappear_after_an_edit_or_close() {
+        let mut session = Session::new(
+            AppState::default(),
+            Err("No engine process for this test.".into()),
+            Arc::new(|_, _| {}),
+            None,
+        );
+        let now = Instant::now();
+        session.dispatch(
+            Intent::EngineAnswered(Ok(Capabilities {
+                options: Some(OptionsIdentity {
+                    schema: OPTIONS_SCHEMA_VERSION,
+                    codec_revision: "test".into(),
+                }),
+                ..Capabilities::default()
+            })),
+            now,
+        );
+        session.advanced_refresh(true);
+        let generation = session.advanced.generation;
+        let reply = || {
+            Delivery::Advanced(AdvancedReply {
+                preview: false,
+                catalog: None,
+                policy: Err(FieldError::new("rate_control", "Invalid draft.")),
+            })
+        };
+        assert!(
+            session
+                .deliver(Route::Advanced(generation), reply(), now)
+                .advanced
+        );
+        assert_eq!(
+            session.advanced_error().map(|error| error.field.as_str()),
+            Some("rate_control")
+        );
+
+        session.dispatch(
+            Intent::OptionEdited {
+                key: "fast_decode".into(),
+                value: Some(studio_domain::options::OptionValue::Bool(false)),
+            },
+            now,
+        );
+        assert!(session.advanced_pending());
+        assert!(session.advanced_error().is_none());
+        assert!(
+            !session
+                .deliver(Route::Advanced(generation), reply(), now)
+                .advanced
+        );
+
+        session.advanced_refresh(false);
+        assert!(!session.advanced_pending());
+        assert!(
+            !session
+                .deliver(Route::Advanced(generation), reply(), now)
+                .advanced
+        );
+    }
 
     #[test]
     fn pages_keep_order_and_stop_at_total() {
