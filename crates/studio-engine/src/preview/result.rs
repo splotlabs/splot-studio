@@ -15,10 +15,7 @@ use splot_core::annexb::AnnexBObuCursor;
 use splot_core::span::ByteOffset;
 use splot_core::stream_reader::{ReaderError, TemporalUnitReader, is_random_access_point};
 use splot_core::types::ObuType;
-use splot_decode::{
-    DataProps, DecodeError, DecodeLimitThreshold, DecodeLimits, Decoder, ObuLocation, Picture,
-    SendStatus,
-};
+use splot_decode::{DataProps, DecodeError, Decoder, ObuLocation, Picture, SendStatus};
 use studio_domain::analysis::SourceDigest;
 use studio_domain::job::{SourceFingerprint, WirePath};
 use studio_domain::preview::{
@@ -30,14 +27,9 @@ use super::{Context, Decoded, Outcome, Stopped};
 use crate::inspect::document::HashReader;
 use crate::output::FileId;
 use crate::source::{self, Selection};
-use crate::stream::{self, PREVIEW_DECODE_THREADS};
-
-/// The largest temporal unit read.
-pub const MAX_UNIT_BYTES: usize = 64 << 20;
-
-/// The most temporal units indexed: over nine hours at 30 frames a second,
-/// about 24 MiB of index.
-pub const MAX_UNITS: usize = 1 << 20;
+use crate::stream::{
+    self, MAX_DOCUMENT_UNITS as MAX_UNITS, MAX_UNIT_BYTES, PREVIEW_DECODE_THREADS,
+};
 
 /// Maximum read between cancellation checks while feeding a temporal unit.
 const READ_CHUNK_BYTES: usize = 1 << 20;
@@ -288,11 +280,7 @@ impl ResultPictures {
                 session.decoder
             } else {
                 let decoder = if document {
-                    let limit = DecodeLimitThreshold::max(MAX_UNITS as u64);
-                    let limits = DecodeLimits::DEFAULT
-                        .with_max_frames_to_decode(limit)
-                        .with_max_output_frames(limit);
-                    stream::preview_decoder(PREVIEW_DECODE_THREADS, limits, grain)
+                    stream::document_decoder(PREVIEW_DECODE_THREADS, grain)
                 } else {
                     stream::decoder(PREVIEW_DECODE_THREADS)
                 };

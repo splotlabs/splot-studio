@@ -245,13 +245,13 @@ impl Document {
 }
 
 /// Fails reads once `cancelled` says so.
-pub(super) struct Checked<'a, R> {
+pub(crate) struct Checked<'a, R> {
     inner: R,
     cancelled: &'a dyn Fn() -> bool,
 }
 
 impl<'a, R> Checked<'a, R> {
-    pub(super) fn new(inner: R, cancelled: &'a dyn Fn() -> bool) -> Self {
+    pub(crate) fn new(inner: R, cancelled: &'a dyn Fn() -> bool) -> Self {
         Self { inner, cancelled }
     }
 }
@@ -261,7 +261,8 @@ impl<R: Read> Read for Checked<'_, R> {
         if (self.cancelled)() {
             return Err(io::Error::other("cancelled"));
         }
-        self.inner.read(buf)
+        let max = buf.len().min(1 << 20);
+        self.inner.read(&mut buf[..max])
     }
 }
 
