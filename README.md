@@ -99,6 +99,11 @@ codec is young.
   linked selection. The row shows available native base quantizer values and
   identifies them as signaled, derived, or inherited. These values apply to the
   frame header or its references. Block quantizer averages require block evidence.
+- To inspect a coded frame, select it in the timeline or OBU list. Open **Blocks**
+  and select **Inspect**. Studio decodes the frame and any earlier frames it needs.
+  The table shows the tile, partition tree, coded and visible rectangles, prediction
+  mode, segment ID, and block quantizer index where available. The capture status
+  shows whether a limit stopped collection.
 - Coded byte counts include the frame OBU and its continuation OBUs. Output byte
   counts assign each display OBU once. File accounting separates OBU bytes,
   framing, and unclassified bytes. The output bitrate uses the range's timestamp
