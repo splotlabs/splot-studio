@@ -201,52 +201,46 @@ fn value(value: CodecValue) -> SyntaxValue {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
     use studio_domain::analysis::{Element, LocateTarget, RowFilter};
     use studio_domain::job::WirePath;
 
     use super::*;
     use crate::inspect::document::Document;
 
-    fn observed(file: &[u8], offset: u64, obu: &[u8]) -> SyntaxEvidence {
-        let dir = tempfile::tempdir().expect("test directory");
+    fn observed(file: &[u8], offset: u64, obu: &[u8]) -> Result<SyntaxEvidence, Box<dyn Error>> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("fixture");
-        std::fs::write(&path, file).expect("write fixture");
-        let document =
-            Document::open(&WirePath::from_path(&path), &|| false).expect("open fixture");
+        std::fs::write(&path, file)?;
+        let document = Document::open(&WirePath::from_path(&path), &|| false)
+            .map_err(|error| error.message)?;
         let (_, row) = document
             .locate(RowFilter::default(), LocateTarget::Offset { offset })
-            .expect("locate OBU");
+            .map_err(|error| error.message)?;
         let Element::Obu { obu: fact } = row.element else {
-            panic!("expected an OBU");
+            return Err("expected an OBU".into());
         };
-        observe(&fact, obu)
+        Ok(observe(&fact, obu))
     }
 
     #[test]
-    fn nested_metadata_fields_map_to_annex_b_and_ivf() {
+    fn nested_metadata_fields_map_to_annex_b_and_ivf() -> Result<(), Box<dyn Error>> {
         // Metadata short with the HDR content-light payload. max_cll follows
         // the two metadata bytes and holds the 16-bit value 1000.
         let metadata = [0x20, 0x01, 0x01, 0x03, 0xE8, 0x01, 0x90, 0x80];
-        let mut annex = vec![
-            0x01,
-            0x08,
-            u8::try_from(metadata.len()).expect("one-byte OBU length"),
-        ];
+        let mut annex = vec![0x01, 0x08, u8::try_from(metadata.len())?];
         annex.extend_from_slice(&metadata);
         let mut ivf = b"DKIF\x00\x00\x20\x00AV02\x10\x00\x10\x00".to_vec();
         ivf.extend(30_u32.to_le_bytes());
         ivf.extend(1_u32.to_le_bytes());
         ivf.extend(1_u64.to_le_bytes());
-        ivf.extend(
-            u32::try_from(annex.len())
-                .expect("IVF payload length")
-                .to_le_bytes(),
-        );
+        ivf.extend(u32::try_from(annex.len())?.to_le_bytes());
         ivf.extend(0_u64.to_le_bytes());
         ivf.extend_from_slice(&annex);
 
         for (file, wrapper) in [(&annex, 0), (&ivf, 44)] {
-            let evidence = observed(file, wrapper + 3, &metadata);
+            let evidence = observed(file, wrapper + 3, &metadata)?;
             assert_eq!(evidence.summary.status, SyntaxStatus::Parsed);
             assert!(evidence.events.iter().any(|event| matches!(
                 event,
@@ -262,20 +256,24 @@ mod tests {
                     }
             )));
         }
+        Ok(())
     }
 
     #[test]
-    fn recorder_limits_preserve_scopes_and_report_later_errors() {
+    fn recorder_limits_preserve_scopes_and_report_later_errors() -> Result<(), Box<dyn Error>> {
         // A temporal delimiter with a long tail. Its final non-zero bit
         // violates trailing_bits after the recorder exhausts its budget.
         let mut annex = vec![0x01, 0x08, 0x81, 0x20, 0x08, 0x80];
-        annex.resize(4 + 4097, 0);
-        *annex.last_mut().expect("last byte") = 1;
-        let evidence = observed(&annex, 4, &annex[4..]);
+        annex.resize(4 + 4096, 0);
+        annex.push(1);
+        let evidence = observed(&annex, 4, &annex[4..])?;
         assert_eq!(evidence.summary.status, SyntaxStatus::Malformed);
         assert!(evidence.summary.elements_truncated);
         assert!(evidence.summary.observed_elements > MAX_ELEMENTS as u64);
-        let error = evidence.summary.error.expect("tail error");
+        let error = evidence
+            .summary
+            .error
+            .ok_or("expected a trailing bits error")?;
         assert_eq!(error.field.as_deref(), Some("trailing_zero_bit"));
         let bit = (annex.len() as u64) * 8 - 1;
         assert_eq!(
@@ -297,5 +295,6 @@ mod tests {
             }
         }
         assert_eq!(depth, 0);
+        Ok(())
     }
 }
