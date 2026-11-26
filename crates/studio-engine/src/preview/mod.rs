@@ -26,13 +26,14 @@
 //! Idle, nothing runs: every thread waits on a condition variable or a
 //! pipe. The process ends at the end of its input.
 //!
-//! Opening a file is not interruptible: a media source runs `ffprobe`
-//! (bounded by its timeout), a result file is read once for its index.
+//! Opening an analysis document checks cancellation during its framing scan.
+//! A media source runs `ffprobe` with a timeout.
 
 mod cache;
 mod result;
 mod source;
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,7 +43,7 @@ use std::time::{Duration, Instant};
 
 use studio_domain::preview::{
     ColorBasis, MAX_PICTURE_HEIGHT, MAX_PICTURE_WIDTH, MediaTime, PictureBox, PictureFailure,
-    PictureFrame, PictureHeader, PictureOrigin, PictureTarget, PictureView, SourceRef,
+    PictureFrame, PictureHeader, PictureOrigin, PictureStage, PictureTarget, PictureView,
 };
 use studio_domain::protocol::{
     Command, Envelope, ErrorCode, Event, ProtocolError, decode, read_frame, write_message,
@@ -51,7 +52,7 @@ use studio_domain::protocol::{
 
 use crate::job::{JOB_STACK_BYTES, Stop};
 use crate::media::process::Killer;
-use crate::picture::{self, Frame, Rendered};
+use crate::picture::{self, Frame};
 use crate::worker::{SessionError, request_id_of};
 use crate::{build_identity, capabilities};
 
@@ -70,6 +71,9 @@ pub const MIN_PLAYBACK_INTERVAL: Duration = Duration::from_millis(250);
 /// Command replies queued for a peer that does not read before the reader
 /// stops taking commands.
 const REPLY_BACKLOG: usize = 64;
+
+/// The document playback interval when the stream provides no usable timing.
+const ASSUMED_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 30);
 
 /// Serves the preview protocol on `input` and `output` until the input
 /// ends. Every frame gets one reply except `Picture` and `Play` (answered
@@ -194,6 +198,10 @@ fn serve(input: &mut impl Read, shared: &Shared) -> Result<(), ProtocolError> {
                 size,
             },
             Command::StopPlayback => Request::Stop,
+            Command::CloseDocumentPlayback { document } => {
+                shared.close_document(document);
+                continue;
+            }
         };
         shared.submit(id, request);
     }
@@ -226,6 +234,23 @@ enum Request {
     Stop,
 }
 
+impl Request {
+    fn document(&self) -> Option<u64> {
+        match self {
+            Self::Picture { target, .. } | Self::Play { target, .. } => match target {
+                PictureTarget::Document { document, .. } => Some(*document),
+                _ => None,
+            },
+            Self::Stop => None,
+        }
+    }
+}
+
+enum Work {
+    Request(u64, u64, Request),
+    CloseDocument(u64),
+}
+
 #[derive(Debug, Default)]
 struct Shared {
     state: Mutex<State>,
@@ -250,6 +275,12 @@ struct State {
     /// The newest picture, not yet written. Replaced, never queued, unless
     /// an event must follow it.
     picture: Option<(u64, PictureHeader, Vec<u8>)>,
+    /// The newest progress event. It never enters the control backlog.
+    progress: Option<Envelope<Event>>,
+    /// Release requests must run even when a newer picture replaces the request.
+    close_documents: VecDeque<u64>,
+    active_document: Option<u64>,
+    open_documents: Vec<u64>,
     /// The newest request not yet taken by the work thread.
     request: Option<(u64, u64, Request)>,
     /// Kills the media decode the work thread is waiting on.
@@ -290,8 +321,31 @@ impl Shared {
         let mut state = self.lock();
         let serial = self.serial.fetch_add(1, Ordering::SeqCst) + 1;
         state.request = Some((serial, request_id, request));
+        state.discard_document_update();
         if let Some(killer) = state.abort.take() {
             killer.kill();
+        }
+        self.notify(state);
+    }
+
+    fn close_document(&self, document: u64) {
+        let mut state = self.lock();
+        if state
+            .request
+            .as_ref()
+            .is_some_and(|(_, _, request)| request.document() == Some(document))
+        {
+            state.request = None;
+        }
+        if state.active_document == Some(document) && state.request.is_none() {
+            self.serial.fetch_add(1, Ordering::SeqCst);
+            state.discard_document_update();
+        }
+        // At most the open targets and the active request can need closure.
+        if (state.active_document == Some(document) || state.open_documents.contains(&document))
+            && !state.close_documents.contains(&document)
+        {
+            state.close_documents.push_back(document);
         }
         self.notify(state);
     }
@@ -299,6 +353,7 @@ impl Shared {
     fn close(&self) {
         let mut state = self.lock();
         state.closed = true;
+        state.progress = None;
         self.serial.fetch_add(1, Ordering::SeqCst);
         if let Some(killer) = state.abort.take() {
             killer.kill();
@@ -313,14 +368,27 @@ impl Shared {
     }
 
     /// The next request, or `None` once the input ended.
-    fn take(&self) -> Option<(u64, u64, Request)> {
+    fn take(&self, targets: &[Entry]) -> Option<Work> {
         let mut state = self.lock();
+        state.active_document = None;
+        state.open_documents.clear();
+        state
+            .open_documents
+            .extend(targets.iter().filter_map(|entry| match entry.key {
+                PictureTarget::Document { document, .. } => Some(document),
+                _ => None,
+            }));
         loop {
             if state.closed {
                 return None;
             }
-            if let Some(request) = state.request.take() {
-                return Some(request);
+            if let Some(document) = state.close_documents.pop_front() {
+                self.notify(state);
+                return Some(Work::CloseDocument(document));
+            }
+            if let Some((serial, id, request)) = state.request.take() {
+                state.active_document = request.document();
+                return Some(Work::Request(serial, id, request));
             }
             state = self
                 .changed
@@ -344,6 +412,9 @@ impl Shared {
             } else if let Some((id, header, pixels)) = state.picture.take() {
                 self.notify(state);
                 write_picture(&mut output, id, header, &pixels)
+            } else if let Some(envelope) = state.progress.take() {
+                self.notify(state);
+                write_message(&mut output, &envelope)
             } else if state.finished {
                 return Ok(());
             } else {
@@ -358,6 +429,7 @@ impl Shared {
                 state.broken = true;
                 state.queue.clear();
                 state.picture = None;
+                state.progress = None;
                 self.notify(state);
                 // Nobody can see pictures any more; stop working on them.
                 self.close();
@@ -369,6 +441,17 @@ impl Shared {
 }
 
 impl State {
+    fn discard_document_update(&mut self) {
+        self.progress = None;
+        if self
+            .picture
+            .as_ref()
+            .is_some_and(|(_, header, _)| header.origin == PictureOrigin::Document)
+        {
+            self.picture = None;
+        }
+    }
+
     fn push(&mut self, envelope: Envelope<Event>) {
         if !self.broken {
             self.queue.push_back(Item::Event(envelope));
@@ -389,6 +472,8 @@ struct Context<'a> {
     shared: &'a Shared,
     serial: u64,
     request_id: u64,
+    generation: u64,
+    last_progress: Cell<Option<(PictureStage, Instant)>>,
 }
 
 /// Why a request produced no picture.
@@ -457,10 +542,35 @@ impl Context<'_> {
         result
     }
 
+    /// Progress is advisory and at most one event is waiting to be sent.
+    fn progress(&self, stage: PictureStage, completed: u64, total: Option<u64>) {
+        let now = Instant::now();
+        if self.last_progress.get().is_some_and(|(previous, when)| {
+            previous == stage && now.duration_since(when) < MIN_PLAYBACK_INTERVAL
+        }) {
+            return;
+        }
+        let mut mailbox = self.shared.lock();
+        if !mailbox.broken && !self.superseded() {
+            mailbox.progress = Some(Envelope::new(
+                self.request_id,
+                Event::PictureProgress {
+                    generation: self.generation,
+                    stage,
+                    completed,
+                    total,
+                },
+            ));
+            self.last_progress.set(Some((stage, now)));
+        }
+        self.shared.notify(mailbox);
+    }
+
     /// Offers a picture; it replaces any picture not yet written.
     fn picture(&self, header: PictureHeader, pixels: Vec<u8>) {
         let mut state = self.shared.lock();
         if !state.broken && !self.superseded() {
+            state.progress = None;
             state.picture = Some((self.request_id, header, pixels));
         }
         self.shared.notify(state);
@@ -469,8 +579,18 @@ impl Context<'_> {
     /// Queues an event behind any picture already offered.
     fn event(&self, event: Event) {
         let mut state = self.shared.lock();
-        state.flush_picture();
-        state.push(Envelope::new(self.request_id, event));
+        while state.queue.len() >= REPLY_BACKLOG - 1 && !state.closed && !state.broken {
+            state = self
+                .shared
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        if !state.closed && !state.broken {
+            state.progress = None;
+            state.flush_picture();
+            state.push(Envelope::new(self.request_id, event));
+        }
         self.shared.notify(state);
     }
 
@@ -497,11 +617,24 @@ impl Context<'_> {
 
 fn work(shared: &Shared) {
     let mut previews = Previews::default();
-    while let Some((serial, request_id, request)) = shared.take() {
+    while let Some(work) = shared.take(&previews.targets) {
+        let (serial, request_id, request) = match work {
+            Work::CloseDocument(document) => {
+                previews.close_document(document);
+                continue;
+            }
+            Work::Request(serial, request_id, request) => (serial, request_id, request),
+        };
+        let generation = match &request {
+            Request::Picture { generation, .. } | Request::Play { generation, .. } => *generation,
+            Request::Stop => continue,
+        };
         let context = Context {
             shared,
             serial,
             request_id,
+            generation,
+            last_progress: Cell::new(None),
         };
         match request {
             Request::Picture {
@@ -548,6 +681,7 @@ enum Decoded {
     },
     /// A Splot decoder picture.
     Picture(Box<splot_decode::Picture>),
+    Document(Box<result::DocumentPicture>),
 }
 
 impl Decoded {
@@ -559,6 +693,7 @@ impl Decoded {
                 bit_depth,
             } => Frame::packed(planes, *sizes, *bit_depth),
             Self::Picture(picture) => crate::stream::frame(picture),
+            Self::Document(picture) => crate::stream::frame(&picture.picture),
         }
     }
 }
@@ -570,15 +705,22 @@ enum Target {
 }
 
 impl Target {
-    fn open(target: &PictureTarget) -> Outcome<Self> {
+    fn open(target: &PictureTarget, context: &Context<'_>) -> Outcome<Self> {
         match target {
             PictureTarget::Source { source } => {
                 source::SourcePictures::open(source).map(|s| Self::Source(Box::new(s)))
             }
             PictureTarget::Result { path, source } => {
-                result::ResultPictures::open(path, source.as_ref())
+                result::ResultPictures::open(path, source.as_ref(), None, context)
                     .map(|r| Self::Result(Box::new(r)))
             }
+            PictureTarget::Document {
+                path,
+                fingerprint,
+                digest,
+                ..
+            } => result::ResultPictures::open(path, None, Some((*fingerprint, digest)), context)
+                .map(|r| Self::Result(Box::new(r))),
         }
     }
 
@@ -591,7 +733,7 @@ impl Target {
     }
 
     /// Whether the file is still the one opened; `Err` closes it.
-    fn check(&mut self) -> Outcome<()> {
+    fn check(&self) -> Outcome<()> {
         match self {
             Self::Source(s) => s.check(),
             Self::Result(r) => r.check(),
@@ -601,7 +743,15 @@ impl Target {
     const fn origin(&self) -> PictureOrigin {
         match self {
             Self::Source(_) => PictureOrigin::Source,
+            Self::Result(r) if r.is_document() => PictureOrigin::Document,
             Self::Result(_) => PictureOrigin::Result,
+        }
+    }
+
+    fn check_document(&self) -> Outcome<()> {
+        match self {
+            Self::Result(r) if r.is_document() => r.check(),
+            _ => Ok(()),
         }
     }
 
@@ -619,18 +769,19 @@ impl Target {
         }
     }
 
-    fn basis(&self, frame: &Frame<'_>) -> ColorBasis {
+    fn basis(&self, frame: &Frame<'_>, decoded: &Decoded) -> Outcome<ColorBasis> {
         let (w, h) = frame.size();
-        let matrix = match self {
-            Self::Source(s) => s.matrix(),
-            Self::Result(r) => r.matrix(),
+        let matrix = match (self, decoded) {
+            (_, Decoded::Document(picture)) => picture.matrix()?,
+            (Self::Source(s), _) => s.matrix(),
+            (Self::Result(r), _) => r.matrix(),
         };
-        picture::basis(
+        Ok(picture::basis(
             matrix,
             frame.chroma.is_none(),
             u32::try_from(w).unwrap_or(u32::MAX),
             u32::try_from(h).unwrap_or(u32::MAX),
-        )
+        ))
     }
 
     /// The frames in one second, for the poster rule.
@@ -685,25 +836,9 @@ impl Target {
     }
 }
 
-/// Which file a target is; requests for the same one share its sessions.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TargetKey {
-    Source(SourceRef),
-    Result(studio_domain::job::WirePath, Option<SourceRef>),
-}
-
-impl TargetKey {
-    fn of(target: &PictureTarget) -> Self {
-        match target {
-            PictureTarget::Source { source } => Self::Source(source.clone()),
-            PictureTarget::Result { path, source } => Self::Result(path.clone(), source.clone()),
-        }
-    }
-}
-
 /// An open target.
 struct Entry {
-    key: TargetKey,
+    key: PictureTarget,
     target: Target,
     /// The poster's index, once chosen.
     poster: Option<u64>,
@@ -713,34 +848,34 @@ struct Entry {
 struct Previews {
     /// Open files, the most recently used last.
     targets: Vec<Entry>,
-    cache: cache::Cache<TargetKey>,
+    cache: cache::Cache<PictureTarget>,
 }
 
 /// The open entry for `target`, opened or checked now.
 fn open<'a>(
     targets: &'a mut Vec<Entry>,
-    cache: &mut cache::Cache<TargetKey>,
+    cache: &mut cache::Cache<PictureTarget>,
     target: &PictureTarget,
+    context: &Context<'_>,
 ) -> Outcome<&'a mut Entry> {
-    let key = TargetKey::of(target);
-    if let Some(at) = targets.iter().position(|entry| entry.key == key) {
-        let mut entry = targets.remove(at);
+    if let Some(at) = targets.iter().position(|entry| entry.key == *target) {
+        let entry = targets.remove(at);
         if let Err(stopped) = entry.target.check() {
-            cache.forget(&key);
+            cache.forget(target);
             return Err(stopped);
         }
         targets.push(entry);
     } else {
-        let opened = Target::open(target)?;
-        cache.forget(&key);
+        let opened = Target::open(target, context)?;
+        cache.forget(target);
         targets.push(Entry {
-            key,
+            key: target.clone(),
             target: opened,
             poster: None,
         });
         if targets.len() > OPEN_TARGETS {
             // Closing kills its `ffmpeg` and stops its decoder.
-            targets.remove(0);
+            cache.forget(&targets.remove(0).key);
         }
     }
     // Two files keep their sessions (a source and its result, compared);
@@ -755,6 +890,12 @@ fn open<'a>(
 }
 
 impl Previews {
+    fn close_document(&mut self, document: u64) {
+        let matches = |target: &PictureTarget| matches!(target, PictureTarget::Document { document: id, .. } if *id == document);
+        self.targets.retain(|entry| !matches(&entry.key));
+        self.cache.forget_matching(matches);
+    }
+
     fn picture(
         &mut self,
         context: &Context<'_>,
@@ -765,8 +906,7 @@ impl Previews {
         size: PictureBox,
     ) -> Outcome<()> {
         valid(size)?;
-        let entry = open(&mut self.targets, &mut self.cache, target)?;
-        let key = entry.key.clone();
+        let entry = open(&mut self.targets, &mut self.cache, target, context)?;
         let (index, decoded) = match (frame, entry.poster) {
             (PictureFrame::Index { index }, _) | (PictureFrame::Poster, Some(index)) => {
                 (index, None)
@@ -778,23 +918,11 @@ impl Previews {
             }
         };
         let open = &mut entry.target;
-        let header =
-            |open: &Target, rendered: &Rendered, frame_size: (u32, u32), basis| PictureHeader {
-                generation,
-                origin: open.origin(),
-                frame: index,
-                time: open.time(index),
-                frame_count: open.frame_count(),
-                width: rendered.width,
-                height: rendered.height,
-                frame_width: frame_size.0,
-                frame_height: frame_size.1,
-                view: rendered.view,
-                basis,
-            };
-        if let Some((rendered, frame_size, basis)) = self.cache.get(&key, index, view, size) {
-            let header = header(open, &rendered, frame_size, basis);
-            context.picture(header, rendered.pixels);
+        if let Some((mut header, pixels)) = self.cache.get(target, index, view, size) {
+            header.generation = generation;
+            header.frame_count = open.frame_count();
+            open.check_document()?;
+            context.picture(header, pixels);
             return Ok(());
         }
         let decoded = if let Some(decoded) = decoded {
@@ -813,11 +941,10 @@ impl Previews {
             }
         };
         context.check()?;
-        let (rendered, frame_size, basis) = render(open, &decoded, view, size)?;
-        let header = header(open, &rendered, frame_size, basis);
-        self.cache
-            .put(key, index, view, size, &rendered, frame_size, basis);
-        context.picture(header, rendered.pixels);
+        let (header, pixels) = render(open, index, &decoded, view, size, generation)?;
+        open.check_document()?;
+        self.cache.put(target.clone(), view, size, &header, &pixels);
+        context.picture(header, pixels);
         Ok(())
     }
 
@@ -833,7 +960,9 @@ impl Previews {
         let mut last = None;
         let played = self.playback(context, generation, target, from, view, size, &mut last);
         match played {
-            Err(Stopped::Unavailable(code, message)) if last.is_none() => {
+            Err(Stopped::Unavailable(code, message))
+                if last.is_none() || matches!(target, PictureTarget::Document { .. }) =>
+            {
                 unavailable(context, generation, code, message);
             }
             // Ended, stopped, superseded, or failed after some frames.
@@ -860,12 +989,15 @@ impl Previews {
         last: &mut Option<u64>,
     ) -> Outcome<()> {
         valid(size)?;
-        let open = &mut open(&mut self.targets, &mut self.cache, target)?.target;
-        let Some(start) = open.time(from) else {
+        let open = &mut open(&mut self.targets, &mut self.cache, target, context)?.target;
+        let mut clock = if open.origin() == PictureOrigin::Document {
+            PlayClock::Document(DocumentClock::default())
+        } else if let Some(start) = open.time(from) {
+            PlayClock::Indexed(start)
+        } else {
             return Err(Stopped::unavailable(
                 PictureFailure::NoTiming,
-                "the stream's frame timing is not known, so it cannot be played; a raw OBU \
-                 stream has none unless its source is given",
+                "The stream has no playback timing. Provide the source for an Annex B result.",
             ));
         };
         open.seek(context, from)?;
@@ -878,19 +1010,21 @@ impl Previews {
             context.check()?;
             let Some((index, decoded)) = open.next(context)? else {
                 if let Some((index, decoded)) = skipped.take() {
-                    let (rendered, frame_size, basis) = render(open, &decoded, view, size)?;
-                    let header = header_of(generation, open, index, &rendered, frame_size, basis);
-                    context.picture(header, rendered.pixels);
+                    let (header, pixels) = render(open, index, &decoded, view, size, generation)?;
+                    open.check_document()?;
+                    context.picture(header, pixels);
                     *last = Some(index);
                 }
+                open.check_document()?;
                 if last.is_none() {
                     return Err(out_of_range(from, open.frame_count()));
                 }
                 return Ok(());
             };
-            let due = started + elapsed(start, open.time(index));
-            let next_due = started + elapsed(start, open.time(index + 1));
+            let (offset, next_offset) = clock.offsets(open, index, &decoded);
             let now = Instant::now();
+            let due = started.checked_add(offset).unwrap_or(now);
+            let next_due = started.checked_add(next_offset).unwrap_or(due);
             // Late: the next frame is already due. Skipped, unless nothing
             // was shown for a while.
             if last.is_some() && now >= next_due && now < shown + MIN_PLAYBACK_INTERVAL {
@@ -898,41 +1032,90 @@ impl Previews {
                 continue;
             }
             skipped = None;
-            let (rendered, frame_size, basis) = render(open, &decoded, view, size)?;
+            let (header, pixels) = render(open, index, &decoded, view, size, generation)?;
             drop(decoded);
             if !context.wait_until(due) {
                 return Err(Stopped::Superseded);
             }
-            let header = header_of(generation, open, index, &rendered, frame_size, basis);
-            context.picture(header, rendered.pixels);
+            open.check_document()?;
+            context.picture(header, pixels);
             *last = Some(index);
             shown = Instant::now();
         }
     }
 }
 
-/// The header of a played picture.
-fn header_of(
-    generation: u64,
-    open: &Target,
-    index: u64,
-    rendered: &Rendered,
-    frame_size: (u32, u32),
-    basis: ColorBasis,
-) -> PictureHeader {
-    PictureHeader {
-        generation,
-        origin: open.origin(),
-        frame: index,
-        time: open.time(index),
-        frame_count: open.frame_count(),
-        width: rendered.width,
-        height: rendered.height,
-        frame_width: frame_size.0,
-        frame_height: frame_size.1,
-        view: rendered.view,
-        basis,
+enum PlayClock {
+    Indexed(MediaTime),
+    Document(DocumentClock),
+}
+
+impl PlayClock {
+    fn offsets(&mut self, target: &Target, index: u64, decoded: &Decoded) -> (Duration, Duration) {
+        match (self, decoded) {
+            (Self::Indexed(start), _) => (
+                elapsed(*start, target.time(index)),
+                elapsed(*start, target.time(index + 1)),
+            ),
+            (Self::Document(clock), Decoded::Document(picture)) => {
+                let due = clock.advance(
+                    picture.output.unit_offset,
+                    picture.time,
+                    picture.output.interval,
+                );
+                // The next PTS is unknown until the decoder emits the next picture.
+                (due, due.saturating_add(MIN_PLAYBACK_INTERVAL))
+            }
+            _ => (Duration::ZERO, Duration::ZERO),
+        }
     }
+}
+
+#[derive(Default)]
+struct DocumentClock {
+    previous: Option<(u64, Option<MediaTime>, Option<MediaTime>)>,
+    offset: Duration,
+}
+
+impl DocumentClock {
+    fn advance(
+        &mut self,
+        unit: u64,
+        time: Option<MediaTime>,
+        interval: Option<MediaTime>,
+    ) -> Duration {
+        if let Some((previous_unit, previous_time, previous_interval)) =
+            self.previous.replace((unit, time, interval))
+        {
+            let gap = previous_time
+                .zip(time)
+                // A PTS before the previous output is already due.
+                .map(|(start, end)| exact_elapsed(start, end).unwrap_or_default())
+                .or_else(|| {
+                    previous_interval.and_then(|step| {
+                        if previous_unit == unit {
+                            Some(Duration::ZERO)
+                        } else {
+                            exact_elapsed(MediaTime { num: 0, den: 1 }, step)
+                        }
+                    })
+                })
+                .unwrap_or(ASSUMED_INTERVAL);
+            self.offset = self.offset.saturating_add(gap);
+        }
+        self.offset
+    }
+}
+
+fn exact_elapsed(start: MediaTime, end: MediaTime) -> Option<Duration> {
+    let a = u128::from(start.num) * u128::from(end.den);
+    let b = u128::from(end.num) * u128::from(start.den);
+    let den = u128::from(start.den) * u128::from(end.den);
+    let delta = b.checked_sub(a)?;
+    let secs = u64::try_from(delta.checked_div(den)?).ok()?;
+    // Both inputs use u64, but their denominator product can exhaust u128.
+    let nanos = (delta % den).checked_mul(1_000_000_000)?.checked_div(den)?;
+    Some(Duration::new(secs, u32::try_from(nanos).ok()?))
 }
 
 /// The time from `start` to `time`; zero when unknown or earlier.
@@ -949,27 +1132,40 @@ fn elapsed(start: MediaTime, time: Option<MediaTime>) -> Duration {
 
 fn render(
     open: &Target,
+    index: u64,
     decoded: &Decoded,
     view: PictureView,
     size: PictureBox,
-) -> Outcome<(Rendered, (u32, u32), ColorBasis)> {
+    generation: u64,
+) -> Outcome<(PictureHeader, Vec<u8>)> {
     let frame = decoded.frame().ok_or_else(|| {
         Stopped::unavailable(
             PictureFailure::Unreadable,
             "the frame's planes are inconsistent",
         )
     })?;
-    let basis = open.basis(&frame);
+    let basis = open.basis(&frame, decoded)?;
     let (w, h) = frame.size();
-    let frame_size = (
-        u32::try_from(w).unwrap_or(u32::MAX),
-        u32::try_from(h).unwrap_or(u32::MAX),
-    );
-    Ok((
-        picture::render(&frame, basis, view, size),
-        frame_size,
+    let rendered = picture::render(&frame, basis, view, size);
+    let (time, output) = match decoded {
+        Decoded::Document(picture) => (picture.time, Some(picture.output)),
+        _ => (open.time(index), None),
+    };
+    let header = PictureHeader {
+        generation,
+        origin: open.origin(),
+        frame: index,
+        output,
+        time,
+        frame_count: open.frame_count(),
+        width: rendered.width,
+        height: rendered.height,
+        frame_width: u32::try_from(w).unwrap_or(u32::MAX),
+        frame_height: u32::try_from(h).unwrap_or(u32::MAX),
+        view: rendered.view,
         basis,
-    ))
+    };
+    Ok((header, rendered.pixels))
 }
 
 fn valid(size: PictureBox) -> Outcome<()> {
@@ -994,4 +1190,32 @@ fn out_of_range(index: u64, count: Option<u64>) -> Stopped {
             None => format!("there is no frame {index}; the stream ends before it"),
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn document_clock_uses_exact_pts_or_signaled_intervals() {
+        let ms = |num| Some(MediaTime { num, den: 1000 });
+        let mut ivf = DocumentClock::default();
+        assert_eq!(ivf.advance(44, ms(120), None), Duration::ZERO);
+        assert_eq!(ivf.advance(44, ms(120), None), Duration::ZERO);
+        assert_eq!(ivf.advance(92, ms(147), None), Duration::from_millis(27));
+        assert_eq!(ivf.advance(61, ms(180), None), Duration::from_millis(60));
+
+        let mut annex_b = DocumentClock::default();
+        assert_eq!(annex_b.advance(0, None, ms(40)), Duration::ZERO);
+        assert_eq!(annex_b.advance(0, None, ms(40)), Duration::ZERO);
+        assert_eq!(
+            annex_b.advance(100, None, ms(40)),
+            Duration::from_millis(40)
+        );
+
+        let mut untimed = DocumentClock::default();
+        assert_eq!(untimed.advance(0, None, None), Duration::ZERO);
+        assert_eq!(untimed.advance(0, None, None), ASSUMED_INTERVAL);
+        assert_eq!(untimed.advance(100, None, None), ASSUMED_INTERVAL * 2);
+    }
 }

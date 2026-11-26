@@ -230,6 +230,7 @@ impl Live {
         let header = PictureHeader {
             generation: 0,
             origin: PictureOrigin::Live,
+            output: None,
             frame: index,
             time: (num > 0).then(|| MediaTime {
                 num: index.saturating_mul(u64::from(den)),
