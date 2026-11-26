@@ -120,6 +120,93 @@ mod tests {
     use super::*;
     use splot_core::ivf::{IvfHeader, write_ivf_frame, write_ivf_header};
 
+    fn validate_fixture(file: &mut File, strict: bool) -> std::io::Result<ValidationEvidence> {
+        file.rewind()?;
+        let settings = ValidationSettings {
+            strict,
+            external_hls: None,
+        };
+        validate(file, &settings, &|| false).map_err(|error| std::io::Error::other(error.message))
+    }
+
+    #[test]
+    fn diagnostic_omission_retains_counts_and_complete_execution() -> std::io::Result<()> {
+        let mut file = tempfile::tempfile()?;
+        // A temporal delimiter must use the global layer. This one signals layer 5.
+        let units = MAX_FINDINGS + 2;
+        file.write_all(&[0x02, 0x88, 0x05].repeat(units as usize))?;
+        let ValidationEvidence { summary, findings } = validate_fixture(&mut file, false)?;
+        assert_eq!(summary.completion, ValidationCompletion::EndOfInput);
+        assert!(summary.finalized);
+        assert_eq!(summary.checked_obus, u64::from(units));
+        assert_eq!(summary.finding_limit, MAX_FINDINGS);
+        assert_eq!(findings.len(), MAX_FINDINGS as usize);
+        assert_eq!(
+            summary.omitted + u64::from(MAX_FINDINGS),
+            summary.errors + summary.warnings + summary.info
+        );
+        assert!(summary.omitted >= 2);
+        assert!(summary.policy_failed());
+        Ok(())
+    }
+
+    fn ivf_with_one_delimiter() -> std::io::Result<File> {
+        let mut file = tempfile::tempfile()?;
+        write_ivf_header(&mut file, &IvfHeader::new(*b"AV02", 16, 16, 24, 1, 2))?;
+        write_ivf_frame(&mut file, 0, &[0x01, 0x08])?;
+        Ok(file)
+    }
+
+    #[test]
+    fn an_oversize_ivf_record_preserves_checked_prefix() -> std::io::Result<()> {
+        let mut file = ivf_with_one_delimiter()?;
+        let declared = u32::try_from(MAX_UNIT_BYTES + 1).map_err(std::io::Error::other)?;
+        let payload_start = file.stream_position()? + 12;
+        file.write_all(&declared.to_le_bytes())?;
+        file.write_all(&1_u64.to_le_bytes())?;
+        let ValidationEvidence { summary, findings } = validate_fixture(&mut file, true)?;
+        assert_eq!(
+            summary.completion,
+            ValidationCompletion::UnitTooLarge {
+                offset: payload_start,
+                declared: u64::from(declared),
+                cap: MAX_UNIT_BYTES as u64,
+            }
+        );
+        assert_eq!(summary.checked_obus, 1);
+        assert_eq!(summary.last_checked_obu_end, Some(payload_start - 12));
+        assert!(!summary.finalized);
+        assert!(findings.is_empty());
+        assert!(!summary.policy_failed());
+        Ok(())
+    }
+
+    #[test]
+    fn strict_policy_retains_the_native_warning() -> std::io::Result<()> {
+        let mut file = ivf_with_one_delimiter()?;
+        // A partial trailing record header emits a native warning.
+        file.write_all(&[0x04, 0x00])?;
+        let permissive = validate_fixture(&mut file, false)?;
+        let strict = validate_fixture(&mut file, true)?;
+        assert_eq!(
+            permissive.summary.completion,
+            ValidationCompletion::MalformedInput
+        );
+        assert_eq!(strict.summary.completion, permissive.summary.completion);
+        assert_eq!(permissive.summary.errors, 0);
+        assert_eq!(permissive.summary.warnings, 1);
+        assert!(!permissive.summary.policy_failed());
+        assert!(strict.summary.policy_failed());
+        assert_eq!(permissive.findings, strict.findings);
+        assert!(matches!(
+            strict.findings.as_slice(),
+            [finding]
+              if finding.rule_id == "ivf/trailing-partial-frame-header"
+                  && finding.severity == Severity::Warning
+        ));
+        Ok(())
+    }
+
     #[test]
     fn native_rule_retains_its_location_across_wrappers_and_policies() -> std::io::Result<()> {
         // This temporal delimiter explicitly signals extended layer 5.
@@ -134,13 +221,7 @@ mod tests {
             }
             let mut previous = None;
             for strict in [false, true] {
-                file.rewind()?;
-                let options = ValidationSettings {
-                    strict,
-                    external_hls: None,
-                };
-                let report = validate(&mut file, &options, &|| false)
-                    .map_err(|error| std::io::Error::other(error.message))?;
+                let report = validate_fixture(&mut file, strict)?;
                 let rule = report
                     .findings
                     .iter()

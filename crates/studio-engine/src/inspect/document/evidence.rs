@@ -241,6 +241,7 @@ fn page<T: Clone + Serialize>(
 mod tests {
     use super::{PAGE_BUDGET, indexed_location, page};
     use crate::inspect::document::Refusal;
+    use splot_core::types::GLOBAL_XLAYER_ID;
     use studio_domain::analysis::{AnalysisFailure, MAX_PAGE_ELEMENTS};
 
     #[test]
@@ -267,7 +268,10 @@ mod tests {
         }
         assert_eq!(indexed_location(&scanned.items, 48), (Some(4), None));
         assert_eq!(indexed_location(&scanned.items, 61), (Some(5), None));
-        assert_eq!(indexed_location(&scanned.items, 62), (Some(6), Some(0)));
+        assert_eq!(
+            indexed_location(&scanned.items, 62),
+            (Some(6), Some(GLOBAL_XLAYER_ID.get()))
+        );
         for byte in [0, 32, 49, 60, 63, 64, 65] {
             assert_eq!(indexed_location(&scanned.items, byte), (None, None));
         }
