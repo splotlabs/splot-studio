@@ -1000,7 +1000,11 @@ export component AppWindow inherits Window {
     property <bool> advanced-modified-only;
     property <bool> advanced-expert-enabled;
     property <int> advanced-focus-request;
-    property <string> advanced-focus-field;
+    out property <string> advanced-focus-field;
+    property <string> advanced-draft-option;
+    property <string> advanced-draft-field;
+    property <string> advanced-draft-text;
+    property <int> advanced-draft-reset;
     in-out property <int> advanced-preset-candidate: root.preset;
 
     callback advanced-open-changed(bool);
@@ -1016,11 +1020,24 @@ export component AppWindow inherits Window {
     callback advanced-apply-preset();
     changed advanced-open => {
         if !root.advanced-open {
+            root.flush-advanced-draft();
             root.advanced-preset-candidate = root.preset;
         }
         root.advanced-open-changed(root.advanced-open);
     }
     changed preset => { root.advanced-preset-candidate = root.preset; }
+
+    public function reset-advanced-draft() {
+        root.advanced-draft-field = "";
+        root.advanced-draft-reset += 1;
+    }
+
+    public function flush-advanced-draft() {
+        if root.advanced-draft-field != "" && root.advanced-draft-option == root.advanced-selected {
+            root.advanced-edit(root.advanced-draft-field, root.advanced-draft-text);
+            root.advanced-draft-field = "";
+        }
+    }
 
     public function focus-advanced-error(field: string) {
         root.advanced-focus-field = field;
@@ -2155,6 +2172,7 @@ export component AppWindow inherits Window {
                                         editable: !root.locked && !root.sheet-open;
                                         focus-request: root.advanced-focus-request;
                                         focus-field: root.advanced-focus-field;
+                                        draft-reset: root.advanced-draft-reset;
                                         query <=> root.advanced-query;
                                         modified-only <=> root.advanced-modified-only;
                                         expert <=> root.advanced-expert-enabled;
@@ -2162,7 +2180,17 @@ export component AppWindow inherits Window {
                                         modified(enabled) => { root.advanced-modified(enabled); }
                                         show-expert(enabled) => { root.advanced-expert(enabled); }
                                         select(key) => { root.advanced-select(key); }
-                                        edit(id, value) => { root.advanced-edit(id, value); }
+                                        edit(id, value) => {
+                                            if root.advanced-draft-field == id && root.advanced-draft-option == root.advanced-selected {
+                                                root.advanced-draft-field = "";
+                                            }
+                                            root.advanced-edit(id, value);
+                                        }
+                                        draft-edited(id, value) => {
+                                            root.advanced-draft-option = root.advanced-selected;
+                                            root.advanced-draft-field = id;
+                                            root.advanced-draft-text = value;
+                                        }
                                         reset(scope) => { root.advanced-reset(scope); }
                                         undo => { root.advanced-undo(); }
                                         redo => { root.advanced-redo(); }

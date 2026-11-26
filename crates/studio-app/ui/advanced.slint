@@ -84,7 +84,9 @@ component SettingField inherits VerticalLayout {
     in property <string> option-key;
     in property <bool> editable;
     in property <int> focus-request;
+    in property <int> draft-reset;
     callback committed(string);
+    callback draft-edited(string);
 
     property <string> editor-text: root.item.text;
     property <string> choice-text: root.item.text;
@@ -111,6 +113,10 @@ component SettingField inherits VerticalLayout {
 
     spacing: Tokens.space-1;
     changed item => { root.sync-model(); }
+    changed draft-reset => {
+        root.dirty = false;
+        root.sync-model();
+    }
     changed option-key => { root.sync-model(); }
     if root.item.kind != "action": Caption {
         text: root.item.label;
@@ -131,6 +137,7 @@ component SettingField inherits VerticalLayout {
             root.draft-option = root.option-key;
             root.draft-field = root.item.id;
             root.dirty = true;
+            root.draft-edited(root.editor-text);
         }
         accepted => { root.commit-draft(); }
         changed has-focus => {
@@ -193,6 +200,7 @@ export component AdvancedEditor inherits VerticalLayout {
     in property <bool> can-apply-preset;
     in property <bool> editable;
     in property <int> focus-request;
+    in property <int> draft-reset;
     in property <string> focus-field;
     in-out property <string> query;
     in-out property <bool> modified-only;
@@ -202,6 +210,7 @@ export component AdvancedEditor inherits VerticalLayout {
     callback show-expert(bool);
     callback select(string);
     callback edit(string, string);
+    callback draft-edited(string, string);
     callback reset(string);
     callback undo();
     callback redo();
@@ -406,8 +415,10 @@ export component AdvancedEditor inherits VerticalLayout {
                     item: field;
                     option-key: root.selected;
                     editable: root.editable;
+                    draft-reset: root.draft-reset;
                     focus-request: (root.focus-field == "" ? i == 0 : field.id == root.focus-field) ? root.focus-request : 0;
                     committed(value) => { root.edit(field.id, value); }
+                    draft-edited(value) => { root.draft-edited(field.id, value); }
                 }
             }
         }

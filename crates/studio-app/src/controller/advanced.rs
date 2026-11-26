@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -36,13 +37,19 @@ pub(super) struct Editor {
     modified: bool,
     expert: bool,
     selected: String,
-    edit_error: Option<String>,
+    invalid: BTreeMap<(String, String), InvalidEdit>,
+    pending_focus: Option<(String, String)>,
     engine_error: Option<FieldError>,
     candidate: Option<OptionRequest>,
     preview_started: bool,
     rows: Vec<AdvancedOptionRow>,
     fields: Vec<FieldRow>,
     fields_key: String,
+}
+
+struct InvalidEdit {
+    text: String,
+    message: String,
 }
 
 impl Controller {
@@ -78,7 +85,6 @@ impl Controller {
                     ctl.view_advanced(|editor| {
                         if editor.selected != key.as_str() {
                             editor.selected = key.to_string();
-                            editor.edit_error = None;
                         }
                     });
                 });
@@ -118,7 +124,6 @@ impl Controller {
             editor.candidate = None;
             editor.preview_started = false;
         }
-        editor.edit_error = None;
         editor.engine_error = None;
         drop(editor);
         let outcome = self.session.borrow_mut().advanced_refresh(open);
@@ -159,7 +164,6 @@ impl Controller {
                 editor.preview_started = false;
             }
             editor.inputs = Some(inputs);
-            editor.edit_error = None;
             if refresh {
                 let weak = Rc::downgrade(self);
                 self.advanced_settle
@@ -183,35 +187,22 @@ impl Controller {
             session.advanced_policy()
         };
         let error = (!locked).then(|| session.advanced_error()).flatten();
-        let focus = editor.select_error(catalog, error);
-        let rows = advanced::options(
-            catalog,
-            request,
-            editor.query.as_str(),
-            editor.modified,
-            editor.expert,
-        )
-        .into_iter()
-        .map(|row| AdvancedOptionRow {
-            key: row.key.into(),
-            label: row.title.into(),
-            group: row.group.into(),
-            modified: row.modified,
-        })
-        .collect::<Vec<_>>();
-        if error.is_none() && !rows.iter().any(|row| row.key == editor.selected.as_str()) {
-            editor.selected = rows
-                .first()
-                .map_or_else(String::new, |row| row.key.to_string());
+        editor.select_error(catalog, error);
+        let Editor {
+            selected,
+            pending_focus,
+            ..
+        } = &mut *editor;
+        if let Some((key, _)) = pending_focus {
+            selected.clone_from(key);
         }
-        if rows != editor.rows {
-            window.set_advanced_options(model(rows.clone()));
-            editor.rows = rows;
-        }
+        editor.render_rows(window, catalog, request, error.is_some());
         editor.render_detail(window, catalog, request, policy);
         let error_text = editor
-            .edit_error
-            .clone()
+            .invalid
+            .iter()
+            .find(|((key, _), _)| *key == editor.selected)
+            .map(|(_, error)| error.message.clone())
             .or_else(|| error.map(|error| error.message.clone()));
         window.set_advanced_error(error_text.unwrap_or_default().into());
         window.set_advanced_status(
@@ -227,6 +218,7 @@ impl Controller {
         window.set_advanced_can_undo(!locked && state.can_undo_options());
         window.set_advanced_can_redo(!locked && state.can_redo_options());
         editor.render_preset(window, session, policy);
+        let focus = editor.focus_field();
         drop(editor);
         if let Some(field) = focus {
             window.invoke_focus_advanced_error(field.into());
@@ -246,20 +238,33 @@ impl Controller {
             let Some(descriptor) = selected(session.advanced_catalog(), &editor.selected) else {
                 return;
             };
-            advanced::edit(
-                descriptor,
-                state.option_request(),
-                session.advanced_policy(),
-                id,
-                text,
+            (
+                (descriptor.key.clone(), id.to_owned()),
+                advanced::edit(
+                    descriptor,
+                    state.option_request(),
+                    session.advanced_policy(),
+                    id,
+                    text,
+                ),
             )
         };
+        let (field, proposed) = proposed;
         match proposed {
             Ok(proposed) => {
-                self.advanced.borrow_mut().edit_error = None;
+                self.advanced.borrow_mut().invalid.remove(&field);
                 self.dispatch(Intent::ReplaceOptions(proposed));
+                self.view_advanced(|_| {});
             }
-            Err(error) => self.view_advanced(|editor| editor.edit_error = Some(error)),
+            Err(message) => self.view_advanced(|editor| {
+                editor.invalid.insert(
+                    field,
+                    InvalidEdit {
+                        text: text.into(),
+                        message,
+                    },
+                );
+            }),
         }
     }
 
@@ -270,26 +275,51 @@ impl Controller {
             if state.settings_view().read_only {
                 return;
             }
-            let editor = self.advanced.borrow();
+            let selected_key = self.advanced.borrow().selected.clone();
             let catalog = session.advanced_catalog();
             let scope = match scope {
                 "all" => Reset::All,
-                "selected" => Reset::Field(&editor.selected),
+                "selected" => Reset::Field(&selected_key),
                 "group" => {
-                    let Some(row) = editor
-                        .rows
-                        .iter()
-                        .find(|row| row.key == editor.selected.as_str())
-                    else {
+                    let Some(descriptor) = selected(catalog, &selected_key) else {
                         return;
                     };
-                    Reset::Group(row.group.as_str())
+                    Reset::Group(advanced::catalog::group(descriptor))
                 }
                 _ => return,
             };
-            advanced::reset(state.option_request(), catalog, scope)
+            let proposed = advanced::reset(state.option_request(), catalog, scope);
+            self.advanced
+                .borrow_mut()
+                .invalid
+                .retain(|(key, _), _| !match scope {
+                    Reset::All => true,
+                    Reset::Field(field) => key == field,
+                    Reset::Group(group) => selected(catalog, key)
+                        .is_some_and(|descriptor| advanced::catalog::group(descriptor) == group),
+                });
+            proposed
         };
         self.dispatch(Intent::ReplaceOptions(proposed));
+        self.view_advanced(|_| {});
+        if let Some(window) = self.window.upgrade() {
+            window.invoke_reset_advanced_draft();
+        }
+    }
+
+    pub(super) fn block_invalid_advanced(self: &Rc<Self>) -> bool {
+        let Some(window) = self.window.upgrade() else {
+            return false;
+        };
+        window.invoke_flush_advanced_draft();
+        let target = self.advanced.borrow().invalid.keys().next().cloned();
+        let Some(target) = target else {
+            return false;
+        };
+        self.advanced.borrow_mut().pending_focus = Some(target);
+        window.set_advanced_open(true);
+        self.view_advanced(|_| {});
+        true
     }
 
     pub(super) fn preview_simple_preset(self: &Rc<Self>, intent: &Intent) -> bool {
@@ -329,7 +359,7 @@ impl Controller {
         let mut session = self.session.borrow_mut();
         if !has_source(session.state())
             || session.advanced_pending()
-            || session.advanced_policy().is_empty()
+            || (session.advanced_policy().is_empty() && session.advanced_error().is_none())
         {
             return;
         }
@@ -348,6 +378,9 @@ impl Controller {
     }
 
     fn apply_preset(self: &Rc<Self>) {
+        if self.block_invalid_advanced() {
+            return;
+        }
         let ready = can_apply_preset(&self.session.borrow());
         let candidate = self.advanced.borrow_mut().candidate.take_if(|_| ready);
         if let Some(candidate) = candidate {
@@ -357,6 +390,58 @@ impl Controller {
 }
 
 impl Editor {
+    fn render_rows(
+        &mut self,
+        window: &AppWindow,
+        catalog: &[OptionDescriptor],
+        request: &OptionRequest,
+        engine_error: bool,
+    ) {
+        let mut rows = advanced::options(
+            catalog,
+            request,
+            self.query.as_str(),
+            self.modified,
+            self.expert,
+        )
+        .into_iter()
+        .map(|row| AdvancedOptionRow {
+            key: row.key.into(),
+            label: row.title.into(),
+            group: row.group.into(),
+            modified: row.modified,
+        })
+        .collect::<Vec<_>>();
+        if !rows.iter().any(|row| row.key == self.selected.as_str())
+            && (self.pending_focus.is_some()
+                || self.invalid.keys().any(|(key, _)| *key == self.selected)
+                || engine_error)
+            && let Some(descriptor) = selected(catalog, &self.selected)
+        {
+            rows.insert(
+                0,
+                AdvancedOptionRow {
+                    key: descriptor.key.as_str().into(),
+                    label: advanced::catalog::title(descriptor).into(),
+                    group: advanced::catalog::group(descriptor).into(),
+                    modified: request.values.contains_key(&descriptor.key),
+                },
+            );
+        }
+        if !engine_error
+            && self.pending_focus.is_none()
+            && !rows.iter().any(|row| row.key == self.selected.as_str())
+        {
+            self.selected = rows
+                .first()
+                .map_or_else(String::new, |row| row.key.to_string());
+        }
+        if rows != self.rows {
+            window.set_advanced_options(model(rows.clone()));
+            self.rows = rows;
+        }
+    }
+
     fn render_detail(
         &mut self,
         window: &AppWindow,
@@ -376,7 +461,11 @@ impl Editor {
                         id: row.id.into(),
                         label: row.label.into(),
                         kind: row.kind.into(),
-                        text: row.text.into(),
+                        text: self
+                            .invalid
+                            .get(&(self.selected.clone(), row.id.clone()))
+                            .map_or(row.text.as_str(), |invalid| invalid.text.as_str())
+                            .into(),
                         choices: model(row.choices.into_iter().map(SharedString::from).collect()),
                         help: row.help.into(),
                     })
@@ -405,7 +494,9 @@ impl Editor {
 
     fn render_preset(&self, window: &AppWindow, session: &Session, baseline: &[EffectiveOption]) {
         let candidate = session.advanced_preview_policy();
-        window.set_advanced_can_apply_preset(self.candidate.is_some() && can_apply_preset(session));
+        window.set_advanced_can_apply_preset(
+            self.candidate.is_some() && self.invalid.is_empty() && can_apply_preset(session),
+        );
         let text = self.candidate.as_ref().map_or_else(String::new, |request| {
             if !has_source(session.state()) {
                 "Open a source to compare encoder policy. You can apply this preset now.".into()
@@ -413,8 +504,11 @@ impl Editor {
                 error.message.clone()
             } else if session.advanced_pending() || session.advanced_preview_pending() {
                 format!("Resolving preset {}…", request.base.preset.get())
-            } else if baseline.is_empty() || candidate.is_empty() {
+            } else if candidate.is_empty() {
                 "Check the current settings to compare presets.".into()
+            } else if baseline.is_empty() {
+                "The proposed preset resolves. Correct the current settings to compare policy."
+                    .into()
             } else {
                 advanced::differences(baseline, candidate)
             }
@@ -422,16 +516,14 @@ impl Editor {
         window.set_advanced_preset_preview(text.into());
     }
 
-    fn select_error(
-        &mut self,
-        catalog: &[OptionDescriptor],
-        error: Option<&FieldError>,
-    ) -> Option<String> {
+    fn select_error(&mut self, catalog: &[OptionDescriptor], error: Option<&FieldError>) {
         if self.engine_error.as_ref() == error {
-            return None;
+            return;
         }
         self.engine_error = error.cloned();
-        let error = error?;
+        let Some(error) = error else {
+            return;
+        };
         let descriptor = catalog
             .iter()
             .filter(|d| {
@@ -441,16 +533,34 @@ impl Editor {
                         .strip_prefix(&d.key)
                         .is_some_and(|suffix| suffix.starts_with('.'))
             })
-            .max_by_key(|d| d.key.len())?;
-        self.selected.clone_from(&descriptor.key);
-        Some(
-            error
+            .max_by_key(|d| d.key.len());
+        if let Some(descriptor) = descriptor {
+            let suffix = error
                 .field
                 .strip_prefix(&descriptor.key)
-                .and_then(|suffix| suffix.strip_prefix('.'))
-                .unwrap_or_default()
-                .into(),
-        )
+                .unwrap_or_default();
+            self.pending_focus.get_or_insert_with(|| {
+                (
+                    descriptor.key.clone(),
+                    format!("value{}", suffix.replace('.', "/")),
+                )
+            });
+        }
+    }
+
+    fn focus_field(&mut self) -> Option<String> {
+        let (key, field) = self.pending_focus.as_ref()?;
+        if *key != self.fields_key || self.fields.is_empty() {
+            return None;
+        }
+        let field = self
+            .fields
+            .iter()
+            .find(|row| row.id == field.as_str() && row.kind != "readonly")
+            .or_else(|| self.fields.iter().find(|row| row.kind != "readonly"))
+            .map(|row| row.id.to_string());
+        self.pending_focus = None;
+        field
     }
 }
 
@@ -472,9 +582,7 @@ fn has_source(state: &AppState) -> bool {
 
 fn can_apply_preset(session: &Session) -> bool {
     !session.state().settings_view().read_only
-        && (!has_source(session.state())
-            || (!session.advanced_policy().is_empty()
-                && !session.advanced_preview_policy().is_empty()))
+        && (!has_source(session.state()) || !session.advanced_preview_policy().is_empty())
 }
 
 fn selected<'a>(catalog: &'a [OptionDescriptor], key: &str) -> Option<&'a OptionDescriptor> {

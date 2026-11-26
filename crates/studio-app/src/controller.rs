@@ -237,6 +237,9 @@ impl Controller {
     /// Applies an intent and handles what it leads to.
     pub fn dispatch(self: &Rc<Self>, intent: Intent) {
         self.check_visible();
+        if matches!(intent, Intent::ConvertRequested) && self.block_invalid_advanced() {
+            return;
+        }
         if self.preview_simple_preset(&intent) {
             return;
         }
