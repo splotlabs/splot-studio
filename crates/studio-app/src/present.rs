@@ -946,6 +946,7 @@ mod tests {
             encode_outputs: Vec::new(),
             media_tool,
             analysis_framings: Vec::new(),
+            analysis_evidence: None,
             options: None,
         };
         assert_eq!(media_tool(None), "FFmpeg: not known yet.");

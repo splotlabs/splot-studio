@@ -555,6 +555,7 @@ mod tests {
                 encode_outputs: vec![OutputKind::Ivf],
                 media_tool: None,
                 analysis_framings: Vec::new(),
+                analysis_evidence: None,
                 options: None,
             },
         };

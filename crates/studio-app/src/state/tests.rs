@@ -101,6 +101,7 @@ fn capabilities(media_tool: bool) -> Capabilities {
             origin: MediaToolOrigin::System,
         }),
         analysis_framings: Vec::new(),
+        analysis_evidence: None,
         options: None,
     }
 }
@@ -411,6 +412,7 @@ fn encode_needs_a_probe_a_free_destination_and_engine_support() {
         encode_outputs: vec![OutputKind::Ivf],
         media_tool: None,
         analysis_framings: Vec::new(),
+        analysis_evidence: None,
         options: None,
     };
     app.apply(Intent::EngineAnswered(Ok(ivf_only)));

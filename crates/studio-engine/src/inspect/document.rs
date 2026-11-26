@@ -50,6 +50,10 @@ use studio_domain::protocol::MAX_MESSAGE_BYTES;
 use crate::output::FileId;
 use crate::source;
 
+mod evidence;
+
+use evidence::Evidence;
+
 /// The largest unit read: one Annex B OBU, or one IVF frame payload. The
 /// same cap as the preview's result reader; a larger declared unit stops
 /// reading as [`ProblemKind::LimitReached`].
@@ -117,6 +121,7 @@ pub struct Document {
     id: FileId,
     summary: DocumentSummary,
     items: Vec<Item>,
+    evidence: Evidence,
 }
 
 impl Document {
@@ -154,10 +159,7 @@ impl Document {
         let reader = file
             .try_clone()
             .map_err(|e| io("cannot read the file", e))?;
-        let checked = Checked {
-            inner: reader,
-            cancelled,
-        };
+        let checked = Checked::new(reader, cancelled);
         let scanned = scan(BufReader::new(checked), fingerprint.len, cancelled)?;
         let document = Self {
             summary: scanned.summary(fingerprint),
@@ -165,6 +167,7 @@ impl Document {
             file,
             id,
             items: scanned.items,
+            evidence: Evidence::default(),
         };
         document.check()?;
         Ok(document)
@@ -235,9 +238,15 @@ impl Document {
 }
 
 /// Fails reads once `cancelled` says so.
-struct Checked<'a, R> {
+pub(super) struct Checked<'a, R> {
     inner: R,
     cancelled: &'a dyn Fn() -> bool,
+}
+
+impl<'a, R> Checked<'a, R> {
+    pub(super) fn new(inner: R, cancelled: &'a dyn Fn() -> bool) -> Self {
+        Self { inner, cancelled }
+    }
 }
 
 impl<R: Read> Read for Checked<'_, R> {
@@ -277,6 +286,7 @@ enum Item {
     Unparsed {
         offset: u64,
         len: u64,
+        stream_offset: Option<u64>,
         kind: ProblemKind,
         message: String,
     },
@@ -404,6 +414,7 @@ impl Item {
                 len,
                 kind,
                 message,
+                ..
             } => Element::Unparsed {
                 span: span(*offset, *len, Provenance::Derived),
                 kind: *kind,
@@ -639,6 +650,7 @@ impl Builder {
                     let region = Item::Unparsed {
                         offset: at,
                         len: start.saturating_add(len).saturating_sub(at),
+                        stream_offset: Some(stream.saturating_add(at - start)),
                         kind: ProblemKind::Malformed,
                         message,
                     };
@@ -709,6 +721,7 @@ impl Builder {
                     self.items.push(Item::Unparsed {
                         offset: end,
                         len: len - end,
+                        stream_offset: None,
                         kind,
                         message: message.clone(),
                     });
@@ -984,6 +997,16 @@ fn read_range(
             format!("a byte range is 1 to {MAX_BYTE_RANGE} bytes, not {len}"),
         ));
     }
+    read_file_range(file, file_len, offset, len)
+}
+
+/// Reads a range after the caller applies the applicable allocation limit.
+fn read_file_range(
+    file: &mut (impl Read + Seek),
+    file_len: u64,
+    offset: u64,
+    len: u32,
+) -> Result<Vec<u8>, Refusal> {
     if offset
         .checked_add(u64::from(len))
         .is_none_or(|end| end > file_len)
@@ -993,7 +1016,7 @@ fn read_range(
             format!("bytes {offset} + {len} are not inside the file of {file_len} bytes"),
         ));
     }
-    // `len` is at most MAX_BYTE_RANGE, so this allocation is bounded.
+    // The caller bounds the allocation.
     let mut bytes = vec![0; len as usize];
     file.seek(SeekFrom::Start(offset))
         .and_then(|_| file.read_exact(&mut bytes))
