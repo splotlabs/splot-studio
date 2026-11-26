@@ -1,0 +1,132 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+import { Button, CheckBox, ScrollView } from "std-widgets.slint";
+import { Caption, LinkButton } from "controls.slint";
+import { Tokens } from "tokens.slint";
+
+export component ValidationSetup inherits Rectangle {
+    in-out property <bool> strict;
+    in property <bool> busy;
+    in property <string> context;
+    in property <string> notice;
+    callback cancel();
+    callback choose-files();
+    callback pick-context();
+    callback clear-context();
+
+    background: Tokens.dark ? #00000080 : #18181d40;
+    TouchArea { }
+
+    FocusScope {
+        focus-on-tab-navigation: false;
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.cancel();
+                return accept;
+            }
+            reject
+        }
+
+        Rectangle {
+            width: min(424px, root.width - 2 * Tokens.space-3);
+            height: min(root.height - 2 * Tokens.space-3, card.preferred-height);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Tokens.raised;
+            border-color: Tokens.border;
+            border-width: 1px;
+            border-radius: Tokens.radius-large;
+            accessible-role: groupbox;
+            accessible-label: "Validate Files";
+
+            ScrollView {
+                horizontal-scrollbar-policy: always-off;
+                vertical-scrollbar-policy: root.height - 2 * Tokens.space-3 < card.preferred-height ? always-on : always-off;
+                content-width: self.visible-width;
+                content-height: card.preferred-height;
+
+                card := VerticalLayout {
+                    width: parent.visible-width;
+                    height: self.preferred-height;
+                    padding: Tokens.space-4;
+                    spacing: Tokens.space-3;
+
+                    Text {
+                        text: "Validate Files";
+                        color: Tokens.text;
+                        font-size: Tokens.type-title * 1rem;
+                        font-weight: Tokens.weight-semibold;
+                    }
+
+                    CheckBox {
+                        text: "Treat warnings as failure";
+                        accessible-description: "Strict policy changes the result and preserves the severity of each finding.";
+                        checked <=> root.strict;
+                        enabled: !root.busy;
+                    }
+
+                    Caption {
+                        text: "Optional context supplies sequence headers and operating point sets from a local Annex B file. Use it for streams that depend on external context.";
+                        wrap: word-wrap;
+                    }
+
+                    if root.context != "": Caption {
+                        text: "Context · " + root.context;
+                        wrap: char-wrap;
+                    }
+
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: Tokens.space-3;
+
+                        LinkButton {
+                            text: root.context == "" ? "Choose Context…" : "Change Context…";
+                            description: "Choose a small local Annex B context file";
+                            enabled: !root.busy;
+                            clicked => { root.pick-context(); }
+                        }
+
+                        if root.context != "": LinkButton {
+                            text: "Remove";
+                            description: "Validate without external context";
+                            enabled: !root.busy;
+                            clicked => { root.clear-context(); }
+                        }
+                    }
+
+                    Caption {
+                        text: "Studio keeps the results in Jobs until you remove them or close the app.";
+                        wrap: word-wrap;
+                    }
+
+                    if root.notice != "": Caption {
+                        text: root.notice;
+                        color: Tokens.error;
+                        wrap: word-wrap;
+                    }
+
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: Tokens.space-2;
+
+                        Button {
+                            text: "Cancel";
+                            accessible-description: "Close without starting validation";
+                            init => { self.focus(); }
+                            clicked => { root.cancel(); }
+                        }
+
+                        Button {
+                            text: "Choose Files…";
+                            accessible-description: "Start validation for the selected files";
+                            enabled: !root.busy;
+                            clicked => { root.choose-files(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

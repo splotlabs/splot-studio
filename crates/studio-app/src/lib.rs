@@ -29,6 +29,7 @@
 pub mod activity;
 mod advanced;
 pub mod analysis;
+mod batch;
 mod controller;
 pub mod cpu;
 pub mod engine;

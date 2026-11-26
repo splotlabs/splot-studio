@@ -33,6 +33,7 @@ use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
+use sha2::{Digest, Sha256};
 use splot_core::annexb::AnnexBObuCursor;
 use splot_core::ivf::{IVF_FRAME_HEADER_SIZE, IvfHeader};
 use splot_core::obu::ObuHeader;
@@ -42,7 +43,7 @@ use splot_core::types::ObuType;
 use studio_domain::analysis::{
     AnalysisFailure, DocumentSummary, Element, Framing, IvfHeaderFact, LayerCount, LayerId,
     LocateTarget, MAX_BYTE_RANGE, MAX_PAGE_ELEMENTS, ObuFact, ObuTypeCount, PacketFact, Problem,
-    ProblemKind, Provenance, Row, RowFilter, ScanOutcome, Span,
+    ProblemKind, Provenance, Row, RowFilter, ScanOutcome, SourceDigest, Span,
 };
 use studio_domain::job::{SourceFingerprint, WirePath};
 use studio_domain::protocol::MAX_MESSAGE_BYTES;
@@ -50,7 +51,7 @@ use studio_domain::protocol::MAX_MESSAGE_BYTES;
 use crate::output::FileId;
 use crate::source;
 
-mod evidence;
+pub(super) mod evidence;
 
 use evidence::Evidence;
 
@@ -159,10 +160,12 @@ impl Document {
         let reader = file
             .try_clone()
             .map_err(|e| io("cannot read the file", e))?;
-        let checked = Checked::new(reader, cancelled);
-        let scanned = scan(BufReader::new(checked), fingerprint.len, cancelled)?;
+        let mut reader = HashReader::new(Checked::new(reader, cancelled));
+        let scanned = scan(BufReader::new(&mut reader), fingerprint.len, cancelled)?;
+        let mut summary = scanned.summary(fingerprint);
+        summary.digest = Some(Box::new(reader.finish()));
         let document = Self {
-            summary: scanned.summary(fingerprint),
+            summary,
             path,
             file,
             id,
@@ -171,6 +174,10 @@ impl Document {
         };
         document.check()?;
         Ok(document)
+    }
+
+    pub(super) const fn identity(&self) -> &FileId {
+        &self.id
     }
 
     /// What opening found.
@@ -255,6 +262,39 @@ impl<R: Read> Read for Checked<'_, R> {
             return Err(io::Error::other("cancelled"));
         }
         self.inner.read(buf)
+    }
+}
+
+/// Hashes bytes from the file handle, including any bytes read ahead by the buffer.
+pub(super) struct HashReader<R> {
+    inner: R,
+    hash: Sha256,
+    bytes: u64,
+}
+
+impl<R> HashReader<R> {
+    pub(super) fn new(inner: R) -> Self {
+        Self {
+            inner,
+            hash: Sha256::new(),
+            bytes: 0,
+        }
+    }
+
+    pub(super) fn finish(self) -> SourceDigest {
+        SourceDigest {
+            sha256: crate::artifact::hex(&self.hash.finalize()),
+            bytes: self.bytes,
+        }
+    }
+}
+
+impl<R: Read> Read for HashReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let count = self.inner.read(buffer)?;
+        self.hash.update(&buffer[..count]);
+        self.bytes += count as u64;
+        Ok(count)
     }
 }
 
@@ -443,6 +483,7 @@ impl Scanned {
             |wanted: fn(&Item) -> bool| self.items.iter().filter(|i| wanted(i)).count() as u64;
         DocumentSummary {
             fingerprint,
+            digest: None,
             framing: self.framing,
             ivf_header: self.header.map(|h| IvfHeaderFact {
                 version: h.version,

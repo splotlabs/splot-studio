@@ -229,6 +229,12 @@ fn serve<'scope>(
             | Command::AnalysisValidate { .. }
             | Command::AnalysisCancelValidation { .. }
             | Command::AnalysisFindings { .. }
+            | Command::BatchCheckSettings { .. }
+            | Command::BatchValidate { .. }
+            | Command::BatchCancel { .. }
+            | Command::BatchFindings { .. }
+            | Command::BatchExport { .. }
+            | Command::BatchForget { .. }
             | Command::AnalysisClose { .. } => {
                 outbox.reply(
                     id,

@@ -4,6 +4,8 @@
 //! Inspect process tests: the real engine binary in `inspect` mode, reading
 //! IVF and Annex B files that the job path encodes from generated Y4M.
 
+#[path = "inspect/batch.rs"]
+mod batch;
 mod common;
 
 use std::error::Error;

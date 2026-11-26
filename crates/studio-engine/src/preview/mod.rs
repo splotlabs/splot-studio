@@ -151,6 +151,12 @@ fn serve(input: &mut impl Read, shared: &Shared) -> Result<(), ProtocolError> {
             | Command::AnalysisValidate { .. }
             | Command::AnalysisCancelValidation { .. }
             | Command::AnalysisFindings { .. }
+            | Command::BatchCheckSettings { .. }
+            | Command::BatchValidate { .. }
+            | Command::BatchCancel { .. }
+            | Command::BatchFindings { .. }
+            | Command::BatchExport { .. }
+            | Command::BatchForget { .. }
             | Command::AnalysisClose { .. } => {
                 shared.reply(
                     id,

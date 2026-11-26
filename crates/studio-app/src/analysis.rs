@@ -53,6 +53,7 @@ use studio_domain::analysis::{
 use studio_domain::job::WirePath;
 use studio_domain::protocol::{Command, Event};
 
+mod batch;
 mod bytes;
 mod document;
 pub(crate) mod evidence;
@@ -866,6 +867,7 @@ impl Analysis {
         match (asked, event) {
             (Asked::Open, Event::AnalysisOpened { summary, .. }) => {
                 let doc = &mut self.documents[at];
+                let batch = doc.pending_batch.take();
                 if let Origin::Result(result) = &doc.origin
                     && summary.fingerprint.len != result.bytes
                 {
@@ -895,6 +897,9 @@ impl Analysis {
                         }
                         self.fill(at, &mut out);
                         self.fetch_bytes(at, &mut out);
+                        if let Some(report) = batch {
+                            self.attach_batch(at, *report);
+                        }
                     }
                 }
             }

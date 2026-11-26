@@ -79,6 +79,16 @@ impl FileId {
 /// cannot be created.
 pub fn prepare(destination: &Path, source: &FileId) -> Result<NamedTempFile, Stop> {
     check_destination(destination, source)?;
+    temporary(destination)
+}
+
+/// Starts a no-clobber transaction when there is no verified source identity.
+pub(crate) fn prepare_new(destination: &Path) -> Result<NamedTempFile, Stop> {
+    check_absent(destination)?;
+    temporary(destination)
+}
+
+fn temporary(destination: &Path) -> Result<NamedTempFile, Stop> {
     let name = destination
         .file_name()
         .ok_or_else(|| output("the destination has no file name"))?;
@@ -120,6 +130,10 @@ pub fn check_destination(destination: &Path, source: &FileId) -> Result<(), Stop
             "the destination is the source file",
         ));
     }
+    check_absent(destination)
+}
+
+fn check_absent(destination: &Path) -> Result<(), Stop> {
     match fs::symlink_metadata(destination) {
         Ok(_) => Err(exists()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),

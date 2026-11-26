@@ -51,9 +51,20 @@ codec is young.
   and filters, and the workspace are restored at the next start, after each file is checked
   again: a file that changed or is missing is said so, and nothing about it is shown until
   you read it again or locate it.
-- Jobs (in the toolbar) lists every conversion and stream read of the session with its own
-  state: queued, running, cancelling, completed, cancelled, failed or interrupted, with real
-  counts where the engine reports them.
+- Use **File > Validate Files…** to validate several local IVF or Annex B files. The default
+  policy treats errors as failures. Strict policy also treats warnings as failures and
+  preserves their warning severity. You can supply local Annex B sequence headers and
+  operating point sets for streams that require external context.
+- Jobs lists each conversion, stream read, and validation. Stop Validation Batch stops the
+  current file and cancels files still waiting. Completed reports stay available until you
+  remove them or close Studio. The session holds at most 32 validation jobs.
+- Open a validation result in Analyze to inspect its findings without running validation
+  again. From Jobs, export the complete retained report as JSON or plain text. The report
+  records scope, interruptions, and omitted findings. When validation runs, the report
+  includes the SHA-256 digest and the number of source bytes the validator read. A stopped
+  validation may hash only a prefix. Studio attaches findings in Analyze only when both
+  workers can verify the full source. Reports omit absolute paths. Completed checks cannot
+  certify AV2 conformance.
 
 **What it refuses, with a reason**
 

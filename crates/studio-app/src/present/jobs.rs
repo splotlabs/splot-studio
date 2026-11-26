@@ -5,10 +5,12 @@
 //! reports no progress shows none, never an invented share.
 
 use studio_domain::analysis::{DocumentSummary, ScanOutcome};
+use studio_domain::validation::{BatchOutcome, ValidationCompletion};
 
-use super::{Tone, bytes, count, file_name, queue::is_first_pass};
+use super::{Tone, analysis::plural, bytes, count, file_name, queue::is_first_pass};
 use crate::activity::Phase as JobPhase;
 use crate::analysis::Phase;
+use crate::batch::{File as ValidationFile, Phase as ValidationPhase};
 use crate::jobs::{Job, State, Work};
 use crate::queue::{Ending, Item};
 
@@ -45,12 +47,27 @@ pub fn line(job: &Job<'_>) -> Line {
                 .and_then(crate::activity::Activity::fraction),
         ),
         Work::Inspect(_, doc) => ("Inspect", file_name(doc.path()), read(doc, job.state), None),
+        Work::Validate(file) => ("Validate", file_name(&file.path), validation(file), None),
     };
     Line {
         kind,
         name,
         state: state_word(job.state),
-        tone: tone(job.state),
+        tone: match (job.work, job.state) {
+            (Work::Validate(file), State::Completed) => match &file.phase {
+                ValidationPhase::Report(report) => match &**report {
+                    BatchOutcome::Validated { summary, .. } if summary.policy_failed() => {
+                        Tone::Error
+                    }
+                    BatchOutcome::Validated { summary, .. } if summary.omitted != 0 => {
+                        Tone::Warning
+                    }
+                    _ => Tone::Neutral,
+                },
+                _ => Tone::Neutral,
+            },
+            _ => tone(job.state),
+        },
         detail,
         fraction: fraction.filter(|_| job.state == State::Running),
     }
@@ -92,7 +109,7 @@ pub fn entry(jobs: &[Job<'_>]) -> (String, String) {
         format!("Jobs · {active}")
     };
     let description = format!(
-        "{active} running or queued, {ended} ended. Opens the list of encode jobs and stream reads."
+        "{active} running or queued, {ended} ended. Opens encode, inspect and validation jobs."
     );
     (label, description)
 }
@@ -185,5 +202,71 @@ fn found(summary: &DocumentSummary) -> String {
             count(problem.offset),
             super::analysis::problem_kind(problem.kind)
         ),
+    }
+}
+
+fn validation(file: &ValidationFile) -> String {
+    match &file.phase {
+        ValidationPhase::Queued => "Waiting for validation.".into(),
+        ValidationPhase::Opening => "Reading the AV2 stream.".into(),
+        ValidationPhase::Validating => "Checking AV2 syntax and stream structure.".into(),
+        ValidationPhase::Cancelling => {
+            "Stopping validation. Earlier results remain available.".into()
+        }
+        ValidationPhase::Cancelled => "Validation stopped before this file started.".into(),
+        ValidationPhase::Interrupted => {
+            "The worker stopped before completing this validation.".into()
+        }
+        ValidationPhase::Failed(message) => message.clone(),
+        ValidationPhase::Report(report) => {
+            let mut detail = validation_result(report);
+            if !file.archived {
+                detail.push_str(" The worker stopped. Its detailed report is unavailable.");
+            } else if matches!(&**report, BatchOutcome::Validated { .. }) && !file.can_open_report()
+            {
+                detail.push_str(
+                    " Studio read only a source prefix. Export the report to inspect it.",
+                );
+            }
+            detail
+        }
+    }
+}
+
+fn validation_result(report: &BatchOutcome) -> String {
+    match report {
+        BatchOutcome::Failed { message, .. } => message.clone(),
+        BatchOutcome::Validated { summary, .. } => {
+            let scope = match &summary.completion {
+                ValidationCompletion::EndOfInput if summary.malformed_units > 0 => {
+                    "Reached the end of input with incomplete framing coverage."
+                }
+                ValidationCompletion::EndOfInput => "Reached the end of input.",
+                ValidationCompletion::Cancelled => "Stopped on request.",
+                ValidationCompletion::MalformedInput => "Malformed input stopped validation.",
+                ValidationCompletion::Io { .. } => "A read error stopped validation.",
+                ValidationCompletion::UnitTooLarge { .. } => {
+                    "An input unit exceeded the size limit."
+                }
+                ValidationCompletion::ObuLimit { .. } => "Reached the limit on the number of OBUs.",
+                ValidationCompletion::Unsupported => {
+                    "The worker could not describe why validation stopped."
+                }
+            };
+            let policy = if summary.policy_failed() {
+                "Findings fail the requested policy."
+            } else if matches!(summary.completion, ValidationCompletion::EndOfInput)
+                && summary.malformed_units == 0
+            {
+                "Completed checks pass the requested policy."
+            } else {
+                "Checks are incomplete."
+            };
+            format!(
+                "{scope} {policy} {}, {}.",
+                plural(summary.errors, "error", "errors"),
+                plural(summary.warnings, "warning", "warnings"),
+            )
+        }
     }
 }

@@ -297,6 +297,13 @@ impl Activity {
             | Event::AnalysisSyntaxPage { .. }
             | Event::AnalysisValidated { .. }
             | Event::AnalysisFindings { .. }
+            | Event::BatchSettingsChecked
+            | Event::BatchValidating { .. }
+            | Event::BatchValidated { .. }
+            | Event::BatchFindings { .. }
+            | Event::BatchExportPrepared { .. }
+            | Event::BatchExported { .. }
+            | Event::BatchForgotten { .. }
             | Event::AnalysisClosed { .. }
             | Event::AnalysisFailed { .. } => Step::IGNORED,
         }

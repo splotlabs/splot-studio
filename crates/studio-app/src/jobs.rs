@@ -14,11 +14,14 @@
 //! first runs and the others are queued. Unread, missing and changed
 //! documents have no read the engine holds, so no job.
 
-use studio_domain::analysis::{ProblemKind, ScanOutcome};
+use studio_domain::analysis::{AnalysisFailure, ProblemKind, ScanOutcome};
 use studio_domain::job::JobPurpose;
+use studio_domain::validation::{BatchOutcome, ValidationCompletion};
 
 use crate::activity::Phase as JobPhase;
 use crate::analysis::{Analysis, Document, Phase, ReadEnd};
+pub use crate::batch::File as ValidationFile;
+use crate::batch::Phase as ValidationPhase;
 use crate::queue::{Ending, Item, ItemState};
 use crate::state::AppState;
 
@@ -60,6 +63,8 @@ pub enum Work<'a> {
     Convert(&'a Item),
     /// A read of the Analyze document at this index.
     Inspect(usize, &'a Document),
+    /// A local file in the validation queue.
+    Validate(&'a ValidationFile),
 }
 
 /// One job.
@@ -105,6 +110,27 @@ impl Job<'_> {
                 if matches!(item.ending(), Some(Ending::Completed(report)) if report.pass_digest.is_some()))
     }
 
+    /// The job can show its source or report in its workspace.
+    #[must_use]
+    pub fn can_show(&self) -> bool {
+        match self.work {
+            Work::Validate(file) => file.can_open_report(),
+            Work::Convert(_) | Work::Inspect(..) => true,
+        }
+    }
+
+    /// The batch worker holds a complete retained report.
+    #[must_use]
+    pub const fn can_export(&self) -> bool {
+        matches!(self.work, Work::Validate(file) if file.archived)
+    }
+
+    /// The file validation ended and can be removed from Jobs.
+    #[must_use]
+    pub const fn can_remove(&self) -> bool {
+        matches!(self.work, Work::Validate(_)) && !self.state.is_active()
+    }
+
     /// Cancel applies: it is running or queued.
     #[must_use]
     pub const fn can_cancel(&self) -> bool {
@@ -112,7 +138,9 @@ impl Job<'_> {
             // Cancel stops the converting file; a queued one is removed in
             // Encode instead.
             Work::Convert(_) => matches!(self.state, State::Running),
-            Work::Inspect(..) => matches!(self.state, State::Running | State::Queued),
+            Work::Inspect(..) | Work::Validate(_) => {
+                matches!(self.state, State::Running | State::Queued)
+            }
         }
     }
 }
@@ -144,6 +172,36 @@ pub fn list<'a>(state: &'a AppState, analysis: &'a Analysis) -> Vec<Job<'a>> {
             })
         });
     conversions.chain(reads).collect()
+}
+
+pub(crate) fn validation(file: &ValidationFile) -> Job<'_> {
+    let state = match &file.phase {
+        ValidationPhase::Queued => State::Queued,
+        ValidationPhase::Opening | ValidationPhase::Validating => State::Running,
+        ValidationPhase::Cancelling => State::Cancelling,
+        ValidationPhase::Cancelled => State::Cancelled,
+        ValidationPhase::Failed(_) => State::Failed,
+        ValidationPhase::Interrupted => State::Interrupted,
+        ValidationPhase::Report(report) => match &**report {
+            BatchOutcome::Failed {
+                code: AnalysisFailure::Cancelled,
+                ..
+            } => State::Cancelled,
+            BatchOutcome::Failed { .. } => State::Failed,
+            BatchOutcome::Validated { summary, .. } => match summary.completion {
+                ValidationCompletion::EndOfInput if summary.malformed_units == 0 => {
+                    State::Completed
+                }
+                ValidationCompletion::Cancelled => State::Cancelled,
+                ValidationCompletion::Io { .. } => State::Failed,
+                _ => State::Stopped,
+            },
+        },
+    };
+    Job {
+        state,
+        work: Work::Validate(file),
+    }
 }
 
 fn conversion(state: &AppState, item: &Item) -> Option<State> {

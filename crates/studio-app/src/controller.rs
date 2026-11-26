@@ -7,6 +7,7 @@
 //! [`slint::invoke_from_event_loop`].
 
 mod advanced;
+mod batch;
 mod presets;
 
 use std::cell::{Cell, RefCell};
@@ -43,6 +44,7 @@ pub struct Controller {
     advanced: RefCell<advanced::Editor>,
     advanced_settle: Timer,
     preset_files: presets::PresetFiles,
+    batch_files: batch::BatchFiles,
     /// The window was not minimized when last looked at.
     visible: Cell<bool>,
 }
@@ -150,6 +152,7 @@ impl Controller {
             advanced: RefCell::default(),
             advanced_settle: Timer::default(),
             preset_files: presets::PresetFiles::default(),
+            batch_files: batch::BatchFiles::default(),
             visible: Cell::new(true),
         });
         CONTROLLER.with(|c| *c.borrow_mut() = Rc::downgrade(&ctl));
@@ -229,6 +232,7 @@ impl Controller {
         ctl.wire_presets(window);
         ctl.wire_preview(window);
         ctl.wire_analysis(window);
+        ctl.wire_batch(window);
 
         let client = BuildIdentity {
             name: APP_NAME.to_owned(),
@@ -478,6 +482,8 @@ impl Controller {
         if outcome.analysis {
             render_analysis(&window, session.analysis());
         }
+        window.set_validation_active(session.batch_active());
+        window.set_validation_job_notice(session.batch_notice().unwrap_or_default().into());
         if outcome.analysis || outcome.changed != Changed::Nothing {
             render_jobs(&window, &session.jobs());
         }
