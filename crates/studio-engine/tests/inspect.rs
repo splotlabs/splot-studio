@@ -905,27 +905,48 @@ fn a_changed_source_closes_its_document() -> TestResult {
         })?,
         Event::AnalysisValidated { .. },
     ));
-    fs::OpenOptions::new()
-        .append(true)
-        .open(&path)?
-        .write_all(&[0x01, 0x08])?;
-    let page = || Command::AnalysisPage {
+    let append = || {
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)?
+            .write_all(&[0x01, 0x08])
+    };
+    let findings = || Command::AnalysisFindings {
+        document: 1,
+        validation,
+        first: 0,
+        count: 1,
+    };
+    #[cfg(windows)]
+    {
+        let error = append().err().ok_or("A verified reader allowed a write.")?;
+        assert_eq!(error.raw_os_error(), Some(32)); // ERROR_SHARING_VIOLATION
+        assert!(matches!(
+            inspect.ask(findings())?,
+            Event::AnalysisFindings { document: 1, .. },
+        ));
+        assert!(matches!(
+            inspect.ask(Command::AnalysisClose { document: 1 })?,
+            Event::AnalysisClosed { document: 1 },
+        ));
+        append()?;
+    }
+    #[cfg(not(windows))]
+    {
+        append()?;
+        assert_eq!(
+            failure(&inspect.ask(findings())?),
+            Some(AnalysisFailure::SourceChanged)
+        );
+    }
+    let page = Command::AnalysisPage {
         document: 1,
         filter: RowFilter::default(),
         first: 0,
         count: 1,
     };
     assert_eq!(
-        failure(&inspect.ask(Command::AnalysisFindings {
-            document: 1,
-            validation,
-            first: 0,
-            count: 1
-        })?),
-        Some(AnalysisFailure::SourceChanged)
-    );
-    assert_eq!(
-        failure(&inspect.ask(page())?),
+        failure(&inspect.ask(page)?),
         Some(AnalysisFailure::UnknownDocument)
     );
     let locate = Command::AnalysisLocate {
@@ -1077,15 +1098,34 @@ fn identity_pages_require_the_selected_scan_and_source() -> TestResult {
         failure(&inspect.ask(output(scan - 1))?),
         Some(AnalysisFailure::InvalidRequest)
     );
-    fs::write(&path, [])?;
-    assert_eq!(
-        failure(&inspect.ask(output(scan))?),
-        Some(AnalysisFailure::SourceChanged)
-    );
+    let replace = || fs::write(&path, [0x01, 0x08]);
+    #[cfg(windows)]
+    {
+        let error = replace()
+            .err()
+            .ok_or("A verified reader allowed a write.")?;
+        assert_eq!(error.raw_os_error(), Some(32)); // ERROR_SHARING_VIOLATION
+        assert!(matches!(
+            inspect.ask(Command::AnalysisClose { document: 1 })?,
+            Event::AnalysisClosed { document: 1 },
+        ));
+        replace()?;
+    }
+    #[cfg(not(windows))]
+    {
+        replace()?;
+        assert_eq!(
+            failure(&inspect.ask(output(scan))?),
+            Some(AnalysisFailure::SourceChanged)
+        );
+    }
     assert_eq!(
         failure(&inspect.ask(output(scan))?),
         Some(AnalysisFailure::UnknownDocument)
     );
+    let reopened = inspect.open(2, &path)?;
+    assert_eq!(reopened.framing, Framing::AnnexB);
+    assert_eq!(reopened.obus, 1);
     Ok(())
 }
 
