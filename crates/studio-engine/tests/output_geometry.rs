@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
+//! Checks coded and visible sizes for resized and cropped outputs.
+
 mod common;
 
 use std::fs;
