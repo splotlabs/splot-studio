@@ -30,7 +30,7 @@ use crate::output::{ExportControl, FileId};
 pub(super) enum Writers<'a> {
     Y4m(Box<Video<'a>>),
     Raw(Box<Raw<'a>>),
-    Hashes(Report<'a>),
+    Hashes(Box<Report<'a>>),
 }
 
 impl<'a> Writers<'a> {
@@ -39,36 +39,34 @@ impl<'a> Writers<'a> {
         source: &FileId,
         control: &'a dyn ExportControl,
     ) -> Result<Self, Stop> {
-        let output = match &request.format {
-            ExportFormat::Y4m { path } => Self::Y4m(Box::new(Video {
-                file: Some(Artifact::create(
-                    control,
-                    ExportArtifactKind::Video,
-                    path,
-                    source,
-                )?),
-                writer: None,
-                first: None,
-                rate: None,
-            })),
-            ExportFormat::Raw { samples, layout } => {
-                let description =
-                    Artifact::create(control, ExportArtifactKind::Layout, layout, source)?;
-                let samples =
-                    Artifact::create(control, ExportArtifactKind::Samples, samples, source)?;
-                Self::Raw(Box::new(Raw {
-                    samples,
-                    description: Report::new(description),
-                    layout: None,
-                }))
-            }
-            ExportFormat::Hashes { path } => Self::Hashes(Report::new(Artifact::create(
-                control,
-                ExportArtifactKind::Hashes,
-                path,
-                source,
-            )?)),
-        };
+        let output =
+            match &request.format {
+                ExportFormat::Y4m { path } => Self::Y4m(Box::new(Video {
+                    file: Some(Artifact::create(
+                        control,
+                        ExportArtifactKind::Video,
+                        path,
+                        source,
+                    )?),
+                    writer: None,
+                    first: None,
+                    rate: None,
+                })),
+                ExportFormat::Raw { samples, layout } => {
+                    let description =
+                        Artifact::create(control, ExportArtifactKind::Layout, layout, source)?;
+                    let samples =
+                        Artifact::create(control, ExportArtifactKind::Samples, samples, source)?;
+                    Self::Raw(Box::new(Raw {
+                        samples,
+                        description: Report::new(description),
+                        layout: None,
+                    }))
+                }
+                ExportFormat::Hashes { path } => Self::Hashes(Box::new(Report::new(
+                    Artifact::create(control, ExportArtifactKind::Hashes, path, source)?,
+                ))),
+            };
         Ok(output)
     }
 
@@ -136,8 +134,20 @@ impl<'a> Writers<'a> {
                 Ok(vec![writer.writer.into_inner().verify()?])
             }
             Self::Raw(raw) => {
+                let frame_bytes = raw.layout.as_ref().ok_or_else(no_output)?.frame_bytes;
+                let expected_bytes = raw
+                    .description
+                    .frames
+                    .checked_mul(frame_bytes)
+                    .ok_or_else(|| unsupported("The packed sample file is too large."))?;
                 let layout = raw.description.finish(timing, control)?.verify()?;
                 let samples = raw.samples.verify()?;
+                if samples.bytes != expected_bytes {
+                    return Err(Stop::failed(
+                        studio_domain::job::FailureCode::VerificationFailed,
+                        "The raw sample count does not match the layout.",
+                    ));
+                }
                 Ok(vec![layout, samples])
             }
             Self::Hashes(report) => Ok(vec![report.finish(timing, control)?.verify()?]),
@@ -157,7 +167,7 @@ struct VideoWriter<'a> {
     bytes: Rc<Cell<u64>>,
 }
 
-impl<'a> Video<'a> {
+impl Video<'_> {
     fn push(
         &mut self,
         picture: Picture,

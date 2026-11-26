@@ -184,6 +184,13 @@ impl Status {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Issue {
+    Unrepresentable,
+    Variable,
+    Contradictory,
+}
+
 /// Tracks timing over all decoded outputs. A layer filter still accounts for
 /// intervening output temporal units when projecting AV2 cadence.
 pub(super) struct Timing {
@@ -192,11 +199,9 @@ pub(super) struct Timing {
     av2_gap: Gap,
     period: Option<Fraction>,
     unknown: bool,
-    variable: bool,
     variable_evidence: bool,
     pending_variable_evidence: bool,
-    contradictory: bool,
-    unrepresentable: bool,
+    issue: Option<Issue>,
     count: u64,
 }
 
@@ -208,11 +213,9 @@ impl Default for Timing {
             av2_gap: Gap::Known(Fraction::ZERO),
             period: None,
             unknown: false,
-            variable: false,
             variable_evidence: false,
             pending_variable_evidence: false,
-            contradictory: false,
-            unrepresentable: false,
+            issue: None,
             count: 0,
         }
     }
@@ -248,7 +251,7 @@ impl Timing {
             let bitstream = std::mem::replace(&mut self.av2_gap, Gap::Known(Fraction::ZERO));
             let gap = match (container, bitstream) {
                 (Gap::Known(a), Gap::Known(b)) if a != b => {
-                    self.contradictory = true;
+                    self.record_issue(Issue::Contradictory);
                     return;
                 }
                 (Gap::Variable, _) | (_, Gap::Variable) => Gap::Variable,
@@ -257,27 +260,30 @@ impl Timing {
                 _ => Gap::Unknown,
             };
             match gap {
-                Gap::Known(gap) if gap.num == 0 => self.variable = true,
+                Gap::Known(gap) if gap.num == 0 => self.record_issue(Issue::Variable),
                 Gap::Known(gap) => {
-                    self.variable |= self.period.is_some_and(|old| old != gap);
-                    self.period = Some(gap);
+                    if self.period.replace(gap).is_some_and(|old| old != gap) {
+                        self.record_issue(Issue::Variable);
+                    }
                 }
                 Gap::Unknown => self.unknown = true,
-                Gap::Variable => self.variable = true,
-                Gap::Unrepresentable => self.unrepresentable = true,
+                Gap::Variable => self.record_issue(Issue::Variable),
+                Gap::Unrepresentable => self.record_issue(Issue::Unrepresentable),
             }
         }
     }
 
+    fn record_issue(&mut self, issue: Issue) {
+        self.issue = Some(self.issue.map_or(issue, |old| old.max(issue)));
+    }
+
     pub fn status(&self, fallback: Option<Rational>) -> Status {
-        if self.contradictory {
-            return Status::Contradictory;
-        }
-        if self.variable {
-            return Status::Variable;
-        }
-        if self.unrepresentable {
-            return Status::Unrepresentable;
+        if let Some(issue) = self.issue {
+            return match issue {
+                Issue::Contradictory => Status::Contradictory,
+                Issue::Variable => Status::Variable,
+                Issue::Unrepresentable => Status::Unrepresentable,
+            };
         }
         let known = if self.count == 1 {
             self.previous_selected

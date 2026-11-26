@@ -43,6 +43,7 @@ pub(crate) fn run(request: &ExportRequest, control: &dyn ExportControl) -> Resul
     let mut source = Source::open(&request.source)?;
     let mut writers = Writers::prepare(request, &source.id, control)?;
     control.await_prepared()?;
+    source.check()?;
     control.stage(ExportStage::Decoding);
     let mut progress = ExportProgress::default();
     let mut timing = Timing::default();

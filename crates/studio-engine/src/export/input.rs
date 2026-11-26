@@ -88,7 +88,7 @@ impl<'a> Source<'a> {
         let count = {
             let reader = BufReader::new(&mut hashed);
             let decoder = stream::document_decoder(PREVIEW_DECODE_THREADS, request.grain)
-                .map_err(decode_failed)?;
+                .map_err(|e| decode_failed(&e))?;
             let mut decoding = Decoding {
                 reader: TemporalUnitReader::with_max_unit_bytes(reader, MAX_UNIT_BYTES),
                 decoder,
@@ -166,7 +166,7 @@ impl<R: Read> Decoding<R> {
             if self
                 .decoder
                 .send_data(unit.bytes, props)
-                .map_err(decode_failed)?
+                .map_err(|e| decode_failed(&e))?
                 != SendStatus::Accepted
             {
                 return Err(invalid("The decoder refused a pending temporal unit."));
@@ -193,7 +193,7 @@ impl<R: Read> Decoding<R> {
         let ivf_base = self.ivf_base()?;
         loop {
             check_cancelled(control)?;
-            let Some(picture) = self.decoder.get_picture().map_err(decode_failed)? else {
+            let Some(picture) = self.decoder.get_picture().map_err(|e| decode_failed(&e))? else {
                 return Ok(false);
             };
             let token = picture.provenance().display.user_data;
@@ -273,7 +273,7 @@ fn reader_failed(control: &dyn ExportControl, error: ReaderError) -> Stop {
     }
 }
 
-fn decode_failed(error: DecodeError) -> Stop {
+fn decode_failed(error: &DecodeError) -> Stop {
     let code = match error {
         DecodeError::Limit { .. } => FailureCode::TooLarge,
         DecodeError::UnsupportedStructure { .. } | DecodeError::UnsupportedFeature { .. } => {
