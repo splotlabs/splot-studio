@@ -12,7 +12,7 @@ use splot_encode::PixelFormat;
 use splot_encode::y4m::{Y4mHeader, Y4mReader};
 use studio_domain::export::{
     ExportArtifactKind, ExportDurability, ExportFormat, ExportLayer, ExportOutcome, ExportRange,
-    ExportRequest, ExportSampleFormat, ExportSource, ExportTemp,
+    ExportRequest, ExportSampleFormat, ExportSource, ExportStage, ExportTemp,
 };
 use studio_domain::job::{ChromaLayout, FailureCode, Rational, WirePath};
 use studio_domain::preview::GrainPolicy;
@@ -139,6 +139,52 @@ fn terminal(worker: &mut Live) -> Answer<ExportOutcome> {
     }
 }
 
+fn verification_reply(worker: &mut Live) -> Answer<Event> {
+    let seen = worker.read_until(|event| {
+        matches!(
+            event,
+            Event::ExportPublishReady { .. } | Event::ExportFinished { .. } | Event::Error { .. }
+        )
+    })?;
+    let reply = seen
+        .into_iter()
+        .last()
+        .ok_or("no export verification reply")?;
+    assert_eq!(reply.request_id, REQUEST);
+    Ok(reply.body)
+}
+
+fn verify_and_publish(worker: &mut Live) -> Answer<ExportOutcome> {
+    match verification_reply(worker)? {
+        Event::ExportPublishReady { frames } => {
+            assert!(frames > 0);
+            worker.send(REQUEST, Command::ExportPublish)?;
+            terminal(worker)
+        }
+        Event::ExportFinished { outcome } => Ok(outcome),
+        other => Err(format!("unexpected verification reply {other:?}").into()),
+    }
+}
+
+fn wrong_state(worker: &mut Live, request: u64, command: Command) -> TestResult {
+    worker.send(request, command)?;
+    let seen = worker
+        .read_until(|event| matches!(event, Event::Error { .. } | Event::ExportFinished { .. }))?;
+    let reply = seen.last().ok_or("no reply to unexpected command")?;
+    assert_eq!(reply.request_id, request);
+    assert!(
+        matches!(
+            reply.body,
+            Event::Error {
+                code: ErrorCode::WrongState,
+                ..
+            }
+        ),
+        "{reply:?}"
+    );
+    Ok(())
+}
+
 fn close(mut worker: Live) -> TestResult {
     drop(worker.stdin.take());
     assert!(worker.child.wait()?.success());
@@ -151,7 +197,7 @@ fn run(export: ExportRequest) -> Answer<ExportOutcome> {
         Event::ExportPrepared { files } => {
             assert_ne!(files, [] as [ExportTemp; 0]);
             worker.send(REQUEST, Command::ExportProceed)?;
-            terminal(&mut worker)?
+            verify_and_publish(&mut worker)?
         }
         Event::ExportFinished { outcome } => outcome,
         other => return Err(format!("unexpected prepare reply {other:?}").into()),
@@ -711,7 +757,7 @@ fn loss_of_worker_before_proceed_names_only_unpublished_temporaries() -> TestRes
     let layout = dir.path().join("out.json");
     let export = request(&source, 10, ChromaLayout::Yuv420, raw(&samples, &layout))?;
     let mut worker = Live::spawn()?;
-    let files = prepared(&mut worker, export.clone())?;
+    let files = prepared(&mut worker, export)?;
     worker.child.kill()?;
     assert!(!worker.child.wait()?.success());
     assert!(!samples.exists());
@@ -723,26 +769,116 @@ fn loss_of_worker_before_proceed_names_only_unpublished_temporaries() -> TestRes
         .collect::<Result<Vec<_>, _>>()?;
     announced.sort();
     assert_eq!(leftovers(dir.path(), &[&source]), announced);
-    for partial in announced {
-        fs::remove_file(partial)?;
-    }
+    Ok(())
+}
 
+#[test]
+fn verified_temporaries_wait_for_matching_publication_permission() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let source = input(dir.path(), "source.ivf", IVF_10)?;
+    let samples = dir.path().join("out.yuv");
+    let layout = dir.path().join("out.json");
+    let export = request(&source, 10, ChromaLayout::Yuv420, raw(&samples, &layout))?;
     let mut worker = Live::spawn()?;
-    prepared(&mut worker, export)?;
-    worker.send(REQUEST + 1, Command::Cancel)?;
-    let wrong_id = worker.next()?;
-    assert_eq!(wrong_id.request_id, REQUEST + 1);
-    assert!(matches!(
-        wrong_id.body,
-        Event::Error {
-            code: ErrorCode::WrongState,
-            ..
-        }
-    ));
+    let files = prepared(&mut worker, export)?;
+    wrong_state(&mut worker, REQUEST, Command::ExportPublish)?;
+    wrong_state(&mut worker, REQUEST + 1, Command::ExportProceed)?;
+    worker.send(REQUEST, Command::ExportProceed)?;
+    assert_eq!(
+        verification_reply(&mut worker)?,
+        Event::ExportPublishReady { frames: 4 }
+    );
+    wrong_state(&mut worker, REQUEST + 1, Command::ExportPublish)?;
+    wrong_state(&mut worker, REQUEST + 1, Command::Cancel)?;
+    for file in files {
+        assert!(fs::metadata(file.partial.to_path_buf()?)?.len() > 0);
+        assert!(!file.destination.to_path_buf()?.exists());
+    }
     worker.send(REQUEST, Command::Cancel)?;
     assert_eq!(terminal(&mut worker)?, ExportOutcome::Cancelled);
     close(worker)?;
     assert_eq!(leftovers(dir.path(), &[&source]), [] as [PathBuf; 0]);
+    Ok(())
+}
+
+#[test]
+fn a_source_changed_while_waiting_for_permission_is_not_published() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let source = input(dir.path(), "source.ivf", IVF_10)?;
+    let destination = dir.path().join("out.y4m");
+    let export = request(&source, 10, ChromaLayout::Yuv420, y4m(&destination))?;
+    let mut worker = Live::spawn()?;
+    prepared(&mut worker, export)?;
+    worker.send(REQUEST, Command::ExportProceed)?;
+    assert_eq!(
+        verification_reply(&mut worker)?,
+        Event::ExportPublishReady { frames: 4 }
+    );
+
+    let mut changed = IVF_10.to_vec();
+    changed.push(0);
+    fs::write(&source, &changed)?;
+    worker.send(REQUEST, Command::ExportPublish)?;
+    refused(&terminal(&mut worker)?, FailureCode::SourceChanged);
+    close(worker)?;
+    assert_eq!(fs::read(&source)?, changed);
+    assert_eq!(leftovers(dir.path(), &[&source]), [] as [PathBuf; 0]);
+    Ok(())
+}
+
+#[test]
+fn publication_permission_rejects_a_following_cancel() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let source = input(dir.path(), "source.ivf", IVF_10)?;
+    let destination = dir.path().join("out.y4m");
+    let export = request(&source, 10, ChromaLayout::Yuv420, y4m(&destination))?;
+    let mut worker = Live::spawn()?;
+    prepared(&mut worker, export)?;
+    worker.send(REQUEST, Command::ExportProceed)?;
+    assert_eq!(
+        verification_reply(&mut worker)?,
+        Event::ExportPublishReady { frames: 4 }
+    );
+
+    worker.send(REQUEST, Command::ExportPublish)?;
+    worker.send(REQUEST, Command::Cancel)?;
+    let mut publishing = false;
+    let mut finished = false;
+    let mut refused = false;
+    while !finished || !refused {
+        let reply = worker.next()?;
+        assert_eq!(reply.request_id, REQUEST);
+        match reply.body {
+            Event::ExportStage {
+                stage: ExportStage::Publishing,
+            } => publishing = true,
+            Event::Error {
+                code: ErrorCode::WrongState,
+                ..
+            } => {
+                assert!(publishing);
+                refused = true;
+            }
+            Event::ExportFinished { outcome } => {
+                assert!(publishing);
+                done(&outcome, 4, 1);
+                finished = true;
+            }
+            Event::ExportProgress { .. } | Event::ExportPublished { .. } => {}
+            other => {
+                return Err(
+                    format!("unexpected reply after publication permission: {other:?}").into(),
+                );
+            }
+        }
+    }
+    let (_, frames, hash) = reopen_y4m(&destination)?;
+    assert_eq!((frames, hash), (4, sha(AVM_10)));
+    close(worker)?;
+    assert_eq!(
+        leftovers(dir.path(), &[&source, &destination]),
+        [] as [PathBuf; 0]
+    );
     Ok(())
 }
 
@@ -755,8 +891,15 @@ fn a_publication_collision_reports_the_exact_partial_batch() -> TestResult {
     let export = request(&source, 10, ChromaLayout::Yuv420, raw(&samples, &layout))?;
     let mut worker = Live::spawn()?;
     prepared(&mut worker, export)?;
-    fs::write(&samples, b"owner data")?;
     worker.send(REQUEST, Command::ExportProceed)?;
+    assert_eq!(
+        verification_reply(&mut worker)?,
+        Event::ExportPublishReady { frames: 4 }
+    );
+    assert!(!layout.exists());
+    assert!(!samples.exists());
+    fs::write(&samples, b"owner data")?;
+    worker.send(REQUEST, Command::ExportPublish)?;
     let outcome = terminal(&mut worker)?;
     let ExportOutcome::Partial {
         frames,
