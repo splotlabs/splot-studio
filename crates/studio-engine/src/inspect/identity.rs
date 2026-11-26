@@ -719,8 +719,7 @@ mod tests {
     #[test]
     fn timeline_reconciles_bridge_bytes_and_rejects_ambiguous_clock() -> TestResult {
         use studio_domain::timeline::{
-            ByteDistribution, TimelineClock, TimelineFileBytes, TimelineTarget, TimelineTime,
-            TimelineView,
+            ByteDistribution, TimelineClock, TimelineFileBytes, TimelineView,
         };
 
         let (_directory, source) = source_fixture(BRIDGE_IVF)?;
@@ -801,6 +800,15 @@ mod tests {
         );
         assert_eq!(output.buckets[0].count, 2);
         assert_eq!(output.rate, None);
+        assert_bridge_timeline_links(&index, header)
+    }
+
+    fn assert_bridge_timeline_links(
+        index: &IdentityIndex,
+        header: Option<studio_domain::analysis::IvfHeaderFact>,
+    ) -> TestResult {
+        use studio_domain::timeline::{TimelineTarget, TimelineTime};
+
         let selected = index
             .timeline_locate(header, TimelineTarget::Output { index: 1 })
             .map_err(refusal)?;
