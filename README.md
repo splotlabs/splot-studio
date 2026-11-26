@@ -56,7 +56,8 @@ codec is young.
   the verified prefix, wait for more data and repeat the seek.
 - Studio can reuse a complete structural index after it checks the source content.
   Use **Clear Index Cache** in Analyze to remove saved indexes. Opening the file again
-  builds a new index when no valid copy exists.
+  builds a new index when no valid copy exists. If an open document uses a saved
+  index, close that document before you clear the cache.
 - Use **File > Validate Files…** to validate several local IVF or Annex B files. The default
   policy treats errors as failures. Strict policy also treats warnings as failures and
   preserves their warning severity. You can supply local Annex B sequence headers and
