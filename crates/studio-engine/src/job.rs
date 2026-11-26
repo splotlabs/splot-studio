@@ -26,13 +26,14 @@ use studio_domain::job::{
     Check, CheckOutcome, Failure, FailureCode, JobReport, JobSpec, Progress, SourceReader, Stage,
     WirePath,
 };
-use studio_domain::protocol::Event;
+use studio_domain::options::{FieldError, OPTIONS_SCHEMA_VERSION};
+use studio_domain::protocol::{Event, OptionsIdentity};
 use studio_domain::settings::{EncoderSettings, OutputKind};
 use thiserror::Error;
 
 use crate::output::{self, PacketSink};
 use crate::source::{self, Selection, Source};
-use crate::{live, picture, verify};
+use crate::{live, options, picture, verify};
 use splot_encode::y4m::Y4mHeader;
 
 /// The stack of a job thread. The decode driver used by verification
@@ -169,15 +170,20 @@ fn execute(
              chapters it leaves out",
         ));
     }
-    let config = config(&source.header, source.content, job.settings)?;
-    if job.settings.output == OutputKind::Ivf
-        && (u16::try_from(config.width).is_err() || u16::try_from(config.height).is_err())
+    validate_policy_request(job)?;
+    let config = source_config(&source.header, source.content, job.settings.base)?;
+    let (config, policy) =
+        options::job_policy(config, &source.facts, &job.settings).map_err(invalid_policy)?;
+    let output_kind = job.settings.base.output;
+    let coded = config.coded();
+    if output_kind == OutputKind::Ivf
+        && (u16::try_from(coded.width).is_err() || u16::try_from(coded.height).is_err())
     {
         return Err(Stop::failed(
             FailureCode::TooLarge,
             format!(
                 "IVF holds at most 65535 samples per side, not {}x{}",
-                config.width, config.height
+                coded.width, coded.height
             ),
         ));
     }
@@ -190,6 +196,10 @@ fn execute(
         });
     }
     source.start(cancel)?;
+    for event in policy {
+        stop_if(cancel)?;
+        report(event);
+    }
     control.stream_started(live::Stream {
         basis: picture::basis(
             source.matrix,
@@ -220,7 +230,7 @@ fn execute(
     let frames = encode(
         &mut source,
         &config,
-        job.settings.output,
+        output_kind,
         temp.as_file(),
         control,
         report,
@@ -230,7 +240,7 @@ fn execute(
     });
     let expected = verify::Expected {
         config: &config,
-        kind: job.settings.output,
+        kind: output_kind,
         frames,
     };
     let checks = checked(temp.as_file(), expected, cancel)?;
@@ -248,6 +258,42 @@ fn execute(
         checks,
         disclosures: source.facts.disclosures,
     })
+}
+
+/// Identifies the encoder option schema and codec used by this engine.
+#[must_use]
+pub fn options_identity() -> OptionsIdentity {
+    OptionsIdentity {
+        schema: OPTIONS_SCHEMA_VERSION,
+        codec_revision: env!("SPLOT_CODEC_REVISION").into(),
+    }
+}
+
+fn validate_policy_request(job: &JobSpec) -> Result<(), Stop> {
+    match &job.identity {
+        Some(identity) if *identity == options_identity() => {}
+        None if job.settings.values.is_empty() && job.pass_artifact.is_none() => {}
+        _ => {
+            return Err(invalid_policy(FieldError::new(
+                "identity",
+                "Use the option schema and codec revision reported by this engine.",
+            )));
+        }
+    }
+    if job.pass_artifact.is_some() {
+        return Err(invalid_policy(FieldError::new(
+            "pass_artifact",
+            "This engine supports one-pass encoding. Remove the first-pass artifact.",
+        )));
+    }
+    Ok(())
+}
+
+fn invalid_policy(error: FieldError) -> Stop {
+    Stop::failed(
+        FailureCode::InvalidSettings,
+        format!("{}: {}", error.field, error.message),
+    )
 }
 
 /// Runs the verification checks on the finished file.
@@ -292,19 +338,25 @@ pub fn config(
     content: ContentDescription,
     settings: EncoderSettings,
 ) -> Result<Config, Stop> {
-    let config =
-        crate::options::config::from_header(header, content, settings).map_err(|error| {
-            let code = if error.field == "bit_depth" {
-                FailureCode::UnsupportedSource
-            } else {
-                FailureCode::InvalidSettings
-            };
-            Stop::failed(code, error.message)
-        })?;
+    let config = source_config(header, content, settings)?;
     config
         .validate()
         .map_err(|error| Stop::failed(FailureCode::InvalidSettings, error.to_string()))?;
     Ok(config)
+}
+
+fn source_config(
+    header: &Y4mHeader,
+    content: ContentDescription,
+    settings: EncoderSettings,
+) -> Result<Config, Stop> {
+    options::config::from_header(header, content, settings).map_err(|error| {
+        if error.field == "bit_depth" {
+            Stop::failed(FailureCode::UnsupportedSource, error.message)
+        } else {
+            invalid_policy(error)
+        }
+    })
 }
 
 /// The counters of an encode and where they go. The encode loop and the
@@ -476,5 +528,128 @@ fn encoder_error(error: splot_encode::Error) -> Stop {
         // Only the job's `Control` cancels the token, after setting its flag.
         splot_encode::Error::Cancelled => Stop::Cancelled,
         error => Stop::failed(FailureCode::Encoder, error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    use studio_domain::options::{OptionRequest, OptionValue};
+
+    use super::*;
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    fn job() -> TestResult<(tempfile::TempDir, JobSpec)> {
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("input.y4m");
+        let mut bytes = b"YUV4MPEG2 W64 H48 F30:1 Ip C420\nFRAME\n".to_vec();
+        bytes.resize(bytes.len() + 64 * 48 * 3 / 2, 128);
+        fs::write(&source, bytes)?;
+        let facts = source::probe(&source, None)?;
+        let spec = JobSpec {
+            source: WirePath::from_path(&source),
+            fingerprint: facts.fingerprint,
+            video_stream: facts.video_stream,
+            omissions_acknowledged: false,
+            destination: WirePath::from_path(&dir.path().join("output.ivf")),
+            settings: OptionRequest {
+                base: EncoderSettings {
+                    output: OutputKind::Ivf,
+                    preset: studio_domain::settings::SpeedPreset::new(10)?,
+                    crf: crate::cli::DEFAULT_CRF,
+                },
+                values: BTreeMap::new(),
+            },
+            identity: Some(options_identity()),
+            pass_artifact: None,
+        };
+        Ok((dir, spec))
+    }
+
+    #[test]
+    fn emits_actual_policy_before_working() -> TestResult {
+        let (_dir, mut spec) = job()?;
+        let rate = OptionValue::Record(BTreeMap::from([
+            ("mode".into(), OptionValue::Choice("constant_qp".into())),
+            ("qp".into(), OptionValue::Integer(0)),
+        ]));
+        spec.settings
+            .values
+            .insert("rate_control".into(), rate.clone());
+        let mut events = Vec::new();
+        let end = run(&spec, &AtomicBool::new(false), &mut |event| {
+            events.push(event)
+        });
+        assert!(matches!(end, Event::Completed { .. }), "{end:?}");
+
+        let mut next = 0;
+        let mut total = None;
+        let mut found_rate = false;
+        for event in events {
+            match event {
+                Event::JobPolicy {
+                    first,
+                    total: count,
+                    values,
+                } => {
+                    assert_eq!(first, next);
+                    assert_eq!(*total.get_or_insert(count), count);
+                    next += u32::try_from(values.len())?;
+                    found_rate |= values
+                        .iter()
+                        .any(|option| option.key == "rate_control" && option.value == rate);
+                }
+                Event::Working { .. } => {
+                    assert!(found_rate);
+                    assert_eq!(total, Some(next));
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        Err("The job produced no Working event.".into())
+    }
+
+    #[test]
+    fn rejects_stale_identity_pass_artifact_and_invalid_option_before_output() -> TestResult {
+        let (dir, spec) = job()?;
+        for field in ["identity", "pass_artifact", "rate_control.qp"] {
+            let mut spec = spec.clone();
+            match field {
+                "identity" => {
+                    let mut stale = options_identity();
+                    stale.codec_revision.push_str("-old");
+                    spec.identity = Some(stale);
+                }
+                "pass_artifact" => spec.pass_artifact = Some(spec.source.clone()),
+                _ => {
+                    spec.settings.values.insert(
+                        "rate_control".into(),
+                        OptionValue::Record(BTreeMap::from([
+                            ("mode".into(), OptionValue::Choice("constant_qp".into())),
+                            ("qp".into(), OptionValue::Integer(256)),
+                        ])),
+                    );
+                }
+            }
+            let mut events = Vec::new();
+            let end = run(&spec, &AtomicBool::new(false), &mut |event| {
+                events.push(event)
+            });
+            assert!(
+                matches!(
+                    &end,
+                    Event::Failed { failure } if failure.code == FailureCode::InvalidSettings
+                        && failure.message.starts_with(field)
+                ),
+                "{end:?}"
+            );
+            assert!(events.is_empty());
+            assert_eq!(dir.path().read_dir()?.count(), 1);
+        }
+        Ok(())
     }
 }

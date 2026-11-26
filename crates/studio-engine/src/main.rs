@@ -11,8 +11,8 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use studio_domain::job::{CheckOutcome, JobSpec, SourceFacts, SourceReader, WirePath};
+use studio_domain::options::OptionRequest;
 use studio_domain::protocol::Event;
-use studio_domain::settings::EncoderSettings;
 use studio_engine::cli::{self, Cli};
 use studio_engine::{inspect, job, preview, worker};
 
@@ -62,7 +62,7 @@ fn main() -> ExitCode {
 fn encode(
     source: &Path,
     destination: &Path,
-    settings: EncoderSettings,
+    settings: OptionRequest,
     video_stream: Option<u32>,
     omissions_acknowledged: bool,
 ) -> ExitCode {
@@ -86,6 +86,8 @@ fn encode(
         omissions_acknowledged,
         destination: WirePath::from_path(destination),
         settings,
+        identity: Some(job::options_identity()),
+        pass_artifact: None,
     };
     let thread = job::spawn(move || {
         let mut last_progress: Option<Instant> = None;
@@ -194,6 +196,10 @@ fn line(event: &Event, started: Instant) {
         Event::Working { partial } => match partial.to_path_buf() {
             Ok(path) => format!("{at:8.3}s working {}", path.display()),
             Err(error) => format!("{at:8.3}s working ({error})"),
+        },
+        Event::JobPolicy { .. } => match serde_json::to_string(event) {
+            Ok(policy) => format!("{at:8.3}s {policy}"),
+            Err(error) => format!("{at:8.3}s Cannot print the job policy. {error}"),
         },
         Event::Progress { progress } => format!(
             "{at:8.3}s progress read={} coded={}.{:03} encoded={} bytes={}",

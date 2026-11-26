@@ -11,13 +11,14 @@ use std::ops::Range;
 
 use splot_encode::Config;
 use splot_encode::config::options::{OPTIONS, OptionClass, OptionDescription};
-use splot_encode::config::{PresetOrigin, ResolvedPreset};
+use splot_encode::config::{PresetOrigin, ResolvedConfig, ResolvedPreset};
 use splot_encode::preset::{PresetField, PresetParams};
 use studio_domain::job::SourceFacts;
 use studio_domain::options::{
     EffectiveOption, FieldError, MAX_OPTIONS_PAGE_ITEMS, OPTIONS_SCHEMA_VERSION, OptionDescriptor,
     OptionRequest, OptionValue,
 };
+use studio_domain::protocol::{Envelope, Event, write_message};
 
 enum Field {
     Config(&'static OptionDescription),
@@ -104,12 +105,76 @@ pub(crate) fn resolve(
     count: u32,
 ) -> Result<(u32, Vec<EffectiveOption>), FieldError> {
     let (total, range) = page(schema, first, count)?;
-    let mut config = config::from_source(source, settings.base)?;
+    let config = config::from_source(source, settings.base)?;
+    let (config, resolved) = prepare(config, settings)?;
+    Ok((
+        total,
+        effective(&config, &resolved, source, settings, range),
+    ))
+}
+
+fn prepare(
+    mut config: Config,
+    settings: &OptionRequest,
+) -> Result<(Config, ResolvedConfig), FieldError> {
     apply(&mut config, settings)?;
     let resolved = config
         .resolve()
         .map_err(|error| config::error(&config, &error))?;
-    let values = fields(range)
+    Ok((config, resolved))
+}
+
+pub(crate) fn job_policy(
+    config: Config,
+    source: &SourceFacts,
+    settings: &OptionRequest,
+) -> Result<(Config, Vec<Event>), FieldError> {
+    let (config, resolved) = prepare(config, settings)?;
+    let schema = OPTIONS_SCHEMA_VERSION;
+    let (total, _) = page(schema, 0, 1)?;
+    let mut first = 0;
+    let mut events = Vec::new();
+    while first < total {
+        let mut count = (total - first).min(MAX_OPTIONS_PAGE_ITEMS);
+        loop {
+            let (_, range) = page(schema, first, count)?;
+            let values = effective(&config, &resolved, source, settings, range);
+            let field = values
+                .first()
+                .map_or_else(|| "policy".into(), |value| value.key.clone());
+            let envelope = Envelope::new(
+                u64::MAX,
+                Event::JobPolicy {
+                    first,
+                    total,
+                    values,
+                },
+            );
+            if write_message(&mut std::io::sink(), &envelope).is_ok() {
+                events.push(envelope.body);
+                first += count;
+                break;
+            }
+            if count == 1 {
+                return Err(FieldError::new(
+                    field,
+                    "The option exceeds the job policy message limit.",
+                ));
+            }
+            count /= 2;
+        }
+    }
+    Ok((config, events))
+}
+
+fn effective(
+    config: &Config,
+    resolved: &ResolvedConfig,
+    source: &SourceFacts,
+    settings: &OptionRequest,
+    range: Range<usize>,
+) -> Vec<EffectiveOption> {
+    fields(range)
         .map(|field| match field {
             Field::Config(field) => {
                 let requested = settings.values.get(field.key).cloned();
@@ -129,7 +194,7 @@ pub(crate) fn resolve(
                 EffectiveOption {
                     key: field.key.into(),
                     requested,
-                    value: config::value(&config, field.key).unwrap_or(OptionValue::None),
+                    value: config::value(config, field.key).unwrap_or(OptionValue::None),
                     origin,
                     screen: None,
                     screen_origin: None,
@@ -166,6 +231,5 @@ pub(crate) fn resolve(
                 }
             }
         })
-        .collect();
-    Ok((total, values))
+        .collect()
 }
