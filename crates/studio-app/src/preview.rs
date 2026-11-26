@@ -1247,6 +1247,7 @@ impl Preview {
         }
         if self.inflight.is_none() {
             if let Some(key) = self.next_reference() {
+                out.extend(self.cancel_sample());
                 self.send_picture(key, Purpose::Reference, &mut out);
             } else if let Some(key) = self.next_thumb() {
                 self.send_picture(key, Purpose::Thumbnail, &mut out);

@@ -951,8 +951,30 @@ fn reference_preview_verifies_the_coded_source_without_replacing_the_main_pictur
     };
     let (mut preview, opening) = shown(subject);
     preview.picture(output_picture(only(&opening).request_id, 0, None));
+    let sample = preview.input(Input::ReadSample {
+        x: Some(0),
+        y: Some(0),
+    });
+    let Command::PictureSample {
+        generation,
+        ordinal,
+        grain,
+        point,
+        ..
+    } = only(&sample).command
+    else {
+        unreachable!("Expected a sample request.");
+    };
+    assert!(preview.document_decoding());
     let request = preview.request_reference_preview(target.clone(), frame, 1);
-    let request = only(&request);
+    let [cancel, request] = request.as_slice() else {
+        unreachable!("Expected sample cancellation before the reference request.");
+    };
+    assert!(matches!(cancel.command, Command::StopPlayback));
+    assert_eq!(cancel.request_id, generation);
+    assert!(!preview.document_decoding());
+    preview.sample_answer(generation, ordinal, grain, point, 10);
+    assert!(preview.view().viewer.sample_copy.is_empty());
     assert!(matches!(
         request.command,
         Command::Picture {
