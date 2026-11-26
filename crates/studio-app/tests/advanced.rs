@@ -5,6 +5,13 @@
 //! The software renderer needs no display. Build the sibling engine first
 //! with `cargo build -p studio-engine` in the same profile.
 
+#[path = "advanced/coverage.rs"]
+mod coverage;
+#[path = "advanced/passes.rs"]
+mod passes;
+
+use std::cell::RefCell;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -24,13 +31,13 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
 type Event = Box<dyn FnOnce() + Send>;
 
 struct Headless {
-    window: Rc<MinimalSoftwareWindow>,
+    window: Rc<RefCell<Rc<MinimalSoftwareWindow>>>,
     events: Sender<Event>,
 }
 
 impl Platform for Headless {
     fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
-        Ok(self.window.clone())
+        Ok(self.window.borrow().clone())
     }
 
     fn new_event_loop_proxy(&self) -> Option<Box<dyn EventLoopProxy>> {
@@ -84,13 +91,15 @@ fn y4m() -> Vec<u8> {
 struct Rig {
     studio: Studio,
     events: Receiver<Event>,
-    platform: Rc<MinimalSoftwareWindow>,
+    platform: Rc<RefCell<Rc<MinimalSoftwareWindow>>>,
     journal: PathBuf,
 }
 
 impl Rig {
     fn new(source: PathBuf, journal: PathBuf) -> Self {
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let window = Rc::new(RefCell::new(MinimalSoftwareWindow::new(
+            RepaintBufferType::NewBuffer,
+        )));
         let (tx, events) = mpsc::channel();
         platform::set_platform(Box::new(Headless {
             window: window.clone(),
@@ -103,19 +112,54 @@ impl Rig {
             journal: Some(journal.clone()),
             startup: studio_app::state::Startup::default(),
         };
-        let studio = studio_app::build_with_engine(prepared, vec![source], Ok(engine()))
-            .unwrap_or_else(|e| unreachable!("{e}"));
-        let main = studio.window().window();
-        main.set_size(LogicalSize::new(960.0, 680.0));
-        studio
-            .window()
-            .show()
-            .unwrap_or_else(|e| unreachable!("{e}"));
         Self {
-            studio,
+            studio: Self::start(prepared, vec![source]),
             events,
             platform: window,
             journal,
+        }
+    }
+
+    fn start(prepared: Prepared, sources: Vec<PathBuf>) -> Studio {
+        let studio = studio_app::build_with_engine(prepared, sources, Ok(engine()))
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        studio
+            .window()
+            .window()
+            .set_size(LogicalSize::new(960.0, 680.0));
+        studio
+            .window()
+            .show()
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        studio
+    }
+
+    fn reopen(self, data: &Path, sources: Vec<PathBuf>) -> Self {
+        let Self {
+            studio,
+            events,
+            platform,
+            ..
+        } = self;
+        studio
+            .window()
+            .hide()
+            .unwrap_or_else(|error| unreachable!("{error}"));
+        drop(studio);
+        // Deliver pending callbacks before the next controller starts.
+        while let Ok(event) = events.try_recv() {
+            event();
+        }
+        *platform.borrow_mut() = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        let studio_app::Opening::Owner(prepared) = studio_app::prepare(Ok(data.to_path_buf()))
+        else {
+            unreachable!("The previous session must release its journal.");
+        };
+        Self {
+            studio: Self::start(*prepared, sources),
+            events,
+            platform,
+            journal: data.join(journal::FILE_NAME),
         }
     }
 
@@ -156,7 +200,7 @@ impl Rig {
         let width = size.width as usize;
         let mut buffer = vec![slint::Rgb8Pixel::default(); width * size.height as usize];
         self.window().window().request_redraw();
-        assert!(self.platform.draw_if_needed(|renderer| {
+        assert!(self.platform.borrow().draw_if_needed(|renderer| {
             renderer.render(&mut buffer, width);
         }));
         buffer
@@ -391,6 +435,8 @@ fn advanced_edits_and_submits_the_displayed_policy() {
     rig.until("the option catalog", || !keys(window).is_empty());
     assert!(simple != rig.pixels(), "The window did not show Advanced.");
     check_native_width(&rig);
+    coverage::check_catalog(&rig).unwrap_or_else(|error| unreachable!("{error}"));
+    coverage::check_explicit_values(&rig);
 
     change_key_interval(&rig);
     check_context_edits(&rig);
@@ -458,4 +504,5 @@ fn advanced_edits_and_submits_the_displayed_policy() {
     assert_eq!(output.get(8..12), Some(&b"AV02"[..]));
     assert_eq!(u64::try_from(output.len()), Ok(report.bytes));
     assert_eq!(fs::read(source).unwrap_or_default(), y4m());
+    passes::workflow(rig, &scratch.0).unwrap_or_else(|error| unreachable!("{error}"));
 }

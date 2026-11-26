@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use studio_domain::job::{Failure, JobReport, Progress, Stage};
+use studio_domain::job::{Failure, JobPurpose, JobReport, Progress, Stage};
 use studio_domain::protocol::Event;
 
 /// How long a job may take to stop after Cancel before its worker is killed.
@@ -123,6 +123,7 @@ impl Step {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Activity {
     destination: PathBuf,
+    purpose: JobPurpose,
     total_frames: Option<u64>,
     /// The engine checks the source's real timestamps before the first
     /// frame, which can take a moment on a large file.
@@ -148,6 +149,7 @@ impl Activity {
     ) -> Self {
         Self {
             destination,
+            purpose: JobPurpose::Encode,
             total_frames,
             checks_timing,
             phase: Phase::Starting,
@@ -161,6 +163,19 @@ impl Activity {
             started: now,
             ended: None,
         }
+    }
+
+    /// Use the frozen job's purpose from the start of preflight.
+    #[must_use]
+    pub const fn with_purpose(mut self, purpose: JobPurpose) -> Self {
+        self.purpose = purpose;
+        self
+    }
+
+    /// The encoder prepares a pass artifact for this job.
+    #[must_use]
+    pub const fn is_first_pass(&self) -> bool {
+        matches!(self.purpose, JobPurpose::FirstPass)
     }
 
     /// Applies one input at time `now`.
@@ -235,7 +250,11 @@ impl Activity {
                 Step::redraw(Changed::Phase)
             }
             Event::Completed { report } => {
-                self.progress.frames_encoded = report.frames;
+                if self.is_first_pass() {
+                    self.progress.frames_read = report.frames;
+                } else {
+                    self.progress.frames_encoded = report.frames;
+                }
                 self.progress.frames_coded_milli = report.frames.saturating_mul(1000);
                 self.progress.bytes_written = report.bytes;
                 self.phase = Phase::Completed(report);
@@ -339,25 +358,25 @@ impl Activity {
             .saturating_duration_since(self.started)
     }
 
-    /// Coded frames as a fraction of the total, only when the total is
-    /// known and counts have arrived. Frames still inside the encoder count
-    /// by their coded share, so the bar moves between packets. Before the
-    /// first frame a share of zero would look frozen; the bar stays
-    /// indeterminate instead.
+    /// Accepted first-pass frames or coded output frames as a share of the total.
+    /// The bar stays indeterminate before the first frame or with an unknown total.
     #[must_use]
     pub fn fraction(&self) -> Option<f32> {
         let total = self.total_frames.filter(|&t| t > 0)?;
         if self.before_first_frame() {
             return None;
         }
-        let coded = self
-            .progress
-            .frames_coded_milli
-            .max(self.progress.frames_encoded.saturating_mul(1000));
+        let done = if self.is_first_pass() {
+            self.progress.frames_read.saturating_mul(1000)
+        } else {
+            self.progress
+                .frames_coded_milli
+                .max(self.progress.frames_encoded.saturating_mul(1000))
+        };
         let total = total.saturating_mul(1000);
         // Display precision only; counts stay exact everywhere else.
         #[allow(clippy::cast_precision_loss)]
-        let fraction = coded.min(total) as f64 / total as f64;
+        let fraction = done.min(total) as f64 / total as f64;
         #[allow(clippy::cast_possible_truncation)]
         Some(fraction as f32)
     }
@@ -393,6 +412,7 @@ mod tests {
 
     fn report() -> JobReport {
         JobReport {
+            pass_digest: None,
             destination: WirePath::Utf8("/out/clip.ivf".into()),
             frames: 90,
             bytes: 12_345,

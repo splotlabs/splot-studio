@@ -260,6 +260,7 @@ impl Driver {
 
 fn report(destination: &str, long: bool) -> JobReport {
     JobReport {
+        pass_digest: None,
         destination: WirePath::Utf8(destination.into()),
         frames: 300,
         bytes: 6_302_118,
@@ -460,6 +461,8 @@ fn restored_scenario(now: Instant) -> AppState {
         destination: WirePath::Utf8(source.replace(".y4m", ".ivf")),
         settings: studio_app::state::INITIAL_SETTINGS.into(),
         identity: None,
+        purpose: studio_domain::job::JobPurpose::Encode,
+        pass_digest: None,
         pass_artifact: None,
     };
     let journal = Journal {

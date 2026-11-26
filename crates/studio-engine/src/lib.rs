@@ -23,6 +23,7 @@
 
 #![forbid(unsafe_code)]
 
+mod artifact;
 pub mod cli;
 pub mod inspect;
 pub mod job;

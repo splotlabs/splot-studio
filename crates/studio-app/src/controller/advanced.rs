@@ -11,7 +11,7 @@ use studio_domain::options::{EffectiveOption, FieldError, OptionDescriptor, Opti
 use studio_domain::protocol::OptionsIdentity;
 
 use crate::advanced::{self, Reset};
-use crate::queue::Item;
+use crate::queue::{Item, ItemId};
 use crate::render::model;
 use crate::session::Session;
 use crate::state::{AppState, Intent};
@@ -24,6 +24,7 @@ const SETTLE: Duration = Duration::from_millis(180);
 
 #[derive(PartialEq, Eq)]
 struct Inputs {
+    item: Option<ItemId>,
     request: OptionRequest,
     source: Option<SourceFacts>,
     engine: Option<OptionsIdentity>,
@@ -41,6 +42,7 @@ pub(super) struct Editor {
     pending_focus: Option<(String, String)>,
     engine_error: Option<FieldError>,
     candidate: Option<OptionRequest>,
+    imported_changes: Option<String>,
     preview_started: bool,
     rows: Vec<AdvancedOptionRow>,
     fields: Vec<FieldRow>,
@@ -117,11 +119,13 @@ impl Controller {
     }
 
     fn open_advanced(self: &Rc<Self>, open: bool) {
+        self.preset_files.invalidate();
         self.advanced_settle.stop();
         let mut editor = self.advanced.borrow_mut();
         editor.inputs = None;
         if !open {
             editor.candidate = None;
+            editor.imported_changes = None;
             editor.preview_started = false;
         }
         editor.engine_error = None;
@@ -144,6 +148,7 @@ impl Controller {
 
     pub(super) fn render_advanced(self: &Rc<Self>, window: &AppWindow, session: &Session) {
         if !window.get_advanced_open() || session.state().workspace() != Workspace::Encode {
+            self.preset_files.invalidate();
             return;
         }
         let state = session.state();
@@ -151,6 +156,7 @@ impl Controller {
         let request = state.visible_option_request();
         let item = state.selected();
         let inputs = Inputs {
+            item: item.map(Item::id),
             request: request.clone(),
             source: item.and_then(Item::facts).cloned(),
             engine: state.capabilities().and_then(|cap| cap.options.clone()),
@@ -158,9 +164,11 @@ impl Controller {
         };
         let mut editor = self.advanced.borrow_mut();
         if editor.inputs.as_ref() != Some(&inputs) {
+            self.preset_files.invalidate();
             let refresh = editor.inputs.is_some() && !locked;
             if editor.inputs.is_some() {
                 editor.candidate = None;
+                editor.imported_changes = None;
                 editor.preview_started = false;
             }
             editor.inputs = Some(inputs);
@@ -180,6 +188,12 @@ impl Controller {
             }
         }
         let catalog = session.advanced_catalog();
+        window.set_advanced_preset_files_ready(
+            !catalog.is_empty()
+                && state
+                    .capabilities()
+                    .is_some_and(|cap| cap.options.is_some()),
+        );
         let policy = if locked {
             item.and_then(Item::attempt)
                 .map_or(&[][..], |attempt| &attempt.policy)
@@ -356,8 +370,17 @@ impl Controller {
     }
 
     fn queue_preset(self: &Rc<Self>, candidate: Option<OptionRequest>) {
+        self.queue_preset_preview(candidate, None);
+    }
+
+    pub(super) fn queue_preset_preview(
+        self: &Rc<Self>,
+        candidate: Option<OptionRequest>,
+        imported_changes: Option<String>,
+    ) {
         let mut editor = self.advanced.borrow_mut();
         editor.candidate = candidate;
+        editor.imported_changes = imported_changes;
         editor.preview_started = false;
         drop(editor);
         let outcome = self.session.borrow_mut().advanced_cancel_preview();
@@ -571,6 +594,16 @@ impl Editor {
                 advanced::differences(baseline, candidate)
             }
         });
+        let imported = self
+            .candidate
+            .as_ref()
+            .and(self.imported_changes.as_deref());
+        window.set_advanced_imported_preview(imported.is_some());
+        let text = if let Some(changes) = imported {
+            format!("{text}\n\n{changes}")
+        } else {
+            text
+        };
         window.set_advanced_preset_preview(text.into());
     }
 

@@ -174,17 +174,20 @@ fn subject(item: &Item) -> Subject {
     let frames = facts.frame_count;
     let size = (facts.width, facts.height);
     // What the job read, exactly as it was sent.
-    let job = item.attempt().map(|a| {
-        (
-            a.request,
-            a.job.destination.clone(),
-            SourceRef {
-                path: a.job.source.clone(),
-                fingerprint: a.job.fingerprint,
-                video_stream: a.job.video_stream,
-            },
-        )
-    });
+    let job = item
+        .attempt()
+        .filter(|a| a.job.purpose == studio_domain::job::JobPurpose::Encode)
+        .map(|a| {
+            (
+                a.request,
+                a.job.destination.clone(),
+                SourceRef {
+                    path: a.job.source.clone(),
+                    fingerprint: a.job.fingerprint,
+                    video_stream: a.job.video_stream,
+                },
+            )
+        });
     match (item.state(), job) {
         (ItemState::Probing, _) => Subject::Loading { item: id },
         (ItemState::Unreadable, _) => Subject::Unavailable { item: id },

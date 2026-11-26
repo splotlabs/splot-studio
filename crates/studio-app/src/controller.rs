@@ -7,6 +7,7 @@
 //! [`slint::invoke_from_event_loop`].
 
 mod advanced;
+mod presets;
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -24,8 +25,8 @@ use crate::engine::{Delivery, EngineStatus};
 use crate::preview::{Dirty, Input};
 use crate::render::{render, render_analysis, render_counters, render_jobs, render_preview};
 use crate::session::{Outcome, Post, Route, Session, UiEffect};
-use crate::state::Intent;
-use crate::ui::AppWindow;
+use crate::state::{Intent, RelatedAction};
+use crate::ui::{AppWindow, JobAction};
 use crate::workspace::Workspace;
 use crate::{APP_NAME, present, reveal};
 
@@ -41,6 +42,7 @@ pub struct Controller {
     resize_settle: Timer,
     advanced: RefCell<advanced::Editor>,
     advanced_settle: Timer,
+    preset_files: presets::PresetFiles,
     /// The window was not minimized when last looked at.
     visible: Cell<bool>,
 }
@@ -147,6 +149,7 @@ impl Controller {
             resize_settle: Timer::default(),
             advanced: RefCell::default(),
             advanced_settle: Timer::default(),
+            preset_files: presets::PresetFiles::default(),
             visible: Cell::new(true),
         });
         CONTROLLER.with(|c| *c.borrow_mut() = Rc::downgrade(&ctl));
@@ -223,6 +226,7 @@ impl Controller {
             let _ = slint::quit_event_loop();
         });
         ctl.wire_advanced(window);
+        ctl.wire_presets(window);
         ctl.wire_preview(window);
         ctl.wire_analysis(window);
 
@@ -289,6 +293,45 @@ impl Controller {
         };
         window.on_job_show(job(Session::show_job));
         window.on_job_cancel(job(Session::cancel_job));
+        window.on_job_action({
+            let ctl = Rc::downgrade(self);
+            move |index, action| {
+                let Ok(index) = usize::try_from(index) else {
+                    return;
+                };
+                let action = match action {
+                    JobAction::CloneSettings => RelatedAction::CloneSettings,
+                    JobAction::Reencode => RelatedAction::Reencode,
+                    JobAction::FinalPass => RelatedAction::FinalPass,
+                };
+                with(&ctl, |ctl| {
+                    let outcome =
+                        ctl.session
+                            .borrow_mut()
+                            .prepare_job_action(index, action, Instant::now());
+                    ctl.handle(outcome);
+                });
+            }
+        });
+        window.on_job_generate_pass({
+            let ctl = Rc::downgrade(self);
+            move || {
+                with(&ctl, |ctl| {
+                    if !ctl.block_invalid_advanced() {
+                        let outcome = ctl.session.borrow_mut().generate_pass(Instant::now());
+                        ctl.handle(outcome);
+                    }
+                });
+            }
+        });
+        window.on_job_related_approve({
+            let ctl = Rc::downgrade(self);
+            move || with(&ctl, |ctl| ctl.dispatch(Intent::RelatedApproved))
+        });
+        window.on_job_related_decline({
+            let ctl = Rc::downgrade(self);
+            move || with(&ctl, |ctl| ctl.dispatch(Intent::RelatedDeclined))
+        });
         window.on_workspace_chosen({
             let ctl = Rc::downgrade(self);
             move |index| {
@@ -585,6 +628,7 @@ impl Controller {
 
     /// Stops the timers and the session (see [`Session::shutdown`]).
     pub fn shutdown(&self) {
+        self.preset_files.invalidate();
         self.clock.stop();
         self.cancel_deadline.stop();
         self.resize_settle.stop();

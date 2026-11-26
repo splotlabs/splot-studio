@@ -195,6 +195,10 @@ export component AdvancedEditor inherits VerticalLayout {
     in property <string> error;
     in property <string> status;
     in property <string> preset-preview;
+    in property <bool> imported-preview;
+    in property <bool> preset-files-ready;
+    in property <bool> preset-file-error;
+    in property <string> preset-file-status;
     in property <bool> can-undo;
     in property <bool> can-redo;
     in property <bool> can-apply-preset;
@@ -216,6 +220,8 @@ export component AdvancedEditor inherits VerticalLayout {
     callback redo();
     callback apply-preset();
     callback cancel-preset();
+    callback save-preset();
+    callback import-preset();
 
     spacing: Tokens.space-2;
     accessible-role: groupbox;
@@ -254,6 +260,32 @@ export component AdvancedEditor inherits VerticalLayout {
         }
     }
 
+    HorizontalLayout {
+        spacing: Tokens.space-4;
+        alignment: start;
+
+        LinkButton {
+            quiet: true;
+            text: "Save preset…";
+            description: "Save reusable encoder settings to a new file";
+            enabled: root.preset-files-ready;
+            clicked => { root.save-preset(); }
+        }
+
+        LinkButton {
+            quiet: true;
+            text: "Import preset…";
+            description: "Review a preset file before applying its settings";
+            enabled: root.editable && root.preset-files-ready;
+            clicked => { root.import-preset(); }
+        }
+    }
+
+    if root.preset-file-status != "": Caption {
+        text: root.preset-file-status;
+        color: root.preset-file-error ? Tokens.error : Tokens.text-secondary;
+    }
+
     LineEdit {
         text <=> root.query;
         placeholder-text: "Search settings or option keys";
@@ -285,12 +317,12 @@ export component AdvancedEditor inherits VerticalLayout {
 
     if root.preset-preview != "": VerticalLayout {
         spacing: Tokens.space-1;
-        Label { text: "Preset differences"; }
+        Label { text: root.imported-preview ? "Review imported preset" : "Preset differences"; }
         HorizontalLayout {
             spacing: Tokens.space-2;
             alignment: start;
             Button {
-                text: "Apply preset";
+                text: root.imported-preview ? "Apply settings" : "Apply preset";
                 enabled: root.editable && root.can-apply-preset;
                 clicked => { root.apply-preset(); }
             }

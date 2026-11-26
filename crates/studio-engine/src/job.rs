@@ -14,7 +14,7 @@
 
 use std::fs::File;
 use std::io::{self, BufWriter};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use splot_encode::{CancelToken, Config, ContentDescription, Encoder, PixelFormat, SourceFrame};
 use studio_domain::job::{
-    Check, CheckOutcome, Failure, FailureCode, JobReport, JobSpec, Progress, SourceReader, Stage,
-    WirePath,
+    Check, CheckOutcome, Failure, FailureCode, JobPurpose, JobReport, JobSpec, Progress,
+    SourceReader, Stage, WirePath,
 };
 use studio_domain::options::{FieldError, OPTIONS_SCHEMA_VERSION};
 use studio_domain::protocol::{Event, OptionsIdentity};
@@ -35,6 +35,8 @@ use crate::output::{self, PacketSink};
 use crate::source::{self, Selection, Source};
 use crate::{live, options, picture, verify};
 use splot_encode::y4m::Y4mHeader;
+
+mod pass;
 
 /// The stack of a job thread. The decode driver used by verification
 /// recurses through the partition walk; upstream sizes its own worker and
@@ -153,7 +155,7 @@ fn execute(
     control: &dyn Control,
     report: &mut (dyn FnMut(Event) + Send),
 ) -> Result<JobReport, Stop> {
-    let cancel = control.cancel_flag();
+    validate_policy_request(job)?;
     let source_path = job
         .source
         .to_path_buf()
@@ -169,7 +171,10 @@ fn execute(
             video_stream: Some(job.video_stream),
         },
     )?;
-    if source.facts.omissions.any() && !job.omissions_acknowledged {
+    if job.purpose == JobPurpose::Encode
+        && source.facts.omissions.any()
+        && !job.omissions_acknowledged
+    {
         return Err(Stop::failed(
             FailureCode::OmissionsNotAcknowledged,
             "the output is video only, and the job does not acknowledge the streams and \
@@ -177,16 +182,45 @@ fn execute(
         ));
     }
     let (config, policy) = prepare_job(job, &source)?;
-    let output_kind = job.settings.base.output;
     output::check_destination(&destination, &source.id)?;
-    // A decoded source is scanned first; that can take a while and writes
-    // nothing.
-    if source.facts.reader == SourceReader::Ffmpeg {
+    match job.purpose {
+        JobPurpose::FirstPass => pass::generate(
+            job,
+            &mut source,
+            &destination,
+            &config,
+            policy,
+            control,
+            report,
+        ),
+        JobPurpose::Encode => {
+            execute_encode(job, source, &destination, config, policy, control, report)
+        }
+    }
+}
+
+fn execute_encode(
+    job: &JobSpec,
+    mut source: Source,
+    destination: &Path,
+    mut config: Config,
+    policy: Vec<Event>,
+    control: &dyn Control,
+    report: &mut (dyn FnMut(Event) + Send),
+) -> Result<JobReport, Stop> {
+    let cancel = control.cancel_flag();
+    let output_kind = job.settings.base.output;
+    if source.facts.reader == SourceReader::Ffmpeg || job.pass_artifact.is_some() {
         report(Event::Stage {
             stage: Stage::Checking,
         });
     }
     source.start(cancel)?;
+    let verified = pass::load(job, &mut source, &config, &policy, cancel)?;
+    let verified_identity = verified.map(|artifact| {
+        config.first_pass = artifact.bits;
+        (artifact.sha256, artifact.header.source)
+    });
     stop_if(cancel)?;
     let mut encoder = Encoder::new(config.clone()).map_err(encoder_error)?;
     control.hold_encoder(encoder.cancel_token());
@@ -204,21 +238,7 @@ fn execute(
     report(Event::Stage {
         stage: Stage::Encoding,
     });
-    // Cancelled before the file exists: there is nothing to announce or remove.
-    stop_if(cancel)?;
-    let mut prepared = None;
-    control.hold_temp(&mut || {
-        let made = output::prepare(&destination, &source.id);
-        let path = made.as_ref().ok().map(|temp| temp.path().to_path_buf());
-        prepared = Some(made);
-        path
-    });
-    stop_if(cancel)?;
-    let temp =
-        prepared.unwrap_or_else(|| Err(output::output("the temporary file was not created")))?;
-    report(Event::Working {
-        partial: WirePath::from_path(temp.path()),
-    });
+    let temp = open_output(destination, &source, control, report)?;
     let frames = encode(
         &mut source,
         &config,
@@ -236,21 +256,57 @@ fn execute(
         kind: output_kind,
         frames,
     };
-    let checks = checked(temp.as_file(), expected, cancel)?;
+    let mut checks = checked(temp.as_file(), expected, cancel)?;
+    let pass_digest = if let Some((digest, identity)) = verified_identity {
+        if source.pass_identity(cancel)? != identity {
+            return Err(Stop::failed(
+                FailureCode::SourceChanged,
+                "The source changed during the final pass.",
+            ));
+        }
+        checks.push(pass::check());
+        Some(digest)
+    } else {
+        None
+    };
     if !control.claim_publish() {
         return Err(Stop::Cancelled);
     }
     report(Event::Stage {
         stage: Stage::Publishing,
     });
-    let bytes = output::publish(temp, &destination)?;
+    let bytes = output::publish(temp, destination)?;
     Ok(JobReport {
         destination: job.destination.clone(),
         frames,
         bytes,
         checks,
         disclosures: source.facts.disclosures,
+        pass_digest,
     })
+}
+
+fn open_output(
+    destination: &Path,
+    source: &Source,
+    control: &dyn Control,
+    report: &mut dyn FnMut(Event),
+) -> Result<tempfile::NamedTempFile, Stop> {
+    stop_if(control.cancel_flag())?;
+    let mut prepared = None;
+    control.hold_temp(&mut || {
+        let made = output::prepare(destination, &source.id);
+        let path = made.as_ref().ok().map(|temp| temp.path().to_path_buf());
+        prepared = Some(made);
+        path
+    });
+    stop_if(control.cancel_flag())?;
+    let temp =
+        prepared.unwrap_or_else(|| Err(output::output("The temporary file was not created.")))?;
+    report(Event::Working {
+        partial: WirePath::from_path(temp.path()),
+    });
+    Ok(temp)
 }
 
 fn report_policy(
@@ -270,7 +326,6 @@ fn report_policy(
 }
 
 fn prepare_job(job: &JobSpec, source: &Source) -> Result<(Config, Vec<Event>), Stop> {
-    validate_policy_request(job)?;
     let config = source_config(&source.header, source.content, job.settings.base)?;
     let (config, policy) =
         options::job_policy(config, &source.facts, &job.settings).map_err(invalid_policy)?;
@@ -292,7 +347,10 @@ pub fn options_identity() -> OptionsIdentity {
 fn validate_policy_request(job: &JobSpec) -> Result<(), Stop> {
     match &job.identity {
         Some(identity) if *identity == options_identity() => {}
-        None if job.settings.values.is_empty() && job.pass_artifact.is_none() => {}
+        None if job.purpose == JobPurpose::Encode
+            && job.settings.values.is_empty()
+            && job.pass_artifact.is_none()
+            && job.pass_digest.is_none() => {}
         _ => {
             return Err(invalid_policy(FieldError::new(
                 "identity",
@@ -300,11 +358,17 @@ fn validate_policy_request(job: &JobSpec) -> Result<(), Stop> {
             )));
         }
     }
-    if job.pass_artifact.is_some() {
-        return Err(invalid_policy(FieldError::new(
-            "pass_artifact",
-            "This engine supports one-pass encoding. Remove the first-pass artifact.",
-        )));
+    if job.purpose == JobPurpose::FirstPass
+        && (job.pass_artifact.is_some() || job.pass_digest.is_some())
+    {
+        return Err(pass::invalid(
+            "A first-pass job cannot consume another artifact.",
+        ));
+    }
+    if job.pass_artifact.is_some() != job.pass_digest.is_some() {
+        return Err(pass::invalid(
+            "Select a verified first-pass artifact with its digest.",
+        ));
     }
     Ok(())
 }
@@ -474,6 +538,11 @@ fn encode_frames(
         let Some(planes) = source.read_frame()? else {
             break;
         };
+        if !config.first_pass.is_empty() && frames_read >= config.first_pass.len() as u64 {
+            return Err(pass::invalid(
+                "The source has more frames than the first-pass artifact.",
+            ));
+        }
         let frame = SourceFrame::new(config, frames_read, planes).map_err(|e| {
             Stop::failed(
                 FailureCode::InvalidSource,
@@ -493,6 +562,11 @@ fn encode_frames(
         return Err(Stop::failed(
             FailureCode::InvalidSource,
             "the source has no frames",
+        ));
+    }
+    if !config.first_pass.is_empty() && frames_read != config.first_pass.len() as u64 {
+        return Err(pass::invalid(
+            "The source has fewer frames than the first-pass artifact.",
         ));
     }
     (lock(reporter).report)(Event::Stage {
@@ -583,6 +657,8 @@ mod tests {
                 values: BTreeMap::new(),
             },
             identity: Some(options_identity()),
+            purpose: studio_domain::job::JobPurpose::Encode,
+            pass_digest: None,
             pass_artifact: None,
         };
         Ok((dir, spec))

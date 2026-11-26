@@ -6,7 +6,7 @@
 
 use studio_domain::analysis::{DocumentSummary, ScanOutcome};
 
-use super::{Tone, bytes, count, file_name};
+use super::{Tone, bytes, count, file_name, queue::is_first_pass};
 use crate::activity::Phase as JobPhase;
 use crate::analysis::Phase;
 use crate::jobs::{Job, State, Work};
@@ -15,7 +15,7 @@ use crate::queue::{Ending, Item};
 /// One job, in words.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Line {
-    /// "Convert" or "Inspect".
+    /// "Convert", "First pass", or "Inspect".
     pub kind: &'static str,
     /// The file's name.
     pub name: String,
@@ -34,7 +34,11 @@ pub struct Line {
 pub fn line(job: &Job<'_>) -> Line {
     let (kind, name, detail, fraction) = match job.work {
         Work::Convert(item) => (
-            "Convert",
+            if is_first_pass(item) {
+                "First pass"
+            } else {
+                "Convert"
+            },
             file_name(item.source()),
             conversion(item, job.state),
             item.activity()
@@ -88,16 +92,20 @@ pub fn entry(jobs: &[Job<'_>]) -> (String, String) {
         format!("Jobs · {active}")
     };
     let description = format!(
-        "{active} running or queued, {ended} ended. Opens the list of conversions and stream \
-         reads."
+        "{active} running or queued, {ended} ended. Opens the list of encode jobs and stream reads."
     );
     (label, description)
 }
 
 fn conversion(item: &Item, state: State) -> String {
     let activity = item.activity();
+    let first_pass = is_first_pass(item);
     match (state, item.ending()) {
+        (State::Queued, _) if first_pass => "First pass queued.".into(),
         (State::Queued, _) => "Converts after the files before it in this run.".to_owned(),
+        (State::Running, _) if first_pass => {
+            activity.map_or_else(|| "Starting first pass.".into(), super::progress_text)
+        }
         (State::Running, _) => match activity {
             Some(a) if a.before_first_frame() => "Starting; no frame encoded yet.".to_owned(),
             Some(a) => format!(
@@ -113,6 +121,9 @@ fn conversion(item: &Item, state: State) -> String {
             }
             _ => "Stopping at the next safe point. Nothing is published.".to_owned(),
         },
+        (_, Some(Ending::Completed(report))) if first_pass => {
+            format!("{} frames analyzed · verified", count(report.frames))
+        }
         (_, Some(Ending::Completed(report))) => format!(
             "{} frames · {} · verified",
             count(report.frames),
@@ -126,6 +137,9 @@ fn conversion(item: &Item, state: State) -> String {
             )
         }
         (_, Some(Ending::Lost { why, .. })) => format!("{why} Nothing was published."),
+        (_, Some(Ending::Interrupted(_))) if first_pass => {
+            "First pass interrupted. Retry starts it again.".into()
+        }
         (_, Some(Ending::Interrupted(_))) => {
             "The app closed or stopped while it converted. It does not resume; Retry converts \
              it again."

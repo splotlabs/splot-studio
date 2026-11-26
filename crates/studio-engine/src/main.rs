@@ -87,6 +87,8 @@ fn encode(
         destination: WirePath::from_path(destination),
         settings,
         identity: Some(job::options_identity()),
+        purpose: studio_domain::job::JobPurpose::Encode,
+        pass_digest: None,
         pass_artifact: None,
     };
     let thread = job::spawn(move || {

@@ -407,6 +407,7 @@ pub fn elapsed(duration: Duration) -> String {
 #[must_use]
 pub const fn stage(stage: Stage) -> &'static str {
     match stage {
+        Stage::FirstPass => "Analyzing frames",
         Stage::Checking => "Checking the frames",
         Stage::Encoding => "Encoding",
         Stage::Finalizing => "Finishing the file",
@@ -420,6 +421,9 @@ pub const fn stage(stage: Stage) -> &'static str {
 pub fn headline(activity: &Activity) -> (String, Tone) {
     let name = file_name(activity.destination());
     match activity.phase() {
+        Phase::Starting if activity.is_first_pass() => {
+            (format!("Starting first pass — {name}"), Tone::Neutral)
+        }
         Phase::Starting => (format!("Starting — {name}"), Tone::Neutral),
         Phase::Running(s) => (format!("{} — {name}", stage(*s)), Tone::Neutral),
         Phase::Cancelling {
@@ -432,6 +436,9 @@ pub fn headline(activity: &Activity) -> (String, Tone) {
         Phase::Cancelling { killing: true, .. } => {
             (format!("Stopping the worker — {name}"), Tone::Warning)
         }
+        Phase::Completed(_) if activity.is_first_pass() => {
+            (format!("First pass ready — {name}"), Tone::Success)
+        }
         Phase::Completed(_) => (format!("Completed — {name}"), Tone::Success),
         Phase::Cancelled => (format!("Cancelled — {name}"), Tone::Neutral),
         Phase::Failed(_) => (format!("Failed — {name}"), Tone::Error),
@@ -443,6 +450,12 @@ pub fn headline(activity: &Activity) -> (String, Tone) {
 #[must_use]
 pub fn detail(activity: &Activity) -> String {
     match activity.phase() {
+        Phase::Running(Stage::Checking) if activity.is_first_pass() => {
+            "Checking source timing before the first pass.".into()
+        }
+        Phase::Starting | Phase::Running(_) if activity.is_first_pass() => {
+            "Closing the window stops the first pass.".into()
+        }
         Phase::Starting | Phase::Running(Stage::Encoding)
             if activity.checks_timing() && activity.before_first_frame() =>
         {
@@ -458,8 +471,13 @@ pub fn detail(activity: &Activity) -> String {
             "The worker did not stop in time and is being terminated.".to_owned()
         }
         Phase::Completed(report) => format!(
-            "{} frames · {} · in {}",
+            "{} frames{} · {} · in {}",
             count(report.frames),
+            if activity.is_first_pass() {
+                " analyzed"
+            } else {
+                ""
+            },
             bytes_exact(report.bytes),
             elapsed(activity.elapsed(std::time::Instant::now()))
         ),
@@ -520,6 +538,7 @@ pub fn failure_text_with(failure: &Failure, verb: &str) -> String {
 #[must_use]
 pub const fn check_name(kind: CheckKind) -> &'static str {
     match kind {
+        CheckKind::PassArtifact => "First-pass artifact integrity",
         CheckKind::Structure => "Structure",
         CheckKind::SplotDecode => "Splot decode (same codebase as the encoder)",
         CheckKind::AvmDecode => "Independent AVM decode",
@@ -542,8 +561,8 @@ pub fn check(check: &Check) -> (&'static str, &'static str, String, Tone) {
 /// 1.2 MB written`, or that no frame has arrived yet.
 #[must_use]
 pub fn counters(activity: &Activity) -> String {
-    if activity.before_first_frame() {
-        return "Waiting for the first frame".to_owned();
+    if activity.before_first_frame() || activity.is_first_pass() {
+        return progress_text(activity);
     }
     let progress = activity.progress();
     format!(
@@ -554,13 +573,29 @@ pub fn counters(activity: &Activity) -> String {
     )
 }
 
-/// `45 of 90 frames encoded`, or `45 frames encoded` when the total is unknown.
+/// The count of completed or accepted frames for the current job.
 #[must_use]
 pub fn progress_text(activity: &Activity) -> String {
-    let encoded = activity.progress().frames_encoded;
+    if activity.before_first_frame() {
+        return "Waiting for the first frame".into();
+    }
+    let progress = activity.progress();
+    let (frames, verb) = if activity.is_first_pass() {
+        // The pass API reports accepted frames while it runs and costs for
+        // all frames after finish. Only those costs prove completed analysis.
+        let verb = if progress.frames_coded_milli >= progress.frames_read.saturating_mul(1000) {
+            "analyzed"
+        } else {
+            "accepted"
+        };
+        (progress.frames_read, verb)
+    } else {
+        (progress.frames_encoded, "encoded")
+    };
     match activity.total_frames() {
-        Some(total) => format!("{} of {} frames encoded", count(encoded), count(total)),
-        None => format!("{} frames encoded (total unknown)", count(encoded)),
+        Some(total) => format!("{} of {} frames {verb}", count(frames), count(total)),
+        None if activity.is_first_pass() => format!("{} frames {verb}", count(frames)),
+        None => format!("{} frames {verb} (total unknown)", count(frames)),
     }
 }
 
@@ -569,6 +604,50 @@ mod tests {
     use super::*;
     use studio_domain::job::{SourceColor, SourceFingerprint};
     use studio_domain::protocol::MediaTool;
+
+    #[test]
+    fn first_pass_counts_accepted_and_analyzed_frames() {
+        use crate::activity::Input;
+        use std::time::Instant;
+        use studio_domain::job::{JobPurpose, JobReport, Progress, WirePath};
+        use studio_domain::protocol::Event;
+
+        let now = Instant::now();
+        let mut pass = Activity::new("sample.splot-pass.json".into(), Some(8), false, now)
+            .with_purpose(JobPurpose::FirstPass);
+        assert!(headline(&pass).0.starts_with("Starting first pass"));
+        assert_eq!(counters(&pass), "Waiting for the first frame");
+        assert_eq!(pass.fraction(), None);
+        pass.apply(
+            Input::Event(Event::Progress {
+                progress: Progress {
+                    frames_read: 2,
+                    ..Progress::default()
+                },
+            }),
+            now,
+        );
+        assert_eq!(pass.fraction(), Some(0.25));
+        assert_eq!(progress_text(&pass), "2 of 8 frames accepted");
+        assert_eq!(counters(&pass), "2 of 8 frames accepted");
+        pass.apply(
+            Input::Event(Event::Completed {
+                report: JobReport {
+                    destination: WirePath::Utf8("sample.splot-pass.json".into()),
+                    frames: 8,
+                    bytes: 32,
+                    checks: Vec::new(),
+                    disclosures: Vec::new(),
+                    pass_digest: Some("example".into()),
+                },
+            }),
+            now,
+        );
+        assert_eq!(pass.progress().frames_encoded, 0);
+        assert_eq!(pass.fraction(), Some(1.0));
+        assert_eq!(progress_text(&pass), "8 of 8 frames analyzed");
+        assert!(headline(&pass).0.starts_with("First pass ready"));
+    }
 
     #[test]
     fn frame_rates_stay_exact() {

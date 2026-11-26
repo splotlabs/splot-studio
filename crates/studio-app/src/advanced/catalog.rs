@@ -45,8 +45,12 @@ impl Classification {
 pub(crate) fn classification(descriptor: &OptionDescriptor) -> Option<Classification> {
     use Classification as Class;
 
-    if descriptor.key.starts_with("preset.") {
-        let group = match descriptor.group.as_str() {
+    if let Some(key) = descriptor.key.strip_prefix("preset.") {
+        let codec_group = preset_group(key)?;
+        if codec_group != descriptor.group {
+            return None;
+        }
+        let group = match codec_group {
             "partition" | "mode_decision" => SEARCH,
             "intra" | "inter" | "screen_content" => PREDICTION,
             "transform" | "lossless" => TRANSFORMS,
@@ -86,6 +90,71 @@ pub(crate) fn classification(descriptor: &OptionDescriptor) -> Option<Classifica
         "content" => Class::named(SOURCE, "Source description and timing", false),
         _ => return None,
     })
+}
+
+// A new key in a known codec group needs a decision.
+#[rustfmt::skip]
+const PRESET_GROUPS: &[(&str, &[&str])] = &[
+    ("partition", &[
+        "breakout_area", "ext_four_way_margin", "ext_partitions", "ext_three_way_margin",
+        "extended_sdp", "leaf_reuse", "max_block_log2", "min_block_log2", "none_breakout",
+        "partition_early_exit", "pd0_leaf_bits", "pd_window", "ref_intra_margin",
+        "ref_intra_refresh", "sb256_min_height", "sdp", "sdp_chroma_search",
+    ]),
+    ("intra", &[
+        "cfl_filter", "cfl_zero_alpha", "dip", "dip_trials", "intra_modes", "mhccp", "mrl_trials",
+    ]),
+    ("transform", &[
+        "cctx", "cctx_candidates", "full_trials", "inter_ddt", "inter_ist", "inter_ist_rd",
+        "inter_tx_split", "intra_ist_rd", "ist_sets", "parity_hiding", "rdoq", "rdoq_every_type",
+        "tcq", "tcq_search_trellis", "tcq_type_trellis", "tx_partition_search", "tx_type_depth",
+        "tx_type_model_keep",
+    ]),
+    ("inter", &[
+        "bawp", "bawp_search", "cdf_avg_across_tiles", "cdf_carry", "cdf_update_tile",
+        "compound_amvd", "compound_candidates", "compound_local_warp", "compound_refs",
+        "compound_skip_sad", "compound_types", "disable_cdf_update", "drl_bits",
+        "drl_reorder_always", "eighth_pel_max_qindex", "explicit_refs", "global_motion",
+        "global_motion_predict", "hme_range", "implicit_mask", "implicit_output", "interintra",
+        "interintra_search", "interp_filter_search", "intra_only", "jmvd_scales", "large_inter",
+        "long_term_id_bits", "me_range", "me_seeds", "motion_range", "mv_prediction", "mv_traj",
+        "mvd_tools", "newmv_ref_margin", "num_ref_frames", "open_loop_key", "opfl",
+        "opfl_refine_all", "primary_default_cdfs", "primary_ref_choose", "quant_matrices",
+        "refinemv", "same_ref_modes", "sef_repeat", "seq_tile_info", "short_refresh",
+        "subpel_depth", "tip", "tip_amvd", "tip_explicit_qp", "tip_hole_fill", "tip_newmv",
+        "tip_output", "tip_output_search", "tip_refinemv", "warp", "warp_interintra",
+    ]),
+    ("filters", &[
+        "ccso_bo_band_log2", "ccso_candidates", "ccso_reuse", "cdef_damping_search",
+        "cdef_on_skip", "cdef_pairs", "cdef_strengths", "deblock_luma_split",
+        "deblock_offset_bits", "df_sub_pu", "gdf_candidates", "loop_filter_search",
+        "lr_chroma_unit_sizes", "lr_unit_sizes", "wiener_ns", "wiener_ns_chroma",
+        "wiener_ns_classes",
+    ]),
+    ("screen_content", &[
+        "fsc", "idtx_intra", "integer_mv", "intrabc", "intrabc_drl", "intrabc_local",
+        "intrabc_morph", "intrabc_small", "intrabc_subpel", "palette", "screen_detect",
+    ]),
+    ("lossless", &[
+        "lossless_dpcm",
+    ]),
+    ("gop", &[
+        "bitrate_mini_gop_size", "delta_q_res", "key_qindex_boost", "lookahead_frames",
+        "mini_gop_size", "segmentation", "ssim_aq", "tf_frames", "tf_strength", "tpl_delta_q",
+        "u_delta_q", "v_delta_q", "y_dc_delta_q",
+    ]),
+    ("mode_decision", &[
+        "light_leaf", "mds0_budgets", "psy_rd",
+    ]),
+    ("threading", &[
+        "wavefront",
+    ]),
+];
+
+fn preset_group(key: &str) -> Option<&'static str> {
+    PRESET_GROUPS
+        .iter()
+        .find_map(|(group, keys)| keys.contains(&key).then_some(*group))
 }
 
 /// The section shown in Advanced.
@@ -238,6 +307,18 @@ mod tests {
         assert_eq!(title(&unknown), "new_option");
         assert_eq!(
             classification(&descriptor("preset.knob", "new_group", ValueShape::Bool)),
+            None
+        );
+        assert_eq!(
+            classification(&descriptor(
+                "preset.new_knob",
+                "transform",
+                ValueShape::Bool
+            )),
+            None
+        );
+        assert_eq!(
+            classification(&descriptor("preset.rdoq", "partition", ValueShape::Bool)),
             None
         );
     }

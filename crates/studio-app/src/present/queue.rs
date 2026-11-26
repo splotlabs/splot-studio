@@ -8,6 +8,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+use studio_domain::job::JobPurpose;
 use studio_domain::settings::OutputKind;
 
 use super::{Tone, bytes_exact, count, failure_text_with, file_name, omitted, stage};
@@ -60,10 +61,12 @@ pub fn row_state(item: &Item) -> (RowKind, String) {
                     Some(f) => format!("{} · {}%", stage(*s), percent(f)),
                     None => stage(*s).to_owned(),
                 },
+                _ if is_first_pass(item) => words("Starting first pass"),
                 _ => words("Starting"),
             };
             (RowKind::Converting, text)
         }
+        ItemState::Completed if is_first_pass(item) => (RowKind::Done, words("First pass ready")),
         ItemState::Completed => (RowKind::Done, words("Done")),
         ItemState::Cancelled => (RowKind::Cancelled, words("Cancelled")),
         ItemState::Failed => (RowKind::Failed, words("Failed")),
@@ -272,6 +275,9 @@ pub fn headline(item: &Item) -> (String, Tone) {
     }
     let name = file_name(&item.destination().path);
     match item.ending() {
+        Some(Ending::Completed(_)) if is_first_pass(item) => {
+            (format!("First pass ready — {name}"), Tone::Success)
+        }
         Some(Ending::Completed(_)) => (format!("Completed — {name}"), Tone::Success),
         Some(Ending::Cancelled) => (format!("Cancelled — {name}"), Tone::Neutral),
         Some(Ending::Failed(_)) => (format!("Failed — {name}"), Tone::Error),
@@ -292,8 +298,9 @@ pub fn detail(item: &Item, verb: &str) -> String {
         Some(Ending::Completed(report)) => match item.activity() {
             Some(activity) => super::detail(activity),
             None => format!(
-                "{} frames · {}",
+                "{} frames{} · {}",
                 count(report.frames),
+                if is_first_pass(item) { " analyzed" } else { "" },
                 bytes_exact(report.bytes)
             ),
         },
@@ -404,12 +411,26 @@ pub fn row_accessible(item: &Item) -> String {
 pub fn settings_note(item: &Item) -> String {
     let name = file_name(item.source());
     match item.state() {
+        ItemState::Completed if is_first_pass(item) => {
+            format!("Studio analyzed {name} with these settings.")
+        }
+        ItemState::Running | ItemState::Publishing if is_first_pass(item) => {
+            format!("The first pass uses these settings for {name}.")
+        }
         ItemState::Completed => format!("{name} was converted with these settings."),
         ItemState::Running | ItemState::Publishing => {
             format!("{name} is converting with these settings.")
         }
         _ => String::new(),
     }
+}
+
+pub(super) fn is_first_pass(item: &Item) -> bool {
+    item.submitted
+        .as_ref()
+        .map(|submission| submission.job.purpose)
+        .or_else(|| item.attempt().map(|attempt| attempt.job.purpose))
+        == Some(JobPurpose::FirstPass)
 }
 
 #[cfg(test)]

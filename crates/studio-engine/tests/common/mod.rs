@@ -286,6 +286,8 @@ pub fn spec(source: &Path, destination: &Path, output: OutputKind) -> JobSpec {
         destination: WirePath::from_path(destination),
         settings: settings(output).into(),
         identity: Some(studio_engine::job::options_identity()),
+        purpose: studio_domain::job::JobPurpose::Encode,
+        pass_digest: None,
         pass_artifact: None,
     }
 }

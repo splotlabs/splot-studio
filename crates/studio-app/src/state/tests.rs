@@ -193,6 +193,7 @@ impl App {
             id,
             Event::Completed {
                 report: JobReport {
+                    pass_digest: None,
                     destination: destination.unwrap_or(WirePath::Utf8(String::new())),
                     frames: 3,
                     bytes: 100,
@@ -1662,4 +1663,231 @@ fn jobs_list_each_conversion_with_its_own_state() {
     assert!(d > c);
     app.state.interrupt_for_shutdown();
     assert_eq!(list(&app)[2], (abs("/m/c.y4m"), State::Interrupted));
+}
+
+#[test]
+fn related_replay_checks_the_current_engine_and_keeps_the_original_record() {
+    use studio_domain::protocol::OptionsIdentity;
+
+    let mut app = App::new();
+    let identity = |revision: &str| OptionsIdentity {
+        schema: 1,
+        codec_revision: revision.into(),
+    };
+    app.apply(Intent::EngineAnswered(Ok(Capabilities {
+        options: Some(identity("original")),
+        ..capabilities(true)
+    })));
+    app.add(&["/m/replay.y4m"], ready);
+    app.apply(Intent::OptionEdited {
+        key: "keyint".into(),
+        value: Some(OptionValue::Integer(3)),
+    });
+    let (id, original) = only_start(&app.apply(Intent::ConvertRequested).effects);
+    let policy = |value| EffectiveOption {
+        key: "keyint".into(),
+        requested: Some(OptionValue::Integer(3)),
+        value: OptionValue::Integer(value),
+        origin: OptionValue::Choice("explicit".into()),
+        screen: None,
+        screen_origin: None,
+    };
+    app.apply(Intent::JobPolicy {
+        id,
+        values: vec![policy(3)],
+    });
+    app.complete(id);
+    let original_item = app.state.items()[0].clone();
+
+    app.apply(Intent::EngineAnswered(Ok(Capabilities {
+        options: Some(identity("current")),
+        ..capabilities(true)
+    })));
+    app.apply(Intent::OptionEdited {
+        key: "keyint".into(),
+        value: Some(OptionValue::Integer(7)),
+    });
+    let prepare = |app: &mut App, action| {
+        let effects = app
+            .apply(Intent::PrepareRelated {
+                item: original_item.id(),
+                action,
+            })
+            .effects;
+        match effects.as_slice() {
+            [Effect::PrepareRelated { request, job }] => (*request, (**job).clone()),
+            _ => unreachable!("A related preparation should start one check."),
+        }
+    };
+    let (request, job) = prepare(&mut app, RelatedAction::Reencode);
+    assert_eq!(job.settings, original.settings);
+    assert_eq!(job.identity, Some(identity("current")));
+    let mut changed = facts(None);
+    changed.fingerprint.len += 1;
+    app.apply(Intent::RelatedPrepared {
+        request,
+        result: Ok((Box::new(changed), vec![policy(4)])),
+    });
+    assert!(matches!(
+        app.state.related(),
+        Some(RelatedPreview::Failed(_))
+    ));
+    assert_eq!(app.state.items(), std::slice::from_ref(&original_item));
+    app.apply(Intent::RelatedDeclined);
+
+    let (request, _) = prepare(&mut app, RelatedAction::CloneSettings);
+    app.apply(Intent::RelatedPrepared {
+        request,
+        result: Ok((Box::new(facts(None)), vec![policy(4)])),
+    });
+    assert!(
+        matches!(app.state.related(), Some(RelatedPreview::Ready { detail, .. }) if
+        detail.contains("encoder revision") && detail.contains("3 → 4"))
+    );
+    assert_eq!(
+        app.state.option_request().values.get("keyint"),
+        Some(&OptionValue::Integer(7))
+    );
+    app.apply(Intent::RelatedApproved);
+    assert_eq!(app.state.option_request(), &original.settings);
+    assert_eq!(app.state.items(), std::slice::from_ref(&original_item));
+
+    let (request, _) = prepare(&mut app, RelatedAction::Reencode);
+    app.apply(Intent::RelatedPrepared {
+        request,
+        result: Ok((Box::new(facts(None)), vec![policy(4)])),
+    });
+    assert_eq!(app.state.items().len(), 1);
+    let (_, replay) = only_start(&app.apply(Intent::RelatedApproved).effects);
+    assert_eq!(replay.settings, original.settings);
+    assert_ne!(replay.destination, original.destination);
+    assert_eq!(app.state.items()[0], original_item);
+    let attempt = app.state.items()[1].attempt();
+    assert_eq!(attempt.map(|a| a.policy.as_slice()), Some(&[policy(4)][..]));
+}
+
+#[test]
+fn final_pass_uses_its_completed_artifact_and_starts_no_other_job() {
+    use studio_domain::job::JobPurpose;
+    use studio_domain::protocol::OptionsIdentity;
+
+    let mut app = App::new();
+    app.apply(Intent::EngineAnswered(Ok(Capabilities {
+        options: Some(OptionsIdentity {
+            schema: 1,
+            codec_revision: "current".into(),
+        }),
+        ..capabilities(true)
+    })));
+    app.add(&["/m/pass.y4m", "/m/other.y4m"], ready);
+    app.apply(Intent::OptionEdited {
+        key: "rate_control".into(),
+        value: Some(OptionValue::Record(
+            [
+                ("mode".into(), OptionValue::Choice("vbr".into())),
+                ("bitrate_kbps".into(), OptionValue::Integer(300)),
+            ]
+            .into(),
+        )),
+    });
+    let original = app.state.items().to_vec();
+    let prepare = |app: &mut App, item, action| {
+        let update = app.apply(Intent::PrepareRelated { item, action });
+        let [Effect::PrepareRelated { request, job }] = update.effects.as_slice() else {
+            unreachable!("Expected one preflight request.");
+        };
+        assert_eq!(job.fingerprint, PRINT);
+        app.apply(Intent::RelatedPrepared {
+            request: *request,
+            result: Ok((Box::new(facts(None)), Vec::new())),
+        });
+        only_start(&app.apply(Intent::RelatedApproved).effects)
+    };
+    let (request, first) = prepare(&mut app, original[0].id(), RelatedAction::FirstPass);
+    assert_eq!(first.purpose, JobPurpose::FirstPass);
+    assert!(first.pass_artifact.is_none());
+    let digest = "f".repeat(64);
+    app.event(
+        request,
+        Event::Stage {
+            stage: Stage::Publishing,
+        },
+    );
+    app.event(
+        request,
+        Event::Completed {
+            report: JobReport {
+                destination: first.destination.clone(),
+                frames: 3,
+                bytes: 100,
+                checks: Vec::new(),
+                disclosures: Vec::new(),
+                pass_digest: Some(digest.clone()),
+            },
+        },
+    );
+    assert!(app.state.analyzable().is_none());
+    let pass_item = app.state.items()[2].clone();
+    let (_, final_job) = prepare(&mut app, pass_item.id(), RelatedAction::FinalPass);
+    assert_eq!(final_job.purpose, JobPurpose::Encode);
+    assert_eq!(final_job.pass_artifact, Some(first.destination));
+    assert_eq!(final_job.pass_digest, Some(digest));
+    assert_eq!(final_job.settings, first.settings);
+    assert_eq!(app.state.items()[..2], original);
+    assert_eq!(app.state.items()[2], pass_item);
+}
+
+#[test]
+fn dismissing_a_related_check_keeps_its_worker_slot_until_the_reply() {
+    use studio_domain::protocol::OptionsIdentity;
+
+    let mut app = App::new();
+    app.apply(Intent::EngineAnswered(Ok(Capabilities {
+        options: Some(OptionsIdentity {
+            schema: 1,
+            codec_revision: "current".into(),
+        }),
+        ..capabilities(true)
+    })));
+    app.add(&["/m/check.y4m"], ready);
+    app.apply(Intent::OptionEdited {
+        key: "rate_control".into(),
+        value: Some(OptionValue::Record(
+            [
+                ("mode".into(), OptionValue::Choice("vbr".into())),
+                ("bitrate_kbps".into(), OptionValue::Integer(300)),
+            ]
+            .into(),
+        )),
+    });
+    let item = app.state.items()[0].id();
+    let prepare = Intent::PrepareRelated {
+        item,
+        action: RelatedAction::FirstPass,
+    };
+    let update = app.apply(prepare.clone());
+    let [Effect::PrepareRelated { request, .. }] = update.effects.as_slice() else {
+        unreachable!("Expected one compatibility check.");
+    };
+
+    app.apply(Intent::RelatedDeclined);
+    assert_eq!(app.state.related(), Some(&RelatedPreview::Cancelling));
+    assert!(!app.state.can_generate_pass());
+    assert_eq!(app.apply(prepare.clone()).effects, []);
+    app.apply(Intent::RelatedPrepared {
+        request: request + 1,
+        result: Ok((Box::new(facts(None)), Vec::new())),
+    });
+    assert_eq!(app.state.related(), Some(&RelatedPreview::Cancelling));
+
+    app.apply(Intent::RelatedPrepared {
+        request: *request,
+        result: Ok((Box::new(facts(None)), Vec::new())),
+    });
+    assert_eq!(app.state.related(), None);
+    assert!(app.state.can_generate_pass());
+    assert!(matches!(
+        app.apply(prepare).effects.as_slice(),
+        [Effect::PrepareRelated { .. }]
+    ));
 }

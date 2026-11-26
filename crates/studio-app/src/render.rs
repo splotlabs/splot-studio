@@ -21,7 +21,7 @@ use crate::present::{self, Tone as ToneText};
 use crate::preview::{Dirty, Preview, StageState as Stage};
 use crate::queue::{Ending, Item, ItemState};
 use crate::simple::{self, Priority, Quality};
-use crate::state::{AppState, Mode, Severity};
+use crate::state::{AppState, Mode, RelatedPreview, Severity};
 use crate::ui::{
     AppWindow, CheckRow, Fact, JobRow, JobView, Notice, QueueRow, RowState, SourceView, StageState,
     Tone, ViewMode, WorkspaceView,
@@ -74,6 +74,7 @@ pub fn render(window: &AppWindow, state: &AppState, now: Instant) {
     window.set_empty_caption(present::empty_caption(state.capabilities()).into());
     window.set_media_tool_line(present::media_tool(state.capabilities()).into());
     render_confirmation(window, state);
+    render_related(window, state);
     render_destination(window, state, selected);
     render_primary(window, state);
     render_detail(window, mode, selected);
@@ -87,6 +88,35 @@ pub fn render(window: &AppWindow, state: &AppState, now: Instant) {
             window.set_run_position(SharedString::new());
         }
     }
+}
+
+fn render_related(window: &AppWindow, state: &AppState) {
+    window.set_job_can_generate_pass(state.can_generate_pass());
+    window.set_job_actions_enabled(
+        state.active().is_none()
+            && state.related().is_none()
+            && state.confirmation().is_none()
+            && state
+                .capabilities()
+                .is_some_and(|cap| cap.options.is_some()),
+    );
+    let (title, detail, ready, failed) = match state.related() {
+        Some(RelatedPreview::Checking) => ("Checking job compatibility…", "", false, false),
+        Some(RelatedPreview::Cancelling) => {
+            ("Finishing the compatibility check…", "", false, false)
+        }
+        Some(RelatedPreview::Ready { title, detail }) => {
+            (title.as_str(), detail.as_str(), true, false)
+        }
+        Some(RelatedPreview::Failed(detail)) => {
+            ("Cannot use these settings", detail.as_str(), false, true)
+        }
+        None => ("", "", false, false),
+    };
+    window.set_job_related_title(title.into());
+    window.set_job_related_detail(detail.into());
+    window.set_job_related_ready(ready);
+    window.set_job_related_failed(failed);
 }
 
 fn render_settings(window: &AppWindow, state: &AppState) {
@@ -449,14 +479,7 @@ pub fn render_counters(window: &AppWindow, state: &AppState, now: Instant) {
     let fraction = activity.fraction();
     window.set_progress_known(fraction.is_some());
     window.set_progress_fraction(fraction.unwrap_or(0.0));
-    window.set_progress_text(
-        if activity.before_first_frame() {
-            "Waiting for the first frame".to_owned()
-        } else {
-            present::progress_text(activity)
-        }
-        .into(),
-    );
+    window.set_progress_text(present::progress_text(activity).into());
     window.set_progress_line(present::counters(activity).into());
     window.set_elapsed_text(present::elapsed(activity.elapsed(now)).into());
 }
@@ -540,13 +563,10 @@ pub fn render_jobs(window: &AppWindow, jobs: &[Job<'_>]) {
         .iter()
         .map(|job| {
             let line = present::jobs::line(job);
+            let kind = line.kind;
             JobRow {
-                accessible: format!(
-                    "{} {}: {}. {}",
-                    line.kind, line.name, line.state, line.detail
-                )
-                .into(),
-                kind: line.kind.into(),
+                accessible: format!("{kind} {}. {}. {}", line.name, line.state, line.detail).into(),
+                kind: kind.into(),
                 name: line.name.into(),
                 state: line.state.into(),
                 tone: tone(line.tone),
@@ -554,6 +574,9 @@ pub fn render_jobs(window: &AppWindow, jobs: &[Job<'_>]) {
                 progress_known: line.fraction.is_some(),
                 progress: line.fraction.unwrap_or(0.0),
                 can_cancel: job.can_cancel(),
+                can_clone_settings: job.can_clone_settings(),
+                can_reencode: job.can_reencode(),
+                can_encode_with_pass: job.can_encode_with_pass(),
             }
         })
         .collect();

@@ -75,7 +75,7 @@ impl AppState {
         }
     }
 
-    fn begin_run(&mut self) {
+    pub(super) fn begin_run(&mut self) {
         self.run = Some(Run {
             settings: self.settings.clone(),
             attempted: Vec::new(),
@@ -230,6 +230,8 @@ impl AppState {
                         destination: WirePath::from_path(&item.destination.path),
                         settings: settings.clone(),
                         identity: identity.clone(),
+                        purpose: studio_domain::job::JobPurpose::Encode,
+                        pass_digest: None,
                         pass_artifact: None,
                     },
                     policy: Vec::new(),
@@ -261,7 +263,8 @@ impl AppState {
             facts.frame_count,
             facts.reader == SourceReader::Ffmpeg,
             now,
-        );
+        )
+        .with_purpose(job.purpose);
         if item.transition(Transition::Start).is_err() {
             return;
         }

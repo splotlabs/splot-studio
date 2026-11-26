@@ -15,10 +15,11 @@
 //! documents have no read the engine holds, so no job.
 
 use studio_domain::analysis::{ProblemKind, ScanOutcome};
+use studio_domain::job::JobPurpose;
 
 use crate::activity::Phase as JobPhase;
 use crate::analysis::{Analysis, Document, Phase, ReadEnd};
-use crate::queue::{Item, ItemState};
+use crate::queue::{Ending, Item, ItemState};
 use crate::state::AppState;
 
 /// Where a job is.
@@ -71,6 +72,39 @@ pub struct Job<'a> {
 }
 
 impl Job<'_> {
+    /// The purpose of an encoder job, or absence for an Analyze read.
+    #[must_use]
+    pub fn purpose(&self) -> Option<JobPurpose> {
+        let Work::Convert(item) = self.work else {
+            return None;
+        };
+        item.submitted
+            .as_ref()
+            .map(|submission| submission.job.purpose)
+            .or_else(|| item.attempt().map(|attempt| attempt.job.purpose))
+    }
+
+    /// The job has a captured request that can be copied to the draft.
+    #[must_use]
+    pub fn can_clone_settings(&self) -> bool {
+        matches!(self.work, Work::Convert(item) if item.ending().is_some())
+            && !self.state.is_active()
+    }
+
+    /// The job is an ended encode whose request can be checked and replayed.
+    #[must_use]
+    pub fn can_reencode(&self) -> bool {
+        self.can_clone_settings() && self.purpose() == Some(JobPurpose::Encode)
+    }
+
+    /// The completed job published a first-pass artifact.
+    #[must_use]
+    pub fn can_encode_with_pass(&self) -> bool {
+        self.purpose() == Some(JobPurpose::FirstPass)
+            && matches!(self.work, Work::Convert(item)
+                if matches!(item.ending(), Some(Ending::Completed(report)) if report.pass_digest.is_some()))
+    }
+
     /// Cancel applies: it is running or queued.
     #[must_use]
     pub const fn can_cancel(&self) -> bool {

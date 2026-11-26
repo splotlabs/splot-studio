@@ -43,6 +43,7 @@ use crate::workspace::Workspace;
 
 mod advanced;
 mod preflight;
+mod related;
 
 /// The request id of the startup `Hello`; probes and jobs count from 1.
 const HELLO_ID: u64 = 0;
@@ -60,6 +61,8 @@ pub enum Route {
     Journal(u64),
     /// The Advanced request generation.
     Advanced(u64),
+    /// A related job preparation request.
+    Related(u64),
     /// The preview process, by how many were started before it.
     Preview(u64),
     /// The inspect process, by how many were started before it.
@@ -543,7 +546,9 @@ impl Session {
             return Outcome::nothing();
         }
         let effects = match delivery {
-            Delivery::Advanced(_) | Delivery::JournalSaved(_) => return Outcome::nothing(),
+            Delivery::Advanced(_) | Delivery::JournalSaved(_) | Delivery::Related(_) => {
+                return Outcome::nothing();
+            }
             Delivery::Event(envelope) => self.analysis.event(envelope.request_id, envelope.body),
             Delivery::Pictures(slot) => {
                 // The inspect process sends no pictures.
@@ -582,7 +587,9 @@ impl Session {
             }
             Route::Probe(id) => {
                 let result = match delivery {
-                    Delivery::Advanced(_) | Delivery::JournalSaved(_) => return nothing,
+                    Delivery::Advanced(_) | Delivery::JournalSaved(_) | Delivery::Related(_) => {
+                        return nothing;
+                    }
                     Delivery::Event(e) if e.request_id != id => return nothing,
                     Delivery::Pictures(slot) => {
                         let _ = slot.take();
@@ -629,6 +636,12 @@ impl Session {
                 }
             }
             Route::Advanced(generation) => self.deliver_advanced(generation, delivery),
+            Route::Related(request) => match delivery {
+                Delivery::Related(result) => {
+                    self.dispatch(Intent::RelatedPrepared { request, result }, now)
+                }
+                _ => nothing,
+            },
             Route::Preview(spawn) => self.deliver_preview(spawn, delivery),
             Route::Inspect(spawn) => self.deliver_inspect(spawn, delivery),
         }
@@ -644,7 +657,9 @@ impl Session {
             return self.deliver_preflight(id, delivery, now);
         }
         let input = match delivery {
-            Delivery::Advanced(_) | Delivery::JournalSaved(_) => return nothing,
+            Delivery::Advanced(_) | Delivery::JournalSaved(_) | Delivery::Related(_) => {
+                return nothing;
+            }
             Delivery::Event(e) if e.request_id != id => {
                 eprintln!(
                     "{}: ignoring an event for request {} during job {id}",
@@ -701,7 +716,9 @@ impl Session {
     fn deliver_preview(&mut self, spawn: u64, delivery: Delivery) -> Outcome {
         let current = self.previewer.as_ref().is_some_and(|(n, _)| *n == spawn);
         let effects = match delivery {
-            Delivery::Advanced(_) | Delivery::JournalSaved(_) => return Outcome::nothing(),
+            Delivery::Advanced(_) | Delivery::JournalSaved(_) | Delivery::Related(_) => {
+                return Outcome::nothing();
+            }
             Delivery::Pictures(slot) => match slot.take() {
                 Some(picture) if current => self.preview.picture(picture),
                 _ => Vec::new(),
@@ -803,6 +820,7 @@ impl Session {
                     }
                 }
             }
+            Effect::PrepareRelated { request, job } => self.prepare_related(request, *job, pending),
             Effect::Start { id, job } => self.begin_preflight(id, job, pending),
             Effect::Worker { id, effect } => {
                 if effect == activity::Effect::SendCancel

@@ -157,6 +157,8 @@ pub enum Delivery {
     JournalSaved(Result<(), String>),
     /// The background Advanced client finished fetching options.
     Advanced(AdvancedReply),
+    /// A related job source and settings preflight finished.
+    Related(crate::state::RelatedResolution),
 }
 
 /// The catalog and validation result for one Advanced generation.
@@ -450,7 +452,7 @@ impl EngineStatus {
                 Event::Error { message, .. } => Self::Failed(message),
                 other => Self::Failed(format!("answered Hello with {other:?}")),
             },
-            Delivery::Advanced(_) | Delivery::JournalSaved(_) => {
+            Delivery::Advanced(_) | Delivery::JournalSaved(_) | Delivery::Related(_) => {
                 Self::Failed("The engine did not answer Hello.".into())
             }
             Delivery::Pictures(_) => Self::Failed("answered Hello with a picture".to_owned()),
