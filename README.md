@@ -58,6 +58,11 @@ codec is young.
 - Jobs lists each conversion, stream read, and validation. Stop Validation Batch stops the
   current file and cancels files still waiting. Completed reports stay available until you
   remove them or close Studio. The session holds at most 32 validation jobs.
+- In Analyze, play a supported AV2 document, step through decoded pictures, or seek to
+  an output number. The picture links to the bytes that coded or displayed it. A backward
+  seek can require decoding from the start of the stream. You can cancel the seek.
+  When timing is unavailable, playback uses a labeled 30 fps assumption.
+  A decode error leaves the navigator, syntax, and bytes available.
 - Open a validation result in Analyze to inspect its findings without running validation
   again. From Jobs, export the complete retained report as JSON or plain text. The report
   records scope, interruptions, and omitted findings. When validation runs, the report
@@ -75,8 +80,8 @@ rotation or cropping, RGB or alpha, encrypted streams, network and playlist inpu
 
 - Compare, and more of Analyze. The approved direction is one AV2 workbench with three
   workspaces (Encode, Analyze and Compare) and shared Jobs; see the
-  [roadmap](https://github.com/splotlabs/splot-studio/issues/33). Playback in Analyze and
-  the Compare workspace are planned. A stream read reports no progress until it ends.
+  [roadmap](https://github.com/splotlabs/splot-studio/issues/33). A structural scan reports
+  its result when it ends.
 - Audio, subtitles and chapters are not carried over; the app lists what a file would lose
   and asks before converting. Container output with audio is planned in
   [#12](https://github.com/splotlabs/splot-studio/issues/12).
