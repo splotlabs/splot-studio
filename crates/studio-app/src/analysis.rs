@@ -1024,7 +1024,7 @@ impl Analysis {
                 } else {
                     Position::Unknown
                 };
-                self.select_evidence(at, found, position, pick, offset, out);
+                self.select_evidence(at, found, position, pick, Some(offset), out);
                 if !current {
                     self.position_selection(at, out);
                 }

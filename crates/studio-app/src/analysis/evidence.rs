@@ -489,7 +489,9 @@ impl Analysis {
         doc.evidence.findings.clear();
         doc.evidence.findings_loading = false;
         doc.evidence.findings_error = None;
-        doc.evidence.selected = None;
+        if matches!(doc.evidence.selected, Some(Pick::Finding { .. })) {
+            doc.evidence.selected = None;
+        }
         let id = self.send(
             document_id,
             Asked::Evidence(Request::Validate),
@@ -591,8 +593,8 @@ impl Analysis {
             let offset = match event {
                 SyntaxEvent::Signaled {
                     span: Some(span), ..
-                } => span.start.file_bit / 8,
-                _ => doc.bytes.cursor,
+                } => Some(span.start.file_bit / 8),
+                _ => None,
             };
             let pick = Pick::Syntax {
                 element: *element,
@@ -608,7 +610,7 @@ impl Analysis {
         row: Row,
         position: Position,
         pick: Pick,
-        offset: u64,
+        offset: Option<u64>,
         out: &mut Vec<Effect>,
     ) {
         let doc = &mut self.documents[at];
@@ -626,11 +628,13 @@ impl Analysis {
             place.evidence = doc.evidence.selected;
             place.bytes_shown = doc.bytes.shown;
         }
-        doc.bytes.shown = true;
-        doc.bytes.cursor = offset;
-        if !in_window(doc.bytes.offset, offset) {
-            doc.bytes.offset = line_of(offset);
-            doc.bytes.data = None;
+        if let Some(offset) = offset {
+            doc.bytes.shown = true;
+            doc.bytes.cursor = offset;
+            if !in_window(doc.bytes.offset, offset) {
+                doc.bytes.offset = line_of(offset);
+                doc.bytes.data = None;
+            }
         }
         // A finding and the OBU are one selection, even if both resolve
         // to the same navigator row.

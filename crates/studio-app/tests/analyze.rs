@@ -651,6 +651,8 @@ fn linked_validation_evidence(rig: &mut Rig, scratch: &Scratch, clipboard: &RefC
         rows.row_data(0)
             .is_some_and(|row| row.label == "obu_type" && row.detail == "2 · f(5)")
     );
+    rig.global().invoke_evidence_pick(0);
+    rig.idle("the selected OBU type field");
     rig.global().invoke_evidence_search("".into());
     rig.idle("clear the syntax search");
 
@@ -714,6 +716,12 @@ fn linked_validation_evidence(rig: &mut Rig, scratch: &Scratch, clipboard: &RefC
     rig.idle("the selection before the finding jump");
     assert_eq!(rig.selected(), Some((0, Position::Row(0))));
     assert_eq!(rig.global().get_evidence_tab(), 1);
+    assert!(
+        rig.global()
+            .get_evidence_rows()
+            .iter()
+            .any(|row| { row.selected && row.label == "obu_type" })
+    );
     rig.global().invoke_forward();
     rig.idle("the restored finding");
     assert_eq!(rig.selected(), Some((1, Position::Row(1))));
