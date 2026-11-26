@@ -24,6 +24,7 @@ pub(crate) struct Detail {
     pub fields: Vec<fields::FieldRow>,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) enum Reset<'a> {
     Field(&'a str),
     Group(&'a str),
@@ -82,8 +83,8 @@ pub(crate) fn inspect(
         effective: effective.map_or_else(String::new, |r| display(&r.value)),
         screen: effective
             .filter(|row| {
-                row.screen != Some(row.value.clone())
-                    || row.screen_origin != Some(row.origin.clone())
+                row.screen.as_ref() != Some(&row.value)
+                    || row.screen_origin.as_ref() != Some(&row.origin)
             })
             .and_then(|row| {
                 row.screen.as_ref().map(|screen| {
