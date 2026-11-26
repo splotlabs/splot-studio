@@ -19,7 +19,9 @@ use studio_domain::analysis::{
     AnalysisFailure, DocumentSummary, Element, Framing, KindFilter, LocateTarget,
     MAX_PAGE_ELEMENTS, ObuFact, ProblemKind, RowFilter, ScanOutcome, Span,
 };
+use studio_domain::identity::{IdentityCompletion, IdentityKind};
 use studio_domain::job::WirePath;
+use studio_domain::preview::GrainPolicy;
 use studio_domain::protocol::{
     BuildIdentity, Command, Envelope, ErrorCode, Event, read_message, write_message,
 };
@@ -1035,6 +1037,54 @@ fn a_document_closed_while_read_frees_its_slot() -> TestResult {
             Some(Event::AnalysisOpened { document: 5, .. })
         ),
         "{answers:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn identity_pages_require_the_selected_scan_and_source() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("identity.ivf");
+    fs::write(
+        &path,
+        include_bytes!("inspect/fixtures/syn-bridge-celu-64x64.ivf"),
+    )?;
+    let mut inspect = Inspect::spawn()?;
+    inspect.open(1, &path)?;
+
+    let scan = inspect.next_id;
+    assert!(matches!(
+        inspect.ask(Command::AnalysisIdentityScan {
+            document: 1,
+            grain: GrainPolicy::Skip,
+        })?,
+        Event::AnalysisIdentityScanned { document: 1, summary }
+            if summary.completion == IdentityCompletion::Complete && summary.matches_structure
+    ));
+    let output = |scan| Command::AnalysisIdentityPage {
+        document: 1,
+        scan,
+        first: 0,
+        count: 1,
+        kind: IdentityKind::Output,
+    };
+    assert!(matches!(
+        inspect.ask(output(scan))?,
+        Event::AnalysisIdentityPage { document: 1, scan: current, page }
+            if current == scan && page.rows.len() == 1
+    ));
+    assert_eq!(
+        failure(&inspect.ask(output(scan - 1))?),
+        Some(AnalysisFailure::InvalidRequest)
+    );
+    fs::write(&path, [])?;
+    assert_eq!(
+        failure(&inspect.ask(output(scan))?),
+        Some(AnalysisFailure::SourceChanged)
+    );
+    assert_eq!(
+        failure(&inspect.ask(output(scan))?),
+        Some(AnalysisFailure::UnknownDocument)
     );
     Ok(())
 }

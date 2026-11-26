@@ -14,8 +14,8 @@
 //! document evidence while the work thread serves foreground queries.
 
 mod batch;
-mod identity;
 pub mod document;
+mod identity;
 mod report;
 mod syntax;
 mod validation;
@@ -30,7 +30,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use studio_domain::analysis::{AnalysisFailure, LocateTarget, RowFilter, ScanOutcome, SourceDigest};
+use studio_domain::analysis::{
+    AnalysisFailure, LocateTarget, RowFilter, ScanOutcome, SourceDigest,
+};
 use studio_domain::identity::IdentityKind;
 use studio_domain::job::WirePath;
 use studio_domain::preview::GrainPolicy;
@@ -162,19 +164,28 @@ enum EvidenceRequest {
 impl EvidenceRequest {
     fn pending(&self, document: u64, id: u64) -> Pending {
         match self {
-            Self::Validate(_) => Pending::Validation { document, validation: id },
+            Self::Validate(_) => Pending::Validation {
+                document,
+                validation: id,
+            },
             Self::Identity(_) => Pending::Identity { document, scan: id },
         }
     }
 
     fn prepare(self, doc: &mut Document, id: u64) -> Result<EvidenceTask, Refusal> {
         Ok(match self {
-            Self::Validate(settings) => EvidenceTask::Validate(doc.prepare_validation(id)?, settings),
+            Self::Validate(settings) => {
+                EvidenceTask::Validate(doc.prepare_validation(id)?, settings)
+            }
             Self::Identity(grain) => {
                 let file = doc.open_evidence_source()?;
                 let index = doc.begin_identity(id, grain)?;
                 let digest = doc.summary().digest.clone();
-                EvidenceTask::Identity { file, index, digest }
+                EvidenceTask::Identity {
+                    file,
+                    index,
+                    digest,
+                }
             }
         })
     }
@@ -195,9 +206,11 @@ impl EvidenceTask {
             Self::Validate(mut file, settings) => {
                 EvidenceResult::Validation(validation::validate(&mut file, &settings, cancelled))
             }
-            Self::Identity { mut file, index, digest } => {
-                EvidenceResult::Identity(index.scan(&mut file, digest.as_deref(), cancelled))
-            }
+            Self::Identity {
+                mut file,
+                index,
+                digest,
+            } => EvidenceResult::Identity(index.scan(&mut file, digest.as_deref(), cancelled)),
         }
     }
 }
@@ -206,7 +219,7 @@ impl EvidenceTask {
 enum EvidenceResult {
     Validation(ValidationResult),
     Identity(Result<(), Refusal>),
-    Aborted,
+    Aborted(Pending),
 }
 
 impl EvidenceResult {
@@ -214,15 +227,27 @@ impl EvidenceResult {
         match self {
             Self::Validation(result) => {
                 let (summary, total) = doc.complete_validation(id, result)?;
-                Ok(Event::AnalysisValidated { document, summary: Box::new(summary), total })
+                Ok(Event::AnalysisValidated {
+                    document,
+                    summary: Box::new(summary),
+                    total,
+                })
             }
             Self::Identity(result) => {
                 let summary = doc.complete_identity(id, result)?;
-                Ok(Event::AnalysisIdentityScanned { document, summary: Box::new(summary) })
+                Ok(Event::AnalysisIdentityScanned {
+                    document,
+                    summary: Box::new(summary),
+                })
             }
-            Self::Aborted => {
-                doc.drop_identity(id);
-                Err(Refusal::new(AnalysisFailure::Io, "The evidence thread stopped."))
+            Self::Aborted(operation) => {
+                if matches!(operation, Pending::Identity { .. }) {
+                    doc.drop_identity(id);
+                }
+                Err(Refusal::new(
+                    AnalysisFailure::Io,
+                    "The evidence thread stopped.",
+                ))
             }
         }
     }
@@ -252,7 +277,9 @@ enum Pending {
 impl Pending {
     fn belongs_to(self, member: u64) -> bool {
         match self {
-            Self::Validation { document, .. } | Self::Identity { document, .. } => document == member,
+            Self::Validation { document, .. } | Self::Identity { document, .. } => {
+                document == member
+            }
             _ => false,
         }
     }
@@ -434,10 +461,22 @@ fn serve<W: Write>(
                 queue_open(shared, requests, id, document, source, true);
             }
             Command::AnalysisValidate { document, settings } => {
-                queue_evidence(shared, requests, id, document, EvidenceRequest::Validate(settings));
+                queue_evidence(
+                    shared,
+                    requests,
+                    id,
+                    document,
+                    EvidenceRequest::Validate(settings),
+                );
             }
             Command::AnalysisIdentityScan { document, grain } => {
-                queue_evidence(shared, requests, id, document, EvidenceRequest::Identity(grain));
+                queue_evidence(
+                    shared,
+                    requests,
+                    id,
+                    document,
+                    EvidenceRequest::Identity(grain),
+                );
             }
             Command::AnalysisCancelIdentity { document, scan } => {
                 shared.cancel(id, Pending::Identity { document, scan });
@@ -520,9 +559,20 @@ fn queued_request(command: &Command) -> Option<(u64, Request)> {
                 count,
             }),
         ),
-        Command::AnalysisIdentityPage { document, scan, first, count, kind } => (
+        Command::AnalysisIdentityPage {
             document,
-            Request::Inspect(Query::IdentityPage { scan, first, count, kind }),
+            scan,
+            first,
+            count,
+            kind,
+        } => (
+            document,
+            Request::Inspect(Query::IdentityPage {
+                scan,
+                first,
+                count,
+                kind,
+            }),
         ),
         Command::AnalysisClose { document } => (document, Request::Close),
         _ => return None,
@@ -699,8 +749,9 @@ fn work<'scope, W: Write + Send>(
             Request::Evidence(request) => {
                 let operation = request.pending(document, id);
                 let result = match open {
-                    Some(_) if matches!(request, EvidenceRequest::Validate(_))
-                        && scans.iter().any(|scan| scan.document == document) =>
+                    Some(_)
+                        if matches!(request, EvidenceRequest::Validate(_))
+                            && scans.iter().any(|scan| scan.document == document) =>
                     {
                         Err(scan_pending())
                     }
@@ -727,8 +778,12 @@ fn work<'scope, W: Write + Send>(
                                 let result = catch_unwind(AssertUnwindSafe(|| {
                                     task.run(&|| shared.cancelled(operation))
                                 }))
-                                .unwrap_or(EvidenceResult::Aborted);
-                                let _ = replies.send((id, document, Request::EvidenceDone(Box::new(result))));
+                                .unwrap_or(EvidenceResult::Aborted(operation));
+                                let _ = replies.send((
+                                    id,
+                                    document,
+                                    Request::EvidenceDone(Box::new(result)),
+                                ));
                             });
                         match job {
                             Ok(job) => {
@@ -750,7 +805,14 @@ fn work<'scope, W: Write + Send>(
                         }
                     }
                     Err(error) => match open {
-                        Some(at) => drop_evidence_source(shared, &mut documents, &mut scans, at, document, error),
+                        Some(at) => drop_evidence_source(
+                            shared,
+                            &mut documents,
+                            &mut scans,
+                            at,
+                            document,
+                            error,
+                        ),
                         None => failed(document, error),
                     },
                 };
@@ -765,7 +827,14 @@ fn work<'scope, W: Write + Send>(
                 let answer = match open {
                     Some(at) => match result.finish(&mut documents[at].1, document, id) {
                         Ok(event) => event,
-                        Err(error) => drop_evidence_source(shared, &mut documents, &mut scans, at, document, error),
+                        Err(error) => drop_evidence_source(
+                            shared,
+                            &mut documents,
+                            &mut scans,
+                            at,
+                            document,
+                            error,
+                        ),
                     },
                     None => failed(document, unknown()),
                 };
@@ -786,7 +855,11 @@ fn work<'scope, W: Write + Send>(
             Request::Close => match open {
                 Some(at) => {
                     documents.remove(at);
-                    cancel_evidence(shared, document, active_evidence.as_ref().map(|(op, _)| *op));
+                    cancel_evidence(
+                        shared,
+                        document,
+                        active_evidence.as_ref().map(|(op, _)| *op),
+                    );
                     abandon_scan(
                         shared,
                         &mut scans,
@@ -899,13 +972,16 @@ fn serve_document(
                 events: page.entries,
             }
         }
-        Query::IdentityPage { scan, first, count, kind } => {
-            Event::AnalysisIdentityPage {
-                document,
-                scan,
-                page: Box::new(doc.identity_page(scan, kind, first, count)?),
-            }
-        }
+        Query::IdentityPage {
+            scan,
+            first,
+            count,
+            kind,
+        } => Event::AnalysisIdentityPage {
+            document,
+            scan,
+            page: Box::new(doc.identity_page(scan, kind, first, count)?),
+        },
         Query::Findings {
             validation,
             first,
@@ -1003,7 +1079,12 @@ fn start_scan<W: Write>(
                     reported: Instant::now(),
                 });
             } else {
-                settle_open(shared, id, document, Event::AnalysisOpened { document, summary });
+                settle_open(
+                    shared,
+                    id,
+                    document,
+                    Event::AnalysisOpened { document, summary },
+                );
             }
         }
         Err(error) => settle_open(shared, id, document, failed(document, error)),

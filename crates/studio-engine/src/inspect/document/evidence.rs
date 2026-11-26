@@ -134,10 +134,19 @@ impl Document {
     }
 
     pub(in crate::inspect) fn begin_identity(
-        &mut self, request: u64, grain: GrainPolicy,
+        &mut self,
+        request: u64,
+        grain: GrainPolicy,
     ) -> Result<IdentityIndex, Refusal> {
-        if self.evidence.identity.as_ref().is_some_and(|(id, _)| request <= *id) {
-            return Err(invalid("Use a request ID greater than the last identity scan request ID."));
+        if self
+            .evidence
+            .identity
+            .as_ref()
+            .is_some_and(|(id, _)| request <= *id)
+        {
+            return Err(invalid(
+                "Use a request ID greater than the last identity scan request ID.",
+            ));
         }
         let index = IdentityIndex::new(grain, self.summary.fingerprint)?;
         self.evidence.identity = Some((request, index.clone()));
@@ -145,7 +154,12 @@ impl Document {
     }
 
     pub(in crate::inspect) fn drop_identity(&mut self, request: u64) {
-        if self.evidence.identity.as_ref().is_some_and(|(id, _)| request == *id) {
+        if self
+            .evidence
+            .identity
+            .as_ref()
+            .is_some_and(|(id, _)| request == *id)
+        {
             self.evidence.identity = None;
         }
     }
@@ -159,22 +173,49 @@ impl Document {
     }
 
     pub(in crate::inspect) fn complete_identity(
-        &mut self, request: u64, result: Result<(), Refusal>,
+        &mut self,
+        request: u64,
+        result: Result<(), Refusal>,
     ) -> Result<IdentitySummary, Refusal> {
         self.check()?;
         if let Err(error) = result {
             self.drop_identity(request);
             return Err(error);
         }
-        Ok(self.identity_index(request)?.summary())
+        let mut summary = self.identity_index(request)?.summary();
+        self.verify_identity(&mut summary)?;
+        Ok(summary)
     }
 
     pub(in crate::inspect) fn identity_page(
-        &self, request: u64, kind: IdentityKind, first: u64, count: u32,
+        &self,
+        request: u64,
+        kind: IdentityKind,
+        first: u64,
+        count: u32,
     ) -> Result<IdentityPage, Refusal> {
-        let page = self.identity_index(request)?.page(kind, first, count)?;
+        let mut page = self.identity_index(request)?.page(kind, first, count)?;
         self.check()?;
+        self.verify_identity(&mut page.summary)?;
         Ok(page)
+    }
+
+    fn verify_identity(&self, summary: &mut IdentitySummary) -> Result<(), Refusal> {
+        let Some((structure, decoded)) =
+            self.summary.digest.as_deref().zip(summary.digest.as_ref())
+        else {
+            return Ok(());
+        };
+        if structure.bytes == decoded.bytes {
+            if structure != decoded {
+                return Err(Refusal::new(
+                    AnalysisFailure::SourceChanged,
+                    "The source bytes changed between structure and identity scans.",
+                ));
+            }
+            summary.matches_structure = decoded.bytes == self.summary.fingerprint.len;
+        }
+        Ok(())
     }
 
     pub(in crate::inspect) fn complete_validation(
