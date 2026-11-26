@@ -389,8 +389,6 @@ component JobList inherits VerticalLayout {
     callback action(int, JobAction);
 
     spacing: Tokens.space-3;
-    // Room for the scroll bar beside the state words.
-    padding-right: Tokens.space-4;
     accessible-role: list;
     accessible-label: "Jobs";
 
@@ -2580,6 +2578,9 @@ export component AppWindow inherits Window {
     jobs-popup := PopupWindow {
         close-policy: close-on-click-outside;
         width: min(420px, root.width - 2 * Tokens.space-3);
+        // Slint sets the popup size when it opens. Keep the viewport large enough
+        // for a preview to appear later, and scroll its content within it.
+        height: min(480px, root.height - 2 * Tokens.space-6);
         x: root.width - self.width - Tokens.space-3;
         y: Tokens.space-6;
 
@@ -2631,79 +2632,74 @@ export component AppWindow inherits Window {
                             : "Encodes, first passes and stream reads run while the window is open.";
                     }
 
-                    if root.job-can-generate-pass && root.job-related-title == "": HorizontalLayout {
-                        alignment: start;
-                        LinkButton {
-                            text: "Generate first pass…";
-                            description: "Review a first pass for the selected source and its variable bitrate settings";
-                            clicked => { root.job-generate-pass(); }
-                        }
-                    }
-
-                    if root.job-related-title != "": VerticalLayout {
-                        spacing: Tokens.space-2;
-                        Label {
-                            text: root.job-related-title;
-                            wrap: word-wrap;
-                        }
-
-                        HorizontalLayout {
-                            alignment: start;
-                            spacing: Tokens.space-2;
-
-                            if root.job-related-ready: Button {
-                                text: "Confirm";
-                                accessible-label: "Confirm " + root.job-related-title;
-                                clicked => { root.job-related-approve(); }
-                            }
-
-                            LinkButton {
-                                text: root.job-related-failed ? "Dismiss" : "Cancel";
-                                description: "Close this job preview";
-                                init => { self.focus(); }
-                                clicked => { root.job-related-decline(); }
-                            }
-                        }
-
-                        if root.job-related-detail != "": ScrollView {
-                            height: min(108px, max(50px, related-detail.preferred-height));
-                            horizontal-scrollbar-policy: always-off;
-                            content-width: self.visible-width;
-                            content-height: related-detail.preferred-height;
-
-                            related-detail := Caption {
-                                width: parent.width - Tokens.space-6;
-                                text: root.job-related-detail;
-                                color: root.job-related-failed ? Tokens.error : Tokens.text-secondary;
-                                wrap: char-wrap;
-                            }
-                        }
-                    }
-
-                    if root.jobs.length > 0: ScrollView {
-                        height: min(job-list.preferred-height,
-                            max(60px, root.height - (root.job-related-title == "" ? 182px : 352px)));
-                        content-height: job-list.preferred-height;
+                    ScrollView {
+                        min-height: 0px;
+                        content-width: self.visible-width;
+                        content-height: jobs-body.preferred-height;
                         horizontal-scrollbar-policy: always-off;
 
-                        job-list := JobList {
+                        jobs-body := VerticalLayout {
                             width: parent.visible-width;
                             height: self.preferred-height;
-                            jobs: root.jobs;
-                            actions-enabled: root.job-actions-enabled;
-                            // Closing first would drop this handler before it asks.
-                            show(i) => {
-                                root.job-show(i);
-                                jobs-popup.close();
+                            spacing: Tokens.space-3;
+                            padding-right: Tokens.space-4;
+
+                            if root.job-can-generate-pass && root.job-related-title == "": HorizontalLayout {
+                                alignment: start;
+                                LinkButton {
+                                    text: "Generate first pass…";
+                                    description: "Review a first pass for the selected source and its variable bitrate settings";
+                                    clicked => { root.job-generate-pass(); }
+                                }
                             }
-                            // The row's Cancel goes away once the job stops;
-                            // the focus goes to Close, not out of the list.
-                            cancel(i) => {
-                                root.job-cancel(i);
-                                jobs-close.focus();
+
+                            if root.job-related-title != "": VerticalLayout {
+                                spacing: Tokens.space-2;
+                                Label {
+                                    text: root.job-related-title;
+                                    wrap: word-wrap;
+                                }
+
+                                HorizontalLayout {
+                                    alignment: start;
+                                    spacing: Tokens.space-2;
+
+                                    if root.job-related-ready: Button {
+                                        text: "Confirm";
+                                        accessible-label: "Confirm " + root.job-related-title;
+                                        clicked => { root.job-related-approve(); }
+                                    }
+
+                                    LinkButton {
+                                        text: root.job-related-failed ? "Dismiss" : "Cancel";
+                                        description: "Close this job preview";
+                                        init => { self.focus(); }
+                                        clicked => { root.job-related-decline(); }
+                                    }
+                                }
+
+                                if root.job-related-detail != "": Caption {
+                                    text: root.job-related-detail;
+                                    color: root.job-related-failed ? Tokens.error : Tokens.text-secondary;
+                                    wrap: char-wrap;
+                                }
                             }
-                            action(i, action) => {
-                                root.job-action(i, action);
+
+                            if root.jobs.length > 0: JobList {
+                                jobs: root.jobs;
+                                actions-enabled: root.job-actions-enabled;
+                                // Closing first would remove the handler.
+                                show(i) => {
+                                    root.job-show(i);
+                                    jobs-popup.close();
+                                }
+                                cancel(i) => {
+                                    root.job-cancel(i);
+                                    jobs-close.focus();
+                                }
+                                action(i, action) => {
+                                    root.job-action(i, action);
+                                }
                             }
                         }
                     }

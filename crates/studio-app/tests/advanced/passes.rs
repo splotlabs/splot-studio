@@ -3,14 +3,16 @@
 
 //! First pass, final pass, replay and Clone Settings through the desktop controller.
 
+use std::cell::Cell;
 use std::error::Error;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use slint::language::ColorScheme;
-use slint::platform::{WindowEvent, update_timers_and_animations};
-use slint::{ComponentHandle, Model};
+use slint::platform::{Key, WindowEvent, update_timers_and_animations};
+use slint::{ComponentHandle, LogicalSize, Model, ModelRc, SharedString, VecModel};
 use studio_app::journal::{JournalItem, JournalState};
 use studio_app::{JobAction, Palette};
 use studio_domain::job::{JobPurpose, JobReport, JobSpec};
@@ -56,8 +58,6 @@ fn snapshot(rig: &Rig, title: &str) -> Result<(), Box<dyn Error>> {
         "Re-encode" => ("replay-light-1x.ppm", ColorScheme::Light, 1.0),
         _ => return Ok(()),
     };
-    let folder = PathBuf::from(folder);
-    fs::create_dir_all(&folder)?;
     let main = rig.window();
     let window = main.window();
     let palette = main.global::<Palette>();
@@ -70,13 +70,19 @@ fn snapshot(rig: &Rig, title: &str) -> Result<(), Box<dyn Error>> {
     });
     window.set_size(logical);
     update_timers_and_animations();
-    let size = window.size();
-    let pixels = rig.pixels();
+    let result = write_snapshot(rig, &PathBuf::from(folder), name);
     window.dispatch_event(WindowEvent::ScaleFactorChanged {
         scale_factor: old_scale,
     });
     window.set_size(logical);
     palette.set_color_scheme(previous);
+    result
+}
+
+fn write_snapshot(rig: &Rig, folder: &Path, name: &str) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(folder)?;
+    let size = rig.window().window().size();
+    let pixels = rig.pixels();
     let mut image = std::io::BufWriter::new(fs::File::create(folder.join(name))?);
     write!(image, "P6\n{} {}\n255\n", size.width, size.height)?;
     for pixel in pixels {
@@ -221,5 +227,67 @@ pub(super) fn workflow(rig: Rig, scratch: &Path) -> Result<(), Box<dyn Error>> {
     assert!(fs::read(artifact_path)? == artifact_bytes);
     assert!(fs::read(final_path)? == final_bytes);
     assert!(fs::read(source)? == y4m());
+    long_jobs(&rig)?;
+    Ok(())
+}
+
+fn long_jobs(rig: &Rig) -> Result<(), Box<dyn Error>> {
+    let window = rig.window();
+    let native = window.window();
+    let press = |key: Key| {
+        let text: SharedString = key.into();
+        native.dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+        native.dispatch_event(WindowEvent::KeyReleased { text });
+    };
+    const ROWS: usize = 16;
+    let template = window
+        .get_jobs()
+        .row_data(0)
+        .ok_or("The Jobs list is empty.")?;
+    let shown = Rc::new(Cell::new(None));
+    window.on_job_show({
+        let shown = shown.clone();
+        move |index| shown.set(Some(index))
+    });
+    // Test only the list layout here. Name each copy so the capture shows the last row.
+    let rows = (1..=ROWS)
+        .map(|number| {
+            let mut row = template.clone();
+            row.name = format!("Keyboard row {number:02}").into();
+            row.can_cancel = false;
+            row.can_clone_settings = false;
+            row.can_reencode = false;
+            row.can_encode_with_pass = false;
+            row
+        })
+        .collect::<Vec<_>>();
+    let folder = std::env::var_os("SPLOT_STUDIO_TEST_SNAPSHOTS").map(PathBuf::from);
+    window.set_max_window_width(640.0);
+    press(Key::Escape);
+    for (scheme, scale, label) in [
+        (ColorScheme::Light, 1.0, "jobs-keyboard-light-1x.ppm"),
+        (ColorScheme::Dark, 2.0, "jobs-keyboard-dark-2x.ppm"),
+    ] {
+        shown.set(None);
+        window.global::<Palette>().set_color_scheme(scheme);
+        native.dispatch_event(WindowEvent::ScaleFactorChanged {
+            scale_factor: scale,
+        });
+        native.set_size(LogicalSize::new(640.0, 600.0));
+        update_timers_and_animations();
+        window.set_jobs(ModelRc::new(VecModel::from(rows.clone())));
+        window.invoke_show_jobs();
+        for _ in 0..ROWS {
+            press(Key::Tab);
+        }
+        rig.until("the Jobs list to scroll to the focused action", || {
+            !native.has_active_animations()
+        });
+        if let Some(folder) = &folder {
+            write_snapshot(rig, folder, label)?;
+        }
+        press(Key::Return);
+        assert_eq!(shown.get(), Some(i32::try_from(ROWS - 1)?));
+    }
     Ok(())
 }
