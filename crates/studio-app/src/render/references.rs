@@ -89,8 +89,8 @@ fn render(
     view.set_busy(busy);
     view.set_output(output.into());
     let Some(evidence) = evidence else {
-        view.set_frame(Default::default());
-        view.set_context(Default::default());
+        view.set_frame("".into());
+        view.set_context("".into());
         view.set_links(model(Vec::new()));
         view.set_slots(model(Vec::new()));
         return;

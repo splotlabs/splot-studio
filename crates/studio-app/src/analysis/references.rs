@@ -74,9 +74,11 @@ impl Document {
     }
 
     pub(crate) fn reference_timeline(&self) -> Option<&TimelineSelection> {
-        (self.layer_decode_selection() == LayerDecodeSelection::Default)
-            .then(|| self.timeline.selection())
-            .flatten()
+        if self.layer_decode_selection() == LayerDecodeSelection::Default {
+            self.timeline.selection()
+        } else {
+            None
+        }
     }
 }
 

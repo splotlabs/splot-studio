@@ -1495,9 +1495,9 @@ impl Analysis {
         });
         doc.evidence.tab = place.evidence_tab;
         doc.bytes.shown = place.bytes_shown;
-        doc.layers.shown = false;
         let mut filter = None;
         if let Some(reference) = place.reference {
+            doc.layers.shown = false;
             if doc.layer_decode_selection() != reference.selection {
                 doc.layers.selection = reference.selection;
                 doc.layers.decode = None;
