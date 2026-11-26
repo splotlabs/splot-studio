@@ -112,22 +112,17 @@ component SettingField inherits VerticalLayout {
     spacing: Tokens.space-1;
     changed item => { root.sync-model(); }
     changed option-key => { root.sync-model(); }
-    changed focus-request => {
-        if root.focus-request > 0 {
-            if text-field.enabled { text-field.focus(); }
-            if choice-field.enabled { choice-field.focus(); }
-            if action-field.enabled { action-field.focus(); }
-        }
-    }
-
     if root.item.kind != "action": Caption {
         text: root.item.label;
     }
 
-    text-field := LineEdit {
-        visible: root.item.kind == "text";
-        enabled: root.editable && self.visible;
-        height: self.visible ? max(self.preferred-height, Tokens.control-height) : 0px;
+    if root.item.kind == "text": LineEdit {
+        enabled: root.editable;
+        min-height: Tokens.control-height;
+        property <int> focus-trigger: root.focus-request;
+        changed focus-trigger => {
+            if self.focus-trigger > 0 && self.enabled { self.focus(); }
+        }
         font-size: Tokens.type-caption * 1rem;
         text <=> root.editor-text;
         accessible-label: root.item.label;
@@ -146,10 +141,13 @@ component SettingField inherits VerticalLayout {
         }
     }
 
-    choice-field := ComboBox {
-        visible: root.item.kind == "choice";
-        enabled: root.editable && self.visible;
-        height: self.visible ? max(self.preferred-height, Tokens.control-height) : 0px;
+    if root.item.kind == "choice": ComboBox {
+        enabled: root.editable;
+        min-height: Tokens.control-height;
+        property <int> focus-trigger: root.focus-request;
+        changed focus-trigger => {
+            if self.focus-trigger > 0 && self.enabled { self.focus(); }
+        }
         model: root.item.choices;
         current-value <=> root.choice-text;
         accessible-label: root.item.label;
@@ -157,10 +155,13 @@ component SettingField inherits VerticalLayout {
         selected(value) => { root.committed(value); }
     }
 
-    action-field := Button {
-        visible: root.item.kind == "action";
-        enabled: root.editable && self.visible;
-        height: self.visible ? max(self.preferred-height, Tokens.control-height) : 0px;
+    if root.item.kind == "action": Button {
+        enabled: root.editable;
+        min-height: Tokens.control-height;
+        property <int> focus-trigger: root.focus-request;
+        changed focus-trigger => {
+            if self.focus-trigger > 0 && self.enabled { self.focus(); }
+        }
         text: root.item.label;
         accessible-description: root.item.help;
         clicked => { root.committed(root.item.text); }
@@ -276,7 +277,6 @@ export component AdvancedEditor inherits VerticalLayout {
     if root.preset-preview != "": VerticalLayout {
         spacing: Tokens.space-1;
         Label { text: "Preset differences"; }
-        Caption { text: root.preset-preview; }
         HorizontalLayout {
             spacing: Tokens.space-2;
             alignment: start;
@@ -290,6 +290,19 @@ export component AdvancedEditor inherits VerticalLayout {
                 clicked => { root.cancel-preset(); }
             }
         }
+
+        preview-scroll := ScrollView {
+            height: min(116px, max(50px, differences.preferred-height + 4px));
+            horizontal-scrollbar-policy: always-off;
+            content-width: self.visible-width;
+            content-height: differences.preferred-height;
+
+            differences := Caption {
+                width: preview-scroll.visible-width - Tokens.space-6;
+                text: root.preset-preview;
+                wrap: char-wrap;
+            }
+        }
     }
 
     HorizontalLayout {
@@ -301,11 +314,12 @@ export component AdvancedEditor inherits VerticalLayout {
             background: Tokens.surface;
             border-radius: Tokens.radius-medium;
 
-            ScrollView {
+            index-scroll := ScrollView {
                 horizontal-scrollbar-policy: always-off;
+                content-width: self.visible-width;
                 content-height: index-layout.preferred-height;
                 index-layout := VerticalLayout {
-                    width: parent.width;
+                    width: index-scroll.visible-width - Tokens.space-4;
                     height: self.preferred-height;
                     alignment: start;
                     padding: Tokens.space-2;
@@ -333,15 +347,15 @@ export component AdvancedEditor inherits VerticalLayout {
             }
         }
 
-        ScrollView {
+        detail-scroll := ScrollView {
             horizontal-stretch: 1;
             horizontal-scrollbar-policy: always-off;
+            content-width: self.visible-width;
             content-height: detail.preferred-height;
 
             detail := VerticalLayout {
-                width: parent.width;
+                width: detail-scroll.visible-width - Tokens.space-6;
                 height: self.preferred-height;
-                padding-right: Tokens.space-2;
                 alignment: start;
                 spacing: Tokens.space-2;
 

@@ -1130,8 +1130,16 @@ export component AppWindow inherits Window {
     property <keys> analyze-keys: @keys(Control + Shift + O);
     property <bool> has-source: root.view-mode != ViewMode.empty;
     property <bool> job-active: root.job-view == JobView.running || root.job-view == JobView.cancelling;
-    property <length> main-width: 416px;
-    property <length> advanced-width: 470px;
+    property <length> main-width: root.show-advanced && !root.compact-advanced
+        ? min(416px, root.advanced-window-width - 540px) : 416px;
+    property <bool> show-advanced: root.advanced-open && root.workspace == WorkspaceView.encode;
+    property <length> advanced-window-width: min(960px, root.max-window-width);
+    property <bool> compact-advanced: root.show-advanced && root.advanced-window-width < 900px;
+    property <length> scroll-gutter: Tokens.space-6;
+    property <length> advanced-card-width: root.advanced-window-width - root.scroll-gutter;
+    property <length> advanced-content-width: root.advanced-card-width - 2 * root.card-padding;
+    property <length> advanced-width: root.compact-advanced ? root.advanced-content-width
+        : root.advanced-content-width - root.main-width - 2 * root.card-padding - 1px;
     property <length> card-padding: Tokens.space-6;
     property <length> form-label-width: 64px;
     property <bool> show-settings: !(root.view-mode == ViewMode.single && root.job-view == JobView.completed);
@@ -1156,7 +1164,8 @@ export component AppWindow inherits Window {
     property <length> visible-content-height: min(content.preferred-height, max(Tokens.space-8 * 4, root.max-window-height - root.fit-offset));
     property <length> fit-offset;
     out property <length> fitted-height: frame.absolute-position.y + min(content.preferred-height, max(Tokens.space-8 * 4, root.max-window-height - frame.absolute-position.y));
-    out property <length> fitted-width: min(content.preferred-width, root.max-window-width);
+    out property <length> fitted-width: root.show-advanced ? root.advanced-window-width
+        : min(content.preferred-width, root.max-window-width);
     property <length> fit-height;
     // Rust re-asserts the fitted size: a compositor may answer an earlier
     // request after a newer one and leave the window at the old size.
@@ -1240,12 +1249,12 @@ export component AppWindow inherits Window {
         max-height: root.visible-content-height;
 
         card-scroll := ScrollView {
-            content-width: content.preferred-width;
+            content-width: root.show-advanced ? root.advanced-card-width : content.preferred-width;
             content-height: content.preferred-height;
-            horizontal-scrollbar-policy: as-needed;
+            horizontal-scrollbar-policy: root.show-advanced ? always-off : as-needed;
 
                 content := VerticalLayout {
-                    width: self.preferred-width;
+                    width: root.show-advanced ? root.advanced-card-width : self.preferred-width;
                     height: self.preferred-height;
                     padding-left: root.card-padding;
                     padding-right: root.card-padding;
@@ -1292,7 +1301,7 @@ export component AppWindow inherits Window {
                     // or focus and is not in the accessibility tree.
                     workspaces := Rectangle {
                         property <bool> analyze: root.workspace == WorkspaceView.analyze;
-                        property <length> shown-width: self.analyze ? analyze-view.preferred-width : encode-view.preferred-width;
+                        property <length> shown-width: self.analyze ? analyze-view.preferred-width : encode-view.width;
                         property <length> shown-height: self.analyze ? analyze-view.preferred-height : encode-view.preferred-height;
                         min-width: self.shown-width;
                         preferred-width: self.shown-width;
@@ -1316,15 +1325,15 @@ export component AppWindow inherits Window {
                     encode-view := HorizontalLayout {
                         x: 0;
                         y: 0;
-                        width: self.preferred-width;
+                        width: root.show-advanced ? root.advanced-content-width : self.preferred-width;
                         height: self.preferred-height;
                         visible: !parent.analyze;
                         alignment: start;
                         accessible-role: main;
                         accessible-label: root.workspace-title;
 
-                        // Simple column
-                        VerticalLayout {
+                        // The compact Advanced panel replaces Simple. The wide panel sits beside it.
+                        if !root.compact-advanced: VerticalLayout {
                             width: root.main-width;
                             spacing: Tokens.space-4;
                             alignment: start;
@@ -2026,12 +2035,12 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // Advanced column: opens to the right of the simple one.
+                        // Advanced stays in the same viewport at either width.
                         if root.advanced-open: HorizontalLayout {
                                 spacing: root.card-padding;
-                                padding-left: root.card-padding;
+                                padding-left: root.compact-advanced ? 0px : root.card-padding;
 
-                                Rectangle {
+                                if !root.compact-advanced: Rectangle {
                                     width: 1px;
                                     background: Tokens.border;
                                 }
@@ -2042,6 +2051,16 @@ export component AppWindow inherits Window {
                                     alignment: start;
                                     accessible-role: groupbox;
                                     accessible-label: "Advanced";
+
+                                    if root.compact-advanced: HorizontalLayout {
+                                        alignment: start;
+
+                                        LinkButton {
+                                            text: "‹ Simple";
+                                            description: "Return to Simple. Keep the current configuration.";
+                                            clicked => { root.advanced-open = false; }
+                                        }
+                                    }
 
                                     VerticalLayout {
                                         spacing: Tokens.space-1;
