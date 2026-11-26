@@ -402,8 +402,8 @@ fn recovered_batch_retries_with_its_frozen_settings_after_global_edits() {
     };
     h.dispatch(keyint(3));
     h.dispatch(Intent::ConvertRequested);
-    h.pump_until("the first attempt starts", JOB_TIMEOUT, |s| {
-        s.items()[0].state() == ItemState::Running
+    h.pump_until("the first job opens its output", JOB_TIMEOUT, |s| {
+        s.items()[0].attempt().is_some_and(|a| a.partial.is_some())
     });
     let first = h.state().items()[0]
         .attempt()
