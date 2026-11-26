@@ -393,7 +393,7 @@ pub enum AnalysisFailure {
     /// No open document has this id: it was never opened in this process,
     /// or it was closed, cancelled or dropped after a source change.
     UnknownDocument,
-    /// The file is neither IVF nor an AV2 Annex B stream.
+    /// The engine cannot inspect the source format or use the supplied external syntax.
     Unsupported,
     /// The file changed or was replaced since it was opened. The document
     /// is closed; open the file again.

@@ -3,7 +3,7 @@
 
 use std::sync::atomic::AtomicBool;
 
-use splot_validate::{ExternalHlsMode, ExternalHlsObjects, ValidationOptions};
+use splot_validate::{ExternalHlsError, ExternalHlsMode, ExternalHlsObjects, ValidationOptions};
 use studio_domain::analysis::AnalysisFailure;
 use studio_domain::validation::{ContextIdentity, MAX_EXTERNAL_HLS_BYTES};
 
@@ -22,10 +22,11 @@ pub(super) fn options(
         ));
     }
     let objects = ExternalHlsObjects::from_annex_b(bytes).map_err(|error| {
-        Refusal::new(
-            AnalysisFailure::InvalidRequest,
-            format!("Invalid external AV2 context. {error}"),
-        )
+        let code = match error {
+            ExternalHlsError::Unsupported { .. } => AnalysisFailure::Unsupported,
+            _ => AnalysisFailure::InvalidRequest,
+        };
+        Refusal::new(code, error.to_string())
     })?;
     let sha256 = crate::artifact::hash_source(&mut bytes, &AtomicBool::new(false))
         .map_err(|error| Refusal::new(AnalysisFailure::Io, error.to_string()))?;
@@ -46,4 +47,22 @@ pub(super) fn options(
         },
         Some(identity),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn distinguishes_an_unsupported_context_object_from_a_broken_envelope() {
+        for (bytes, code) in [
+            (&[1, 8][..], AnalysisFailure::Unsupported),
+            (&[2, 8][..], AnalysisFailure::InvalidRequest),
+        ] {
+            assert_eq!(
+                options(Some(bytes)).err().map(|failure| failure.code),
+                Some(code)
+            );
+        }
+    }
 }
