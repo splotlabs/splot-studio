@@ -63,7 +63,7 @@ pub use document::{
     Bytes, Document, Origin, Phase, Position, ReadEnd, Restore, ResultOf, Saved, Selected, extent,
     parse_offset, same_file,
 };
-use document::{Place, in_window, line_of};
+use document::{in_window, line_of};
 use evidence::{Pick, Request as EvidenceRequest, VIEW_ROWS};
 
 use crate::recovery::{Disk, Kind, RestoredView};
@@ -480,9 +480,8 @@ impl Analysis {
                     self.restore_from_live(at);
                     let document = self.documents[at].id;
                     self.pending.retain(|_, (d, _)| *d != document);
-                    self.send(document, Asked::Close, &mut out, |document| {
-                        Command::AnalysisClose { document }
-                    });
+                    let validation = self.documents[at].evidence.running;
+                    self.release(document, validation, &mut out);
                     self.read(at, &mut out);
                 } else if matches!(
                     self.documents.get(at).map(Document::phase),
@@ -807,23 +806,27 @@ impl Analysis {
         // it is closed. The close waits behind the open in the engine's
         // queue, so the slot is free before any later open.
         if doc.in_engine() {
-            if let Some(validation) = doc.evidence.running {
-                self.send(
-                    doc.id,
-                    Asked::Evidence(EvidenceRequest::Cancel),
-                    out,
-                    |document| Command::AnalysisCancelValidation {
-                        document,
-                        validation,
-                    },
-                );
-            }
-            self.send(doc.id, Asked::Close, out, |document| {
-                Command::AnalysisClose { document }
-            });
+            self.release(doc.id, doc.evidence.running, out);
         }
         self.shown = self.shown.min(self.documents.len().saturating_sub(1));
         self.notice = None;
+    }
+
+    fn release(&mut self, document: u64, validation: Option<u64>, out: &mut Vec<Effect>) {
+        if let Some(validation) = validation {
+            self.send(
+                document,
+                Asked::Evidence(EvidenceRequest::Cancel),
+                out,
+                |document| Command::AnalysisCancelValidation {
+                    document,
+                    validation,
+                },
+            );
+        }
+        self.send(document, Asked::Close, out, |document| {
+            Command::AnalysisClose { document }
+        });
     }
 
     fn send(
@@ -1204,22 +1207,8 @@ impl Analysis {
                 doc.bytes.data = None;
             }
         }
-        // Forward history ends at a new selection.
-        doc.history
-            .truncate(doc.at.saturating_add(1).min(doc.history.len()));
-        doc.history.push(Place {
-            row: row.clone(),
-            window: doc.bytes.offset,
-            cursor: doc.bytes.cursor,
-            evidence: None,
-            evidence_tab: doc.evidence.tab,
-            bytes_shown: doc.bytes.shown,
-        });
-        if doc.history.len() > HISTORY {
-            doc.history.remove(0);
-        }
-        doc.at = doc.history.len() - 1;
         doc.selected = Some(Selected { row, position });
+        doc.remember_selection();
         if let Position::Row(position) = position {
             self.reveal(at, position);
         }
@@ -1249,8 +1238,8 @@ impl Analysis {
             doc.bytes.data = None;
         }
         doc.bytes.cursor = place.cursor;
-        doc.selected = Some(Selected {
-            row: place.row,
+        doc.selected = place.row.map(|row| Selected {
+            row,
             position: Position::Unknown,
         });
         doc.evidence.selected = place.evidence.filter(|pick| {

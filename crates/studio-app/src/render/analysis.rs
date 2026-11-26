@@ -100,7 +100,7 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
             .map_or_else(String::new, |s| extent(&s.row.element).0.to_string())
             .into(),
     );
-    super::evidence::render(&global, &doc.evidence);
+    super::evidence::render(&global, &doc.evidence, doc.selection_pending());
     render_bytes(
         &global,
         doc.bytes(),

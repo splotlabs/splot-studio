@@ -12,7 +12,7 @@ use super::model;
 use crate::analysis::evidence::{Evidence, VIEW_ROWS};
 use crate::ui::{Analysis, EvidenceRow};
 
-pub(super) fn render(global: &Analysis<'_>, evidence: &Evidence) {
+pub(super) fn render(global: &Analysis<'_>, evidence: &Evidence, selection_pending: bool) {
     global.set_evidence_tab(evidence.tab);
     global.set_evidence_query(evidence.query().into());
     global.set_evidence_rule_query(evidence.rule_query.as_str().into());
@@ -39,9 +39,12 @@ pub(super) fn render(global: &Analysis<'_>, evidence: &Evidence) {
     let end = (start + VIEW_ROWS).min(indices.len());
     global.set_evidence_can_prev(start > 0);
     global.set_evidence_can_next(end < indices.len());
-    global.set_finding_can_prev(evidence.tab == 2 && selected_position.is_some_and(|p| p > 0));
+    global.set_finding_can_prev(
+        !selection_pending && evidence.tab == 2 && selected_position.is_some_and(|p| p > 0),
+    );
     global.set_finding_can_next(
-        evidence.tab == 2
+        !selection_pending
+            && evidence.tab == 2
             && selected_position.map_or(!indices.is_empty(), |p| p + 1 < indices.len()),
     );
     let page = if end > start {

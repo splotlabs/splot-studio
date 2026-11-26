@@ -254,8 +254,15 @@ impl Analysis {
     pub(super) fn ensure_syntax(&mut self, at: usize, out: &mut Vec<Effect>) {
         let doc = &mut self.documents[at];
         let document_id = doc.id;
-        let need =
-            doc.evidence.tab == 1 || matches!(doc.evidence.selected, Some(Pick::Finding { .. }));
+        let finding_has_bit = match doc.evidence.selected {
+            Some(Pick::Finding { index, .. }) => {
+                doc.evidence.findings.get(index).is_some_and(|finding| {
+                    finding.file_offset.is_some() && finding.bit_offset.is_some()
+                })
+            }
+            _ => false,
+        };
+        let need = doc.evidence.tab == 1 || finding_has_bit;
         let element = doc
             .selected
             .as_ref()
@@ -535,7 +542,11 @@ impl Analysis {
     }
 
     pub(super) fn move_evidence(&mut self, at: usize, step: Step, out: &mut Vec<Effect>) {
-        let evidence = &self.documents[at].evidence;
+        let doc = &self.documents[at];
+        let evidence = &doc.evidence;
+        if evidence.tab == 2 && doc.selection_pending() {
+            return;
+        }
         let matches = evidence.matching();
         let Some(last) = matches.len().checked_sub(1) else {
             return;
@@ -598,8 +609,12 @@ impl Analysis {
                     out,
                 );
             } else {
-                self.documents[at].locating = None;
-                self.documents[at].evidence.selected = Some(pick);
+                let doc = &mut self.documents[at];
+                doc.locating = None;
+                if doc.evidence.selected != Some(pick) {
+                    doc.evidence.selected = Some(pick);
+                    doc.remember_selection();
+                }
             }
         } else if evidence.tab == 1
             && let Some((element, _)) = evidence.syntax.as_ref()

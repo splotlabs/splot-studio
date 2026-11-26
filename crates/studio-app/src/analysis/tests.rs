@@ -201,6 +201,7 @@ impl Engine {
                 }
             }
             Command::AnalysisClose { document } => Event::AnalysisClosed { document },
+            Command::AnalysisCancelValidation { .. } => Event::CancelRequested,
             _ => return None,
         })
     }
@@ -1162,4 +1163,91 @@ fn incompatible_syntax_schema_preserves_byte_inspection() {
     assert!(doc(&analysis).bytes().data.is_some());
     assert!(doc(&analysis).evidence.syntax.is_none());
     assert!(doc(&analysis).evidence.syntax_error.is_some());
+}
+
+#[test]
+fn unlocated_findings_keep_history_and_next_waits_for_the_locate() {
+    use studio_domain::validation::{
+        Finding, Severity, VALIDATION_SCHEMA, ValidationCompletion, ValidationSummary,
+    };
+
+    let (mut analysis, engine) = opened(4);
+    let validate = analysis.input(Input::Validate);
+    let report = validate[0].request_id;
+    let page = analysis.event(
+        report,
+        Event::AnalysisValidated {
+            document: 1,
+            summary: Box::new(ValidationSummary {
+                schema: VALIDATION_SCHEMA,
+                spec_revision: "AV2 v1.0.0".into(),
+                codec_revision: "fixture".into(),
+                engine_version: "fixture".into(),
+                strict: false,
+                context: None,
+                scope: "Fixture".into(),
+                completion: ValidationCompletion::EndOfInput,
+                checked_obus: 4,
+                last_checked_obu_end: Some(36),
+                malformed_units: 0,
+                finalized: true,
+                errors: 2,
+                warnings: 0,
+                info: 0,
+                finding_limit: 2,
+                omitted: 0,
+            }),
+            total: 2,
+        },
+    );
+    let findings = [None, Some(10)]
+        .into_iter()
+        .map(|file_offset| Finding {
+            rule_id: "fixture/rule".into(),
+            severity: Severity::Error,
+            message: "Fixture finding".into(),
+            spec_section: None,
+            file_offset,
+            stream_offset: file_offset,
+            bit_offset: None,
+            extended_layer_id: None,
+        })
+        .collect();
+    analysis.event(
+        page[0].request_id,
+        Event::AnalysisFindings {
+            document: 1,
+            validation: report,
+            first: 0,
+            total: 2,
+            findings,
+        },
+    );
+
+    analysis.input(Input::EvidencePick(0));
+    assert_eq!(doc(&analysis).evidence.selected_index(), Some(0));
+    assert!(selected(&analysis).is_none());
+
+    let next = analysis.input(Input::FindingStep(1));
+    assert_eq!(next.len(), 1);
+    assert_eq!(analysis.input(Input::FindingStep(1)).len(), 0);
+    engine.settle(&mut analysis, next);
+    assert_eq!(doc(&analysis).evidence.selected_index(), Some(1));
+    assert_eq!(selected(&analysis), Some((1, Position::Row(1))));
+
+    analysis.input(Input::FindingStep(-1));
+    assert_eq!(doc(&analysis).evidence.selected_index(), Some(0));
+    assert_eq!(selected(&analysis), Some((1, Position::Row(1))));
+    for expected in [Some(1), Some(0)] {
+        let back = analysis.input(Input::Back);
+        engine.settle(&mut analysis, back);
+        assert_eq!(doc(&analysis).evidence.selected_index(), expected);
+    }
+    assert!(selected(&analysis).is_none());
+    for expected in [Some(1), Some(0)] {
+        let forward = analysis.input(Input::Forward);
+        engine.settle(&mut analysis, forward);
+        assert_eq!(doc(&analysis).evidence.selected_index(), expected);
+        assert_eq!(selected(&analysis), Some((1, Position::Row(1))));
+    }
 }

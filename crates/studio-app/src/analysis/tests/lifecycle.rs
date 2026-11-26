@@ -352,15 +352,18 @@ fn a_cancelled_read_keeps_the_document_and_what_it_read() {
     let effects = analysis.input(Input::RowClicked(10));
     engine.settle(&mut analysis, effects);
 
-    // Read Again: the part read is closed, the whole file read, and the
-    // selection comes back on it.
+    // Read Again cancels validation of the part read and closes it first.
+    // The new read restores the selection.
+    let validating = analysis.input(Input::Validate);
+    let validation = validating[0].request_id;
     let effects = analysis.input(Input::Reopen);
     assert!(matches!(
         commands(&effects)[..],
         [
+            Command::AnalysisCancelValidation { document: 1, validation: id },
             Command::AnalysisClose { document: 1 },
             Command::AnalysisOpen { document: 2, .. }
-        ]
+        ] if *id == validation
     ));
     engine.settle(&mut analysis, effects);
     assert_eq!(doc(&analysis).summary().map(|s| s.elements), Some(40));

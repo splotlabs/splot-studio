@@ -11,7 +11,7 @@ use studio_domain::analysis::{DocumentSummary, Element, Row, RowFilter, Span};
 use studio_domain::job::SourceFingerprint;
 
 use super::evidence::{Evidence, Pick};
-use super::{LINE_BYTES, WINDOW_BYTES};
+use super::{HISTORY, LINE_BYTES, WINDOW_BYTES};
 use crate::queue::ItemId;
 
 /// A converted file and what it was converted from, fixed when Encode
@@ -157,7 +157,7 @@ impl Position {
 /// A history entry: a selection and the byte view it was made in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Place {
-    pub(super) row: Row,
+    pub(super) row: Option<Row>,
     pub(super) window: u64,
     pub(super) cursor: u64,
     pub(super) evidence: Option<Pick>,
@@ -247,6 +247,29 @@ impl Document {
             caution: None,
             restore,
         }
+    }
+
+    pub(super) fn remember_selection(&mut self) {
+        self.history.truncate(self.at.saturating_add(1));
+        self.history.push(Place {
+            row: self
+                .selected
+                .as_ref()
+                .map(|selection| selection.row.clone()),
+            window: self.bytes.offset,
+            cursor: self.bytes.cursor,
+            evidence: self.evidence.selected,
+            evidence_tab: self.evidence.tab,
+            bytes_shown: self.bytes.shown,
+        });
+        if self.history.len() > HISTORY {
+            self.history.remove(0);
+        }
+        self.at = self.history.len() - 1;
+    }
+
+    pub(crate) fn selection_pending(&self) -> bool {
+        self.locating.is_some()
     }
 
     /// The view on the current read, or the one kept for the next.
