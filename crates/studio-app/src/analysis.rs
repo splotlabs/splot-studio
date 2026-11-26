@@ -215,6 +215,8 @@ pub enum Input {
     Validate,
     /// Stop validation of the current source.
     CancelValidation,
+    /// Remove the indexes saved on disk.
+    ClearCache,
 }
 
 /// What a request was for.
@@ -258,6 +260,7 @@ pub struct Analysis {
     next_request: u64,
     /// Requests not answered: request id to engine document id and purpose.
     pending: HashMap<u64, (u64, Asked)>,
+    cache_clear: Option<u64>,
     notice: Option<String>,
     /// Why the documents cannot be saved, while that is so.
     storage: Option<String>,
@@ -371,7 +374,7 @@ impl Analysis {
     /// or is open there.
     #[must_use]
     pub fn needs_engine(&self) -> bool {
-        self.documents.iter().any(Document::in_engine)
+        self.cache_clear.is_some() || self.documents.iter().any(Document::in_engine)
     }
 
     /// The inspect process was let go while no document needed it: what
@@ -436,7 +439,13 @@ impl Analysis {
     /// Whether a request to the inspect process is not answered yet.
     #[must_use]
     pub fn waiting(&self) -> bool {
-        !self.pending.is_empty()
+        self.cache_clear.is_some() || !self.pending.is_empty()
+    }
+
+    /// Whether the cache clear request is still pending.
+    #[must_use]
+    pub const fn clearing_cache(&self) -> bool {
+        self.cache_clear.is_some()
     }
 
     /// Whether anything changed since the last call.
@@ -541,6 +550,17 @@ impl Analysis {
                 }
             }
             Input::TogglePlayback => {}
+            Input::ClearCache => {
+                if self.cache_clear.is_none() {
+                    self.next_request += 1;
+                    self.cache_clear = Some(self.next_request);
+                    self.notice = None;
+                    out.push(Effect {
+                        request_id: self.next_request,
+                        command: Command::AnalysisClearCache,
+                    });
+                }
+            }
             other => {
                 if let Some(at) = self.open_index() {
                     self.document_input(at, other, &mut out);
@@ -876,6 +896,18 @@ impl Analysis {
     /// An answer from the inspect process.
     pub fn event(&mut self, request_id: u64, event: Event) -> Vec<Effect> {
         let mut out = Vec::new();
+        if self.cache_clear == Some(request_id) {
+            self.cache_clear = None;
+            self.dirty = true;
+            self.notice = Some(match event {
+                Event::AnalysisCacheCleared => "Studio cleared the index cache.".into(),
+                Event::Error { message, .. } => {
+                    format!("Studio could not clear the index cache. {message}")
+                }
+                _ => "Studio could not confirm that the engine cleared the index cache.".into(),
+            });
+            return out;
+        }
         let Some(&(document, asked)) = self.pending.get(&request_id) else {
             return out;
         };
@@ -1186,6 +1218,10 @@ impl Analysis {
     /// Every document in the engine fails with `message`.
     fn end_reads(&mut self, message: &str, by: ReadEnd) {
         self.pending.clear();
+        if self.cache_clear.take().is_some() {
+            self.notice = Some(format!("Studio could not clear the index cache. {message}"));
+            self.dirty = true;
+        }
         for doc in &mut self.documents {
             if doc.in_engine() {
                 doc.fail(message.to_owned(), by);

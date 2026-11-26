@@ -110,6 +110,7 @@ export global Analysis {
     in property <bool> can-read-again;
     in property <bool> can-cancel-read;
     in property <bool> reading;
+    in property <bool> clearing-cache;
     in property <bool> can-playback;
 
     in property <[string]> type-labels;
@@ -171,6 +172,7 @@ export global Analysis {
     callback finding-step(int);
     callback validate-stream();
     callback cancel-validation();
+    callback clear-cache();
 
     callback open();
     callback close();
@@ -899,10 +901,10 @@ export component AnalyzeView inherits VerticalLayout {
     callback reveal-bytes();
 
     // The documents and what reading the shown one found.
-    if Analysis.documents.length > 0: HorizontalLayout {
+    HorizontalLayout {
         spacing: Tokens.space-2;
 
-        ComboBox {
+        if Analysis.documents.length > 0: ComboBox {
             width: root.navigator-width;
             model: Analysis.documents;
             current-index <=> Analysis.document-index;
@@ -921,6 +923,15 @@ export component AnalyzeView inherits VerticalLayout {
         }
 
         LinkButton {
+            text: Analysis.clearing-cache ? "Clearing Index Cache…" : "Clear Index Cache";
+            description: "Remove saved indexes from Studio's cache";
+            enabled: !Analysis.clearing-cache;
+            clicked => {
+                Analysis.clear-cache();
+            }
+        }
+
+        if Analysis.documents.length > 0: LinkButton {
             text: "Open…";
             description: "Open an AV2 IVF or Annex B stream to analyze (" + root.open-shortcut + ")";
             clicked => {
@@ -928,7 +939,7 @@ export component AnalyzeView inherits VerticalLayout {
             }
         }
 
-        LinkButton {
+        if Analysis.documents.length > 0: LinkButton {
             text: "Close";
             description: "Close the shown document; the file is not touched";
             clicked => {

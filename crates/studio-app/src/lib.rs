@@ -352,6 +352,7 @@ pub fn bind_analysis(window: &AppWindow, send: impl Fn(analysis::Input) + Clone 
     global.on_forward(on(Input::Forward));
     global.on_clear_filters(on(Input::ClearFilters));
     global.on_validate_stream(on(Input::Validate));
+    global.on_clear_cache(on(Input::ClearCache));
     global.on_cancel_validation(on(Input::CancelValidation));
     let on = |input: fn(i32) -> Input| {
         let send = send.clone();

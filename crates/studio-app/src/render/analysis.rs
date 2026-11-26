@@ -34,6 +34,7 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
     global.set_document_index(int(analysis.shown_index() as u64));
     let notice = analysis.notice_line().unwrap_or_default();
     global.set_notice(notice.into());
+    global.set_clearing_cache(analysis.clearing_cache());
     global.set_can_playback(
         analysis
             .shown()

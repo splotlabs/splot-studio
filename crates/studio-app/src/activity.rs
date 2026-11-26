@@ -293,6 +293,7 @@ impl Activity {
             | Event::PlaybackEnded { .. }
             | Event::AnalysisOpened { .. }
             | Event::AnalysisOpenProgress { .. }
+            | Event::AnalysisCacheCleared
             | Event::AnalysisPage { .. }
             | Event::AnalysisLocated { .. }
             | Event::AnalysisBytes { .. }
