@@ -231,6 +231,8 @@ fn serve<'scope>(
             | Command::AnalysisIdentityPage { .. }
             | Command::AnalysisTimeline { .. }
             | Command::AnalysisTimelineLocate { .. }
+            | Command::AnalysisReferences { .. }
+            | Command::AnalysisCancelReferences { .. }
             | Command::AnalysisCancel { .. }
             | Command::AnalysisPage { .. }
             | Command::AnalysisLocate { .. }

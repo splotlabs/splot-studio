@@ -17,6 +17,7 @@ mod batch;
 pub mod document;
 mod identity;
 mod layers;
+mod references;
 mod report;
 mod syntax;
 mod validation;
@@ -42,6 +43,7 @@ use studio_domain::protocol::{
     AnalysisEvidenceIdentity, Command, Envelope, ErrorCode, Event, ProtocolError, decode,
     read_frame, write_message,
 };
+use studio_domain::references::{ReferenceEvidence, ReferenceQuery};
 use studio_domain::syntax::SYNTAX_SCHEMA;
 use studio_domain::timeline::{TimelineTarget, TimelineView};
 use studio_domain::validation::{VALIDATION_SCHEMA, ValidationEvidence, ValidationSettings};
@@ -180,6 +182,7 @@ type ValidationResult = Result<(ValidationEvidence, SourceDigest), Refusal>;
 
 #[derive(Debug)]
 enum EvidenceRequest {
+    References(ReferenceQuery),
     Validate(ValidationSettings),
     Identity {
         grain: GrainPolicy,
@@ -199,6 +202,10 @@ impl EvidenceRequest {
                 validation: id,
             },
             Self::Identity { .. } => Pending::Identity { document, scan: id },
+            Self::References(_) => Pending::References {
+                document,
+                reference: id,
+            },
             Self::Layers { .. } => Pending::Layers {
                 document,
                 inspection: id,
@@ -214,6 +221,10 @@ impl EvidenceRequest {
             Self::Layers { element, selection } => {
                 let (file, query) = doc.prepare_layers(id, element, selection)?;
                 EvidenceTask::Layers(file, query)
+            }
+            Self::References(query) => {
+                let (file, limit) = doc.prepare_references(query.coded_offset)?;
+                EvidenceTask::References { file, query, limit }
             }
             Self::Identity { grain, selection } => {
                 let file = doc.open_evidence_source()?;
@@ -232,6 +243,11 @@ impl EvidenceRequest {
 enum EvidenceTask {
     Validate(File, ValidationSettings),
     Layers(File, layers::Query),
+    References {
+        file: File,
+        query: ReferenceQuery,
+        limit: u64,
+    },
     Identity {
         file: File,
         index: identity::IdentityIndex,
@@ -248,6 +264,9 @@ impl EvidenceTask {
             Self::Layers(file, query) => {
                 EvidenceResult::Layers(Box::new(layers::inspect(file, query, cancelled)))
             }
+            Self::References { file, query, limit } => EvidenceResult::References(
+                references::replay(file, limit, query, cancelled).map(Box::new),
+            ),
             Self::Identity {
                 mut file,
                 index,
@@ -262,6 +281,7 @@ enum EvidenceResult {
     Validation(Box<ValidationResult>),
     Identity(Result<(), Refusal>),
     Layers(Box<Result<layers::Report, Refusal>>),
+    References(Result<Box<ReferenceEvidence>, Refusal>),
     Aborted(Pending),
 }
 
@@ -289,6 +309,13 @@ impl EvidenceResult {
                 Ok(Event::AnalysisIdentityScanned {
                     document,
                     summary: Box::new(summary),
+                })
+            }
+            Self::References(result) => {
+                doc.verify_references()?;
+                Ok(Event::AnalysisReferencesReady {
+                    document,
+                    evidence: result?,
                 })
             }
             Self::Aborted(operation) => {
@@ -324,6 +351,7 @@ enum Pending {
     Validation { document: u64, validation: u64 },
     Identity { document: u64, scan: u64 },
     Layers { document: u64, inspection: u64 },
+    References { document: u64, reference: u64 },
 }
 
 impl Pending {
@@ -331,7 +359,8 @@ impl Pending {
         match self {
             Self::Validation { document, .. }
             | Self::Identity { document, .. }
-            | Self::Layers { document, .. } => document == member,
+            | Self::Layers { document, .. }
+            | Self::References { document, .. } => document == member,
             _ => false,
         }
     }
@@ -563,6 +592,27 @@ fn route<W: Write>(shared: &Shared<W>, requests: &SyncSender<Queued>, id: u64, c
         }
         Command::BatchCancel { validation } => {
             shared.cancel(id, Pending::BatchValidation(validation));
+        }
+        Command::AnalysisReferences { document, query } => {
+            queue_evidence(
+                shared,
+                requests,
+                id,
+                document,
+                EvidenceRequest::References(query),
+            );
+        }
+        Command::AnalysisCancelReferences {
+            document,
+            reference,
+        } => {
+            shared.cancel(
+                id,
+                Pending::References {
+                    document,
+                    reference,
+                },
+            );
         }
         command => queue_query(shared, requests, id, &command),
     }

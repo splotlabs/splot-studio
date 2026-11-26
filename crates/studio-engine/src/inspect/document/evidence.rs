@@ -158,6 +158,29 @@ impl Document {
         Ok((*element, page(events, first, count)?))
     }
 
+    pub(in crate::inspect) fn prepare_references(
+        &self,
+        coded_offset: u64,
+    ) -> Result<(File, u64), Refusal> {
+        self.check()?;
+        let Some(limit) = self.summary.digest.as_deref().map(|digest| digest.bytes) else {
+            return Err(Refusal::new(
+                AnalysisFailure::Unsupported,
+                "Reference replay needs an indexed source prefix.",
+            ));
+        };
+        if coded_offset >= limit {
+            return Err(invalid(
+                "The coded offset is outside the indexed source prefix.",
+            ));
+        }
+        Ok((self.open_evidence_source()?, limit))
+    }
+
+    pub(in crate::inspect) fn verify_references(&self) -> Result<(), Refusal> {
+        self.check()
+    }
+
     pub(in crate::inspect) fn prepare_validation(&self, request: u64) -> Result<File, Refusal> {
         self.check()?;
         if self
