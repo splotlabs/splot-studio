@@ -210,7 +210,10 @@ fn serve<'scope>(
                     return (Ok(()), true);
                 }
             }
-            Command::Picture { .. } | Command::Play { .. } | Command::StopPlayback => {
+            Command::Picture { .. }
+            | Command::Play { .. }
+            | Command::StopPlayback
+            | Command::CloseDocumentPlayback { .. } => {
                 outbox.reply(
                     id,
                     refusal(

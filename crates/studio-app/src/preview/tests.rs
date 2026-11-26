@@ -96,6 +96,7 @@ fn header(generation: u64, origin: PictureOrigin, frame: u64, w: u16, h: u16) ->
             den: 30000,
         }),
         frame_count: Some(300),
+        output: None,
         width: w,
         height: h,
         frame_width: 1920,
@@ -129,6 +130,7 @@ fn answer(effect: &Effect) -> Picture {
     let origin = match target {
         PictureTarget::Source { .. } => PictureOrigin::Source,
         PictureTarget::Result { .. } => PictureOrigin::Result,
+        PictureTarget::Document { .. } => PictureOrigin::Document,
     };
     let index = match frame {
         PictureFrame::Poster => 42,
@@ -766,4 +768,178 @@ fn the_scene_follows_the_file_from_source_to_live_to_result() {
         scene(&state).stage,
         Some(Subject::Result { path, .. }) if path == destination
     ));
+}
+
+fn document_subject(document: u64) -> Subject {
+    let source = source("clip.obu");
+    Subject::Document {
+        document,
+        fingerprint: source.fingerprint,
+        path: source.path,
+        digest: Box::new(studio_domain::analysis::SourceDigest {
+            sha256: "0".repeat(64),
+            bytes: source.fingerprint.len,
+        }),
+    }
+}
+
+fn output_picture(generation: u64, frame: u64, interval: Option<MediaTime>) -> Picture {
+    picture(PictureHeader {
+        time: None,
+        frame_count: None,
+        output: Some(OutputEvent {
+            ordinal: frame,
+            unit_offset: 20,
+            unit_len: 30,
+            extended_layer: 0,
+            embedded_layer: 0,
+            temporal_layer: 1,
+            coded_offset: Some(15),
+            showing_offset: Some(22),
+            sequence_offset: Some(5),
+            interval,
+        }),
+        ..header(generation, PictureOrigin::Document, frame, 2, 2)
+    })
+}
+
+#[test]
+fn rapid_document_seeks_and_cancel_discard_old_work() {
+    use studio_domain::preview::PictureStage;
+
+    let (mut preview, opening) = shown(document_subject(7));
+    let first = only(&opening).request_id;
+    preview.picture(output_picture(first, 0, None));
+    assert_eq!(preview.output_byte(1), Some((7, 15)));
+    assert_eq!(preview.output_byte(2), Some((7, 22)));
+    assert_eq!(preview.view().frame_text, "Output 1");
+    assert_eq!(preview.cached_bytes(), 0);
+
+    let old = only(&preview.input(Input::SeekOutput(27))).request_id;
+    preview.progress(old, PictureStage::Replay, 9, Some(26));
+    assert!(preview.view().decode_work.contains("9 / 26"));
+    assert!(preview.view().picture.is_none());
+    assert_eq!(preview.output_byte(1), None);
+    let latest = only(&preview.input(Input::SeekOutput(3))).request_id;
+    preview.progress(old, PictureStage::Replay, 25, Some(26));
+    none(preview.picture(output_picture(old, 26, None)));
+    assert_eq!(preview.view().decode_work, "Decoding to output 3…");
+    assert!(preview.view().picture.is_none());
+
+    let cancel = preview.input(Input::CancelDecode);
+    assert_eq!(only(&cancel).command, Command::StopPlayback);
+    assert_eq!(only(&cancel).request_id, latest);
+    none(preview.picture(output_picture(latest, 2, None)));
+    assert_eq!(preview.view().message, "Decode cancelled.");
+    assert_eq!(preview.view().decode_work, "");
+    assert!(preview.view().picture.is_none());
+
+    let retry = only(&preview.input(Input::SeekOutput(3))).request_id;
+    preview.picture(output_picture(retry, 2, None));
+    assert_eq!(preview.view().frame_text, "Output 3");
+    assert_eq!(preview.output_byte(2), Some((7, 22)));
+}
+
+#[test]
+fn document_switch_close_and_worker_death_clear_pictures_and_links() {
+    let (mut preview, opening) = shown(document_subject(7));
+    let old = only(&opening).request_id;
+    preview.picture(output_picture(old, 0, None));
+    let seek = only(&preview.input(Input::Step(1))).request_id;
+
+    // The same path under a new document read must have its own generation.
+    let switch = preview.sync(stage(document_subject(8)));
+    let [close, open] = switch.as_slice() else {
+        unreachable!("{switch:?}");
+    };
+    assert_eq!(
+        close.command,
+        Command::CloseDocumentPlayback { document: 7 }
+    );
+    none(preview.picture(output_picture(seek, 1, None)));
+    assert!(preview.view().picture.is_none());
+    preview.picture(output_picture(open.request_id, 0, None));
+    assert_eq!(preview.output_byte(0), Some((8, 20)));
+    let play = only(&preview.input(Input::PlayPause)).request_id;
+    preview.picture(output_picture(play, 1, None));
+
+    none(preview.process_ended("exit", false));
+    assert_eq!(preview.view().state, StageState::Unavailable);
+    assert!(!preview.view().playing);
+    none(preview.picture(output_picture(play, 2, None)));
+    assert!(preview.view().picture.is_none());
+    assert_eq!(preview.output_byte(0), None);
+
+    assert_eq!(
+        only(&preview.sync(Scene::default())).command,
+        Command::CloseDocumentPlayback { document: 8 }
+    );
+    assert_eq!(preview.view().state, StageState::None);
+    none(preview.picture(output_picture(open.request_id, 0, None)));
+    assert!(preview.view().picture.is_none());
+}
+
+#[test]
+fn document_timing_and_output_count_use_only_decoder_evidence() {
+    let (mut preview, opening) = shown(document_subject(7));
+    let first = only(&opening).request_id;
+    preview.picture(output_picture(first, 0, None));
+    let view = preview.view();
+    assert!(view.can_play);
+    assert_eq!(view.time_text, "");
+    assert!(view.play_note.contains("assumes 30 fps"));
+    let seek = only(&preview.input(Input::SeekOutput(99))).request_id;
+    none(preview.unavailable(seek, PictureFailure::OutOfRange, "output absent"));
+    assert_eq!(preview.view().frames, 0);
+    assert!(preview.view().picture.is_none());
+
+    let request = only(&preview.input(Input::SeekOutput(2))).request_id;
+    let interval = Some(MediaTime { num: 1, den: 24 });
+    preview.picture(output_picture(request, 1, interval));
+    let view = preview.view();
+    assert_eq!(view.play_note, "");
+    assert_eq!(view.time_text, "");
+    let play = only(&preview.input(Input::PlayPause)).request_id;
+    preview.picture(output_picture(play, 4, interval));
+    none(preview.playback_ended(play, Some(4)));
+    assert_eq!(preview.view().frame_text, "Output 5 / 5");
+}
+
+#[test]
+fn invalid_output_number_preserves_the_assumed_playback_rate() {
+    let (mut preview, opening) = shown(document_subject(7));
+    preview.picture(output_picture(only(&opening).request_id, 0, None));
+    let play = only(&preview.input(Input::PlayPause)).request_id;
+
+    none(preview.input(Input::SeekOutput(0)));
+    preview.picture(output_picture(play, 1, None));
+    let view = preview.view();
+    assert!(view.playing);
+    assert_eq!(view.seek_error, "Enter a positive output number.");
+    assert!(view.play_note.contains("assumes 30 fps"));
+
+    let request = only(&preview.input(Input::SeekOutput(3))).request_id;
+    preview.picture(output_picture(request, 2, None));
+    let view = preview.view();
+    assert_eq!(view.seek_error, "");
+    assert!(view.play_note.contains("assumes 30 fps"));
+}
+
+#[test]
+fn next_at_the_end_restores_the_last_output_and_confirms_the_count() {
+    let (mut preview, opening) = shown(document_subject(7));
+    let first = only(&opening).request_id;
+    preview.picture(output_picture(first, 0, None));
+
+    let next = only(&preview.input(Input::Step(1))).request_id;
+    let view = preview.view();
+    assert_eq!(view.frame_text, "Output 2");
+    assert!(view.picture.is_none());
+
+    none(preview.unavailable(next, PictureFailure::OutOfRange, "end of file"));
+    let view = preview.view();
+    assert_eq!(view.frame_text, "Output 1 / 1");
+    assert_eq!(view.picture.map(|picture| picture.header.frame), Some(0));
+    assert_eq!(preview.output_byte(1), Some((7, 15)));
+    none(preview.input(Input::Step(1)));
 }

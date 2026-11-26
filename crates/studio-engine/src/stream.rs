@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
-//! Decoding this encoder's AV2 output for pictures: the preview decoder and
-//! decoded pictures as [`Frame`]s.
+//! The preview decoder and decoded pictures as [`Frame`]s.
 //!
 //! Random access: a decoder can start at a temporal unit that
 //! [`splot_core::stream_reader::is_random_access_point`] accepts. The pinned
@@ -34,8 +33,15 @@ pub const DECODE_STORE_BYTES: u64 = 1 << 30;
 /// # Errors
 /// When the decoder's threads cannot start.
 pub fn decoder(threads: usize) -> splot_decode::Result<Decoder> {
+    preview_decoder(threads, DecodeLimits::DEFAULT)
+}
+
+pub(crate) fn preview_decoder(
+    threads: usize,
+    limits: DecodeLimits,
+) -> splot_decode::Result<Decoder> {
     let largest = MEMORY_BUDGET_BYTES / (2 * FRAMES_IN_FLIGHT);
-    let limits = DecodeLimits::DEFAULT
+    let limits = limits
         .with_limit(
             DecodeLimitName::MaxLumaSamplesPerFrame,
             DecodeLimitThreshold::max(largest),

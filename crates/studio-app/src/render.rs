@@ -10,7 +10,7 @@ mod evidence;
 
 use std::time::Instant;
 
-use slint::{Image, Model, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Image, Model, ModelRc, SharedString, VecModel};
 use studio_domain::job::FailureCode;
 use studio_domain::settings::OutputKind;
 
@@ -24,8 +24,8 @@ use crate::queue::{Ending, Item, ItemState};
 use crate::simple::{self, Priority, Quality};
 use crate::state::{AppState, Mode, RelatedPreview, Severity};
 use crate::ui::{
-    AppWindow, CheckRow, Fact, JobRow, JobView, Notice, QueueRow, RowState, SourceView, StageState,
-    Tone, ViewMode, WorkspaceView,
+    AppWindow, CheckRow, Fact, JobRow, JobView, Notice, Playback, QueueRow, RowState, SourceView,
+    StageState, Tone, ViewMode, WorkspaceView,
 };
 use crate::workspace::Workspace;
 
@@ -492,35 +492,63 @@ pub fn render_counters(window: &AppWindow, state: &AppState, now: Instant) {
 pub fn render_preview(window: &AppWindow, state: &AppState, preview: &Preview, dirty: Dirty) {
     if dirty.picture || dirty.view {
         let view = preview.view();
+        let playback = window.global::<Playback>();
         if dirty.picture {
-            window.set_stage_image(image(view.picture.as_ref()));
+            playback.set_image(image(view.picture.as_ref()));
         }
-        window.set_stage_state(match view.state {
+        playback.set_state(match view.state {
             Stage::None => StageState::None,
             Stage::Loading => StageState::Loading,
             Stage::Picture => StageState::Picture,
             Stage::Unavailable => StageState::Unavailable,
         });
-        window.set_stage_native(view.native);
-        window.set_stage_badge(view.badge.into());
-        window.set_stage_hint(view.hint.into());
-        window.set_stage_message(view.message.into());
-        window.set_stage_accessible(view.accessible.into());
-        window.set_stage_transport(view.transport);
-        window.set_stage_navigable(view.navigable);
-        window.set_stage_frames(i32::try_from(view.frames).unwrap_or(i32::MAX));
+        playback.set_native(view.native);
+        playback.set_badge(view.badge.into());
+        playback.set_hint(view.hint.into());
+        playback.set_message(view.message.into());
+        playback.set_accessible(view.accessible.into());
+        playback.set_transport(view.transport);
+        playback.set_navigable(view.navigable);
+        playback.set_frames(i32::try_from(view.frames).unwrap_or(i32::MAX));
         // Exact below 2^24 frames, which is over six days at 30 fps.
         #[allow(clippy::cast_precision_loss)]
-        window.set_stage_position(view.position as f32);
-        window.set_stage_frame_text(view.frame_text.into());
-        window.set_stage_time_text(view.time_text.into());
-        window.set_stage_can_play(view.can_play);
-        window.set_stage_playing(view.playing);
-        window.set_stage_play_note(view.play_note.into());
-        window.set_stage_can_compare(view.can_compare);
-        window.set_stage_comparing(view.comparing);
-        window.set_stage_can_native(view.can_native);
-        window.set_stage_native_on(view.native_on);
+        playback.set_position(view.position as f32);
+        playback.set_frame_text(view.frame_text.into());
+        playback.set_time_text(view.time_text.into());
+        playback.set_can_play(view.can_play);
+        playback.set_playing(view.playing);
+        playback.set_play_note(view.play_note.into());
+        playback.set_seek_error(view.seek_error.into());
+        playback.set_can_compare(view.can_compare);
+        playback.set_comparing(view.comparing);
+        playback.set_can_native(view.can_native);
+        playback.set_native_on(view.native_on);
+        playback.set_decode_work(view.decode_work.into());
+        let offset = |offset: Option<u64>| {
+            offset
+                .map_or_else(String::new, |offset| format!("byte 0x{offset:X}"))
+                .into()
+        };
+        playback.set_output_unit(
+            view.output
+                .map_or_else(String::new, |event| {
+                    format!("byte 0x{:X} ({} bytes)", event.unit_offset, event.unit_len)
+                })
+                .into(),
+        );
+        playback.set_output_coded(offset(view.output.and_then(|event| event.coded_offset)));
+        playback.set_output_showing(offset(view.output.and_then(|event| event.showing_offset)));
+        playback.set_output_sequence(offset(view.output.and_then(|event| event.sequence_offset)));
+        playback.set_output_layers(
+            view.output
+                .map_or_else(String::new, |event| {
+                    format!(
+                        "Layers · extended {} · embedded {} · temporal {}",
+                        event.extended_layer, event.embedded_layer, event.temporal_layer
+                    )
+                })
+                .into(),
+        );
     }
     if dirty.thumbs {
         window.set_row_thumbs(model(

@@ -3,7 +3,8 @@
 
 //! What the selected file can show, read from the app state.
 
-use studio_domain::job::WirePath;
+use studio_domain::analysis::SourceDigest;
+use studio_domain::job::{SourceFingerprint, WirePath};
 use studio_domain::preview::{PictureTarget, SourceRef};
 
 use crate::queue::{Item, ItemId, ItemState};
@@ -61,18 +62,30 @@ pub enum Subject {
         /// The frame size in luma pixels.
         size: (u32, u32),
     },
+    /// An independently opened AV2 file in Analyze.
+    Document {
+        /// The current inspection read.
+        document: u64,
+        /// The source path.
+        path: WirePath,
+        /// The identity of the file when the inspection engine read it.
+        fingerprint: SourceFingerprint,
+        /// The digest of the bytes that the inspection engine read.
+        digest: Box<SourceDigest>,
+    },
 }
 
 impl Subject {
     /// The item it belongs to.
     #[must_use]
-    pub const fn item(&self) -> ItemId {
+    pub const fn item(&self) -> Option<ItemId> {
         match self {
             Self::Loading { item }
             | Self::Unavailable { item }
             | Self::Source { item, .. }
             | Self::Live { item, .. }
-            | Self::Result { item, .. } => *item,
+            | Self::Result { item, .. } => Some(*item),
+            Self::Document { .. } => None,
         }
     }
 
@@ -81,7 +94,7 @@ impl Subject {
             Self::Source { source, .. }
             | Self::Live { source, .. }
             | Self::Result { source, .. } => Some(source),
-            Self::Loading { .. } | Self::Unavailable { .. } => None,
+            Self::Loading { .. } | Self::Unavailable { .. } | Self::Document { .. } => None,
         }
     }
 
@@ -95,6 +108,17 @@ impl Subject {
                 path: path.clone(),
                 source: Some(source.clone()),
             }),
+            Self::Document {
+                document,
+                path,
+                fingerprint,
+                digest,
+            } => Some(PictureTarget::Document {
+                document: *document,
+                path: path.clone(),
+                fingerprint: *fingerprint,
+                digest: digest.clone(),
+            }),
             Self::Loading { .. } | Self::Unavailable { .. } | Self::Live { .. } => None,
         }
     }
@@ -104,7 +128,7 @@ impl Subject {
             Self::Source { frames, .. }
             | Self::Live { frames, .. }
             | Self::Result { frames, .. } => *frames,
-            Self::Loading { .. } | Self::Unavailable { .. } => None,
+            Self::Loading { .. } | Self::Unavailable { .. } | Self::Document { .. } => None,
         }
     }
 
@@ -113,7 +137,7 @@ impl Subject {
             Self::Source { size, .. } | Self::Live { size, .. } | Self::Result { size, .. } => {
                 *size
             }
-            Self::Loading { .. } | Self::Unavailable { .. } => (0, 0),
+            Self::Loading { .. } | Self::Unavailable { .. } | Self::Document { .. } => (0, 0),
         }
     }
 }

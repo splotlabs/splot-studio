@@ -374,24 +374,43 @@ impl Controller {
     }
 
     fn wire_preview(self: &Rc<Self>, window: &AppWindow) {
+        let playback = window.global::<crate::Playback>();
         let on = |input: fn(i32) -> Input| {
             let ctl = Rc::downgrade(self);
             move |value| with(&ctl, |ctl| ctl.preview_input(input(value)))
         };
-        window.on_stage_step(on(|delta| Input::Step(i64::from(delta))));
-        window.on_stage_seek(on(|frame| Input::Seek(u64::try_from(frame).unwrap_or(0))));
+        playback.on_step(on(|delta| Input::Step(i64::from(delta))));
+        playback.on_seek(on(|frame| Input::Seek(u64::try_from(frame).unwrap_or(0))));
         let on = |input: Input| {
             let ctl = Rc::downgrade(self);
             move || with(&ctl, |ctl| ctl.preview_input(input))
         };
-        window.on_stage_end(on(Input::End));
-        window.on_stage_play_pause(on(Input::PlayPause));
-        window.on_stage_toggle_native(on(Input::ToggleNative));
-        window.on_stage_compare({
+        playback.on_end(on(Input::End));
+        playback.on_cancel_decode(on(Input::CancelDecode));
+        playback.on_seek_output({
+            let ctl = Rc::downgrade(self);
+            move |input| {
+                with(&ctl, |ctl| {
+                    ctl.preview_input(Input::SeekOutput(input.trim().parse().unwrap_or(0)));
+                });
+            }
+        });
+        playback.on_show_bytes({
+            let ctl = Rc::downgrade(self);
+            move |link| {
+                with(&ctl, |ctl| {
+                    let outcome = ctl.session.borrow_mut().preview_show_bytes(link);
+                    ctl.handle(outcome);
+                });
+            }
+        });
+        playback.on_play_pause(on(Input::PlayPause));
+        playback.on_toggle_native(on(Input::ToggleNative));
+        playback.on_compare({
             let ctl = Rc::downgrade(self);
             move |held| with(&ctl, |ctl| ctl.preview_input(Input::Compare(held)))
         });
-        window.on_stage_pan({
+        playback.on_pan({
             let ctl = Rc::downgrade(self);
             let weak = window.as_weak();
             move |dx, dy| {

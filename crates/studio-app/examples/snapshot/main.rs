@@ -746,13 +746,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         other => other,
     };
     let jobs = rest.iter().any(|a| a == "jobs");
-    if let Some(analyze) = analyze::scenario(name)? {
+    if let Some(mut analyze) = analyze::scenario(name)? {
         let encode = if name == "analyze-jobs" {
             scenario("running", long, now)?
         } else {
             analyze.session.state().clone()
         };
         studio_app::render(&window, analyze.session.state(), now);
+        if name == "analyze-playback" {
+            let stage = PictureBox::clamped(
+                u32::try_from(window.get_stage_px_width()).unwrap_or(1),
+                u32::try_from(window.get_stage_px_height()).unwrap_or(1),
+            );
+            analyze.playback(stage)?;
+            studio_app::render_preview(
+                &window,
+                analyze.session.state(),
+                analyze.session.preview(),
+                preview::Dirty {
+                    picture: true,
+                    view: true,
+                    thumbs: false,
+                },
+            );
+        }
         studio_app::render_analysis(&window, analyze.session.analysis());
         studio_app::render_jobs(
             &window,
@@ -853,6 +870,7 @@ fn answer(preview: &mut Preview, mut effects: Vec<preview::Effect>, timed: bool)
             let origin = match target {
                 PictureTarget::Source { .. } => PictureOrigin::Source,
                 PictureTarget::Result { .. } => PictureOrigin::Result,
+                PictureTarget::Document { .. } => continue,
             };
             let index = match frame {
                 PictureFrame::Poster => 42,
@@ -924,6 +942,7 @@ fn paint(
             den: 30000,
         }),
         frame_count: Some(300),
+        output: None,
         width,
         height,
         frame_width: fw,

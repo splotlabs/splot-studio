@@ -13,10 +13,9 @@
 //! - Generations increase with every `Picture` or `Play` sent. A picture is
 //!   shown only when it answers the newest stage request and shows the side
 //!   the user is looking at; anything else is dropped.
-//! - At most one request is in flight. What the user wants next is derived
-//!   from the state when the answer arrives, so scrubbing coalesces to the
-//!   latest position. Playback is the exception: a new stage request
-//!   replaces it at once (the engine stops playing when it arrives).
+//! - At most one request is in flight. A new Analyze seek or playback
+//!   request replaces older work at once. Encode stepping coalesces to the
+//!   latest position while it waits for a still picture.
 //! - Thumbnails go out only when no stage request waits and nothing plays.
 //! - Answered pictures are kept in a [`CACHE_BYTES`] cache, least recently
 //!   used first out, and dropped once their file leaves the list.
@@ -28,7 +27,8 @@
 //! from the shown picture's own origin.
 
 use studio_domain::preview::{
-    PictureBox, PictureFailure, PictureFrame, PictureOrigin, PictureTarget, PictureView, SourceRef,
+    OutputEvent, PictureBox, PictureFailure, PictureFrame, PictureOrigin, PictureTarget,
+    PictureView, SourceRef,
 };
 use studio_domain::protocol::Command;
 
@@ -37,6 +37,7 @@ use crate::present::preview as text;
 use crate::queue::ItemId;
 
 mod cache;
+mod document;
 mod scene;
 #[cfg(test)]
 mod tests;
@@ -73,6 +74,10 @@ pub enum Input {
     Step(i64),
     /// Go to this frame.
     Seek(u64),
+    /// Go to this one-based output number in Analyze.
+    SeekOutput(u64),
+    /// Cancel the current Analyze decode request.
+    CancelDecode,
     /// Go to the last frame.
     End,
     /// Play, or pause.
@@ -161,8 +166,14 @@ pub struct StageView {
     pub can_play: bool,
     /// Playing now.
     pub playing: bool,
-    /// Why playback is unavailable, when it is.
+    /// The timing assumption or a playback problem.
     pub play_note: String,
+    /// Why Analyze could not use the entered output number.
+    pub seek_error: String,
+    /// The current file scan or decode work in Analyze.
+    pub decode_work: String,
+    /// Output identity for the current Analyze picture.
+    pub output: Option<OutputEvent>,
     /// Press and hold shows the original.
     pub can_compare: bool,
     /// Showing the original while held.
@@ -263,6 +274,10 @@ pub struct Preview {
     play_note: Option<String>,
     shown: Option<Shown>,
     stage_failure: Option<String>,
+    document_progress: String,
+    document_notice: String,
+    /// The last output while Next checks for the end of a stream with an unknown count.
+    before_next: Option<Shown>,
     /// The stage request that failed, not asked again.
     failed: Option<Key>,
     /// The newest live picture of the subject's job.
@@ -308,6 +323,9 @@ impl Preview {
             play_note: None,
             shown: None,
             stage_failure: None,
+            document_progress: String::new(),
+            document_notice: String::new(),
+            before_next: None,
             failed: None,
             live: None,
             live_note: None,
@@ -341,21 +359,27 @@ impl Preview {
 
     /// The app state changed: follow the selected file and the list.
     pub fn sync(&mut self, scene: Scene) -> Vec<Effect> {
+        let mut out = Vec::new();
         if scene.thumbs != self.scene.thumbs {
             self.dirty.thumbs = true;
         }
         if scene.stage != self.scene.stage {
+            self.release_document(&mut out);
             let keep = matches!(
                 (&self.scene.stage, &scene.stage),
                 (Some(Subject::Source { item: a, .. }), Some(Subject::Live { item: b, .. })) if a == b
             );
-            self.position = None;
+            self.position = matches!(scene.stage, Some(Subject::Document { .. })).then_some(0);
             self.frames = scene.stage.as_ref().and_then(Subject::frames);
             self.comparing = false;
             self.compare_frame = None;
             self.saved = None;
             self.playing = false;
+            self.replay = false;
             self.play_note = None;
+            self.document_progress.clear();
+            self.document_notice.clear();
+            self.before_next = None;
             self.stage_failure = None;
             self.failed = None;
             self.live = None;
@@ -374,7 +398,8 @@ impl Preview {
         let scene = &self.scene;
         self.cache.retain(|k| referenced(scene, &k.target));
         self.thumb_failures.retain(|k| referenced(scene, &k.target));
-        self.pump()
+        out.extend(self.pump());
+        out
     }
 
     /// The user did something to the picture area or the window.
@@ -397,6 +422,9 @@ impl Preview {
                     self.playing = false;
                     self.dirty.view = true;
                 }
+                if !visible && self.document_id().is_some() {
+                    return self.cancel_document_decode();
+                }
             }
             Input::Compare(on) => self.compare(on),
             Input::Step(delta) => {
@@ -408,10 +436,19 @@ impl Preview {
                     } else {
                         frame.saturating_add(delta.unsigned_abs())
                     };
+                    let before_next =
+                        if delta == 1 && self.document_id().is_some() && self.frames.is_none() {
+                            self.shown.clone()
+                        } else {
+                            None
+                        };
                     self.seek(to);
+                    self.before_next = before_next;
                 }
             }
             Input::Seek(frame) => self.seek(frame),
+            Input::SeekOutput(output) => self.seek_output(output),
+            Input::CancelDecode => return self.cancel_document_decode(),
             Input::End => {
                 if let Some(count) = self.frames {
                     self.seek(count.saturating_sub(1));
@@ -419,10 +456,14 @@ impl Preview {
             }
             Input::PlayPause => {
                 if self.playing {
+                    if self.document_id().is_some() && self.document_decoding() {
+                        return self.cancel_document_decode();
+                    }
                     self.playing = false;
                 } else if self.can_play() {
+                    self.before_next = None;
                     if let (Some(frame), Some(count)) = (self.current_frame(), self.frames)
-                        && frame + 1 >= count
+                        && frame.saturating_add(1) >= count
                     {
                         self.position = Some(0);
                     }
@@ -455,6 +496,9 @@ impl Preview {
     /// A picture from the preview process.
     pub fn picture(&mut self, picture: Picture) -> Vec<Effect> {
         let generation = picture.header.generation;
+        if !self.valid_document_answer(&picture.header) {
+            return self.refused("The engine sent an invalid document output identity.");
+        }
         match self.inflight.clone() {
             Some(Sent::Picture {
                 generation: sent,
@@ -496,7 +540,12 @@ impl Preview {
                 ..
             }) if sent == generation => {
                 self.deaths = 0;
-                if self.on_side(&target) {
+                if self.on_side(&target)
+                    && (!matches!(target, PictureTarget::Document { .. }) || self.playing)
+                {
+                    if let Some(count) = picture.header.frame_count {
+                        self.frames = Some(count);
+                    }
                     self.position = Some(picture.header.frame);
                     self.show(Shown {
                         picture,
@@ -534,13 +583,24 @@ impl Preview {
                 }
             }
             Some(Sent::Play {
-                generation: sent, ..
+                generation: sent,
+                target,
+                ..
             }) if sent == generation => {
                 self.deaths = 0;
                 self.inflight = None;
                 self.playing = false;
-                self.play_note = Some(text::playback_failure(code, message));
-                self.dirty.view = true;
+                if matches!(target, PictureTarget::Document { .. }) {
+                    let detail = if code == PictureFailure::SourceChanged {
+                        text::DOCUMENT_CHANGED.to_owned()
+                    } else {
+                        text::playback_failure(code, message)
+                    };
+                    self.fail_document(detail);
+                } else {
+                    self.play_note = Some(text::playback_failure(code, message));
+                    self.dirty.view = true;
+                }
             }
             _ => {}
         }
@@ -548,9 +608,20 @@ impl Preview {
     }
 
     fn stage_failed(&mut self, key: Key, code: PictureFailure, message: &str) {
-        // Past the end: now the frame count is known; show the last frame.
+        if let (PictureFailure::OutOfRange, PictureFrame::Index { index }) = (code, key.frame)
+            && let Some(previous) = self.before_next.take()
+            && previous.picture.header.frame.checked_add(1) == Some(index)
+        {
+            self.position = Some(previous.picture.header.frame);
+            self.frames = Some(index);
+            self.show(previous);
+            return;
+        }
+        self.before_next = None;
+        // Encode keeps its existing fallback to the preceding index.
         if let (PictureFailure::OutOfRange, PictureFrame::Index { index }) = (code, key.frame)
             && index > 0
+            && !matches!(key.target, PictureTarget::Document { .. })
         {
             self.frames = Some(self.frames.map_or(index, |n| n.min(index)));
             self.position = Some(index - 1);
@@ -558,7 +629,16 @@ impl Preview {
             return;
         }
         let result = matches!(key.target, PictureTarget::Result { .. });
-        self.stage_failure = Some(text::picture_failure(code, message, result));
+        self.stage_failure = Some(
+            if matches!(key.target, PictureTarget::Document { .. })
+                && code == PictureFailure::SourceChanged
+            {
+                text::DOCUMENT_CHANGED.into()
+            } else {
+                text::picture_failure(code, message, result)
+            },
+        );
+        self.document_progress.clear();
         self.failed = Some(key);
         self.shown = None;
         self.playing = false;
@@ -571,6 +651,7 @@ impl Preview {
         if let Some(Sent::Play {
             generation: sent,
             stopping,
+            target,
             ..
         }) = &self.inflight
             && *sent == generation
@@ -579,7 +660,11 @@ impl Preview {
             // the natural end says where playback got to.
             if let (Some(frame), false) = (frame, *stopping) {
                 self.position = Some(frame);
+                if matches!(target, PictureTarget::Document { .. }) {
+                    self.frames = frame.checked_add(1);
+                }
             }
+            self.document_progress.clear();
             self.inflight = None;
             self.playing = false;
             self.dirty.view = true;
@@ -613,12 +698,19 @@ impl Preview {
         if self.deaths > MAX_DEATHS {
             return self.give_up(text::stopped(why));
         }
+        if self.document_id().is_some() {
+            self.fail_document(text::stopped(why));
+            return Vec::new();
+        }
         self.pump()
     }
 
     fn give_up(&mut self, why: String) -> Vec<Effect> {
         self.inflight = None;
         self.playing = false;
+        if self.document_id().is_some() {
+            self.fail_document(why.clone());
+        }
         self.broken = Some(why);
         self.dirty.view = true;
         Vec::new()
@@ -722,6 +814,21 @@ impl Preview {
         let frame = self
             .frames
             .map_or(frame, |count| frame.min(count.saturating_sub(1)));
+        if self.document_id().is_some() {
+            self.before_next = None;
+            self.stage_failure = None;
+            self.failed = None;
+            self.document_notice.clear();
+            // Keep only a picture that still represents the requested output.
+            if self
+                .shown
+                .as_ref()
+                .is_some_and(|s| s.picture.header.frame != frame)
+            {
+                self.shown = None;
+                self.dirty.picture = true;
+            }
+        }
         self.position = Some(frame);
         if self.comparing {
             self.compare_frame = Some(frame);
@@ -731,8 +838,11 @@ impl Preview {
     }
 
     fn show(&mut self, shown: Shown) {
+        self.before_next = None;
         self.shown = Some(shown);
         self.stage_failure = None;
+        self.failed = None;
+        self.document_progress.clear();
         self.dirty.picture = true;
         self.dirty.view = true;
     }
@@ -756,13 +866,15 @@ impl Preview {
         self.broken.is_none()
             && matches!(
                 self.scene.stage,
-                Some(Subject::Source { .. } | Subject::Result { .. })
+                Some(Subject::Source { .. } | Subject::Result { .. } | Subject::Document { .. })
             )
             && self.current_frame().is_some()
     }
 
     fn can_play(&self) -> bool {
-        self.navigable() && self.play_note.is_none() && self.timing_known()
+        self.navigable()
+            && self.play_note.is_none()
+            && (self.document_id().is_some() || self.timing_known())
     }
 
     /// The shown picture has a time, so the stream has frame timing.
@@ -879,6 +991,10 @@ impl Preview {
                     self.replay = false;
                     self.send_play(target, from, view, &mut out);
                 }
+                Some(Sent::Picture { .. }) if matches!(target, PictureTarget::Document { .. }) => {
+                    self.replay = false;
+                    self.send_play(target, from, view, &mut out);
+                }
                 Some(Sent::Picture { .. }) => {}
             },
             Some(Want::Picture(key)) => {
@@ -899,6 +1015,11 @@ impl Preview {
                                 ..
                             }) if *k == key => {}
                             None | Some(Sent::Play { .. }) => {
+                                self.send_picture(key, false, &mut out);
+                            }
+                            Some(Sent::Picture { .. })
+                                if matches!(key.target, PictureTarget::Document { .. }) =>
+                            {
                                 self.send_picture(key, false, &mut out);
                             }
                             Some(Sent::Picture { .. }) => {}
@@ -953,6 +1074,9 @@ impl Preview {
         let generation = self.take_generation();
         if !thumb {
             self.stage_generation = generation;
+            if matches!(key.target, PictureTarget::Document { .. }) {
+                self.start_document_request();
+            }
         }
         out.push(Effect {
             request_id: generation,
@@ -980,6 +1104,9 @@ impl Preview {
     ) {
         let generation = self.take_generation();
         self.stage_generation = generation;
+        if matches!(target, PictureTarget::Document { .. }) {
+            self.start_document_request();
+        }
         out.push(Effect {
             request_id: generation,
             command: Command::Play {
@@ -1018,6 +1145,9 @@ impl Preview {
             can_play: false,
             playing: self.playing,
             play_note: String::new(),
+            seek_error: String::new(),
+            decode_work: String::new(),
+            output: None,
             can_compare: false,
             comparing: self.comparing,
             can_native: false,
@@ -1028,6 +1158,7 @@ impl Preview {
             return view;
         };
         let live = matches!(subject, Subject::Live { .. });
+        let document = matches!(subject, Subject::Document { .. });
         match (&self.shown, subject) {
             // The card under the area says the file is being read.
             (_, Subject::Loading { .. }) => view.state = StageState::Loading,
@@ -1043,6 +1174,7 @@ impl Preview {
                 view.badge = text::badge(header, self.frames, waiting);
                 view.time_text = header.time.map_or_else(String::new, text::time);
                 view.position = self.current_frame().unwrap_or(header.frame);
+                view.output = header.output;
                 view.frames = self.frames.unwrap_or(0);
                 view.frame_text = text::frame_of(view.position, self.frames);
             }
@@ -1069,10 +1201,15 @@ impl Preview {
         if let Some(note) = self.live_note.as_ref().filter(|_| live) {
             view.message.clone_from(note);
         }
-        view.navigable = self.navigable() && view.state == StageState::Picture;
-        view.transport = self.can_native() && view.state != StageState::Unavailable;
+        view.navigable = self.navigable() && (document || view.state == StageState::Picture);
+        view.transport = document || self.can_native() && view.state != StageState::Unavailable;
+        if document {
+            self.document_view(&mut view);
+        }
         view.can_play = view.navigable && self.can_play();
-        view.play_note = if !view.navigable || view.can_play || self.playing {
+        view.play_note = if document {
+            self.document_play_note()
+        } else if !view.navigable || view.can_play || self.playing {
             String::new()
         } else {
             self.play_note
@@ -1106,6 +1243,7 @@ fn referenced(scene: &Scene, target: &PictureTarget) -> bool {
                     .and_then(Subject::source)
                     .is_some_and(|s| s == source)
         }
+        PictureTarget::Document { .. } => false,
         PictureTarget::Result { path, .. } => {
             matches!(&scene.stage, Some(Subject::Result { path: p, .. }) if p == path)
         }

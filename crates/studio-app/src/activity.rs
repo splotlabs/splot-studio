@@ -288,6 +288,7 @@ impl Activity {
             | Event::Working { .. }
             | Event::Picture { .. }
             | Event::PictureUnavailable { .. }
+            | Event::PictureProgress { .. }
             | Event::PlaybackEnded { .. }
             | Event::AnalysisOpened { .. }
             | Event::AnalysisPage { .. }

@@ -12,7 +12,7 @@ import { Button, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 import { Tokens } from "tokens.slint";
 import { FocusRing, KeyboardFocus } from "focus.slint";
 import { Caption, LinkButton, WorkspaceSwitch } from "controls.slint";
-import { IconButton } from "stage.slint";
+import { IconButton, Playback, PlaybackPanel, StageState } from "stage.slint";
 
 // What the shown document is doing; `empty` when none is open.
 // `attention`: a restored document whose file changed or is missing.
@@ -107,6 +107,7 @@ export global Analysis {
     in property <string> action-description;
     // The read was cancelled and kept only the start of the file.
     in property <bool> can-read-again;
+    in property <bool> can-playback;
 
     in property <[string]> type-labels;
     in-out property <int> type-index;
@@ -182,6 +183,7 @@ export global Analysis {
     callback cursor(NavStep);
     callback select-at-cursor();
     callback toggle-bytes();
+    callback toggle-playback();
     callback back();
     callback forward();
     callback go-to(string);
@@ -879,7 +881,8 @@ export component AnalyzeView inherits VerticalLayout {
     in property <string> open-shortcut;
     property <length> navigator-width: 320px;
     property <length> detail-width: 380px;
-    property <length> full-width: root.navigator-width + Tokens.space-4 + root.detail-width;
+    out property <length> full-width: root.navigator-width + Tokens.space-4 + root.detail-width;
+    out property <length> playback-height: 240px;
 
     min-width: root.full-width;
     preferred-width: root.full-width;
@@ -889,6 +892,7 @@ export component AnalyzeView inherits VerticalLayout {
 
     // The window copies `text` to the clipboard.
     callback copy(string);
+    callback reveal-bytes();
 
     // The documents and what reading the shown one found.
     if Analysis.documents.length > 0: HorizontalLayout {
@@ -1009,12 +1013,100 @@ export component AnalyzeView inherits VerticalLayout {
                 accessible-live-region: polite;
             }
 
+            LinkButton {
+                min-height: 0;
+                text: Playback.state == StageState.none ? "Show Playback" : "Hide Playback";
+                description: Analysis.can-playback ? "Show or hide AV2 playback." : "Read the file again to verify the source bytes for playback.";
+                enabled: Analysis.can-playback;
+                accessible-expandable: true;
+                accessible-expanded: Playback.state != StageState.none;
+                clicked => {
+                    Analysis.toggle-playback();
+                }
+            }
+
             if Analysis.can-read-again: LinkButton {
                 min-height: 0;
                 text: "Read Again";
                 description: "Read the whole file; the selection is kept";
                 clicked => {
                     Analysis.reopen();
+                }
+            }
+        }
+
+        if Analysis.can-playback && Playback.state != StageState.none: VerticalLayout {
+            spacing: Tokens.space-1;
+
+            PlaybackPanel {
+                document: true;
+                picture-height: root.playback-height;
+            }
+
+            HorizontalLayout {
+                spacing: Tokens.space-2;
+
+                LineEdit {
+                    width: 150px;
+                    placeholder-text: "Go to output…";
+                    accessible-label: "Go to output number";
+                    accessible-description: "Enter a positive output number.";
+                    enabled: Playback.navigable;
+                    accepted(text) => {
+                        Playback.seek-output(text);
+                    }
+                }
+
+                if Playback.decode-work != "": LinkButton {
+                    text: "Cancel Decode";
+                    description: "Stop reading or decoding this picture.";
+                    clicked => {
+                        Playback.cancel-decode();
+                    }
+                }
+
+                Caption {
+                    horizontal-stretch: 1;
+                    text: Playback.state == StageState.loading ? "" : Playback.decode-work;
+                    vertical-alignment: center;
+                    accessible-live-region: polite;
+                }
+            }
+
+            if Playback.seek-error != "": Caption {
+                text: Playback.seek-error;
+                color: Tokens.warning;
+                accessible-live-region: polite;
+            }
+
+            if Playback.output-unit != "": HorizontalLayout {
+                spacing: Tokens.space-2;
+
+                Caption {
+                    text: Playback.output-layers;
+                    vertical-alignment: center;
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                for link[index] in [
+                    { label: "Temporal Unit", value: Playback.output-unit },
+                    { label: "Coded Frame", value: Playback.output-coded },
+                    { label: "Showing Frame", value: Playback.output-showing },
+                    { label: "Sequence Header", value: Playback.output-sequence }
+                ]: LinkButton {
+                    visible: link.value != "";
+                    min-height: 20px;
+                    quiet: true;
+                    text: link.label;
+                    description: "Show " + link.label + " at " + link.value;
+                    clicked => {
+                        Playback.show-bytes(index);
+                        root.reveal-bytes();
+                        if Analysis.bytes-shown {
+                            byte-view.focus();
+                        }
+                    }
                 }
             }
         }
@@ -1200,7 +1292,7 @@ export component AnalyzeView inherits VerticalLayout {
         }
 
         VerticalLayout {
-            spacing: Tokens.space-1;
+            spacing: Analysis.bytes-shown ? Tokens.space-1 : 0px;
 
             HorizontalLayout {
                 spacing: Tokens.space-2;
@@ -1226,11 +1318,16 @@ export component AnalyzeView inherits VerticalLayout {
                 }
             }
 
-            if Analysis.bytes-shown: HorizontalLayout {
+            HorizontalLayout {
                 spacing: Tokens.space-4;
                 alignment: start;
+                visible: Analysis.bytes-shown;
+                min-height: Analysis.bytes-shown ? self.preferred-height : 0px;
+                max-height: self.min-height;
 
-                ByteView { }
+                byte-view := ByteView {
+                    enabled: Analysis.bytes-shown;
+                }
 
                 // Which part each tint is, and the byte under the cursor in
                 // words: the parts do not rest on the tints alone.

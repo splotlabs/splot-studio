@@ -266,14 +266,14 @@ impl<R: Read> Read for Checked<'_, R> {
 }
 
 /// Hashes bytes from the file handle, including any bytes read ahead by the buffer.
-pub(super) struct HashReader<R> {
+pub(crate) struct HashReader<R> {
     inner: R,
     hash: Sha256,
     bytes: u64,
 }
 
 impl<R> HashReader<R> {
-    pub(super) fn new(inner: R) -> Self {
+    pub(crate) fn new(inner: R) -> Self {
         Self {
             inner,
             hash: Sha256::new(),
@@ -281,7 +281,7 @@ impl<R> HashReader<R> {
         }
     }
 
-    pub(super) fn finish(self) -> SourceDigest {
+    pub(crate) fn finish(self) -> SourceDigest {
         SourceDigest {
             sha256: crate::artifact::hex(&self.hash.finalize()),
             bytes: self.bytes,

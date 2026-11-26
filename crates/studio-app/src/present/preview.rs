@@ -22,6 +22,8 @@ pub const HOLD: &str = "Hold to see the original";
 pub const LOADING_ORIGINAL: &str = "Loading the original…";
 /// Why Play is not offered when the shown picture has no time.
 pub const NO_TIMING: &str = "Playback needs frame timing, and this file has none.";
+/// The document changed after the inspection engine read it.
+pub const DOCUMENT_CHANGED: &str = "The file changed. Close the document and open the file again.";
 /// Under Advanced: what the preview is and is not.
 pub const SDR_NOTE: &str = "The preview is an 8-bit SDR approximation for comparing source and \
                             result, not a reference display. Its colours are not managed.";
@@ -105,6 +107,7 @@ pub fn badge(header: &PictureHeader, frames: Option<u64>, waiting: bool) -> Stri
     let mut badge = match header.origin {
         PictureOrigin::Source => "Original".to_owned(),
         PictureOrigin::Result => "AV2 result".to_owned(),
+        PictureOrigin::Document => "Decoded AV2".to_owned(),
         PictureOrigin::Live => format!("Live · frame {}", frame_of_words(header.frame, frames)),
     };
     if waiting {
@@ -169,7 +172,11 @@ pub fn accessible(view: &StageView) -> String {
         StageState::Picture => {
             let mut line = format!("Preview: {}", view.badge);
             if view.navigable {
-                let _ = write!(line, ", frame {}", view.frame_text);
+                if view.output.is_some() {
+                    let _ = write!(line, ", {}", view.frame_text);
+                } else {
+                    let _ = write!(line, ", frame {}", view.frame_text);
+                }
                 if !view.time_text.is_empty() {
                     let _ = write!(line, " at {}", view.time_text);
                 }
@@ -181,6 +188,10 @@ pub fn accessible(view: &StageView) -> String {
                 line.push_str(", playing");
             }
             line.push('.');
+            if !view.play_note.is_empty() {
+                line.push(' ');
+                line.push_str(&view.play_note);
+            }
             line
         }
     }
@@ -198,6 +209,7 @@ mod tests {
             frame: 116,
             time: None,
             frame_count: Some(300),
+            output: None,
             width: 4,
             height: 2,
             frame_width: 1920,

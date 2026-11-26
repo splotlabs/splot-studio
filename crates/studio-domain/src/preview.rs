@@ -14,6 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::analysis::SourceDigest;
 use crate::job::{SourceFingerprint, WirePath};
 
 /// The widest picture the engine sends, in pixels.
@@ -95,6 +96,17 @@ pub enum PictureTarget {
         /// The source.
         source: SourceRef,
     },
+    /// An AV2 stream opened in Analyze.
+    Document {
+        /// The ID of the open document.
+        document: u64,
+        /// The inspected file.
+        path: WirePath,
+        /// File metadata at inspection.
+        fingerprint: SourceFingerprint,
+        /// The bytes the inspection worker read from the start of the file.
+        digest: Box<SourceDigest>,
+    },
     /// A frame of a finished output file, decoded by the Splot decoder.
     Result {
         /// The output file.
@@ -126,6 +138,8 @@ pub enum PictureFrame {
 pub enum PictureOrigin {
     /// The source, as the encoder receives it.
     Source,
+    /// An output picture from an open Analyze document.
+    Document,
     /// A finished output file, through the Splot decoder.
     Result,
     /// The output of the running job so far, through the Splot decoder.
@@ -166,6 +180,43 @@ pub struct MediaTime {
     pub den: u64,
 }
 
+/// Source locations for one decoder output in the current document.
+/// The offsets identify file bytes. OBU offsets point to the first header byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputEvent {
+    /// Zero-based position in decoder output order.
+    pub ordinal: u64,
+    /// Start of the temporal unit that requested display.
+    pub unit_offset: u64,
+    /// Size of that unit, excluding container headers.
+    pub unit_len: u64,
+    /// Extended layer of the output picture.
+    pub extended_layer: u8,
+    /// Embedded layer of the output picture.
+    pub embedded_layer: u8,
+    /// Temporal layer of the output picture.
+    pub temporal_layer: u8,
+    /// OBU that coded the reconstructed samples, when known.
+    pub coded_offset: Option<u64>,
+    /// OBU that requested this display, when known.
+    pub showing_offset: Option<u64>,
+    /// Sequence header that applies to the coded frame, when known.
+    pub sequence_offset: Option<u64>,
+    /// Signaled interval between pictures from consecutive output temporal units.
+    /// Pictures in the same unit can share a presentation time.
+    pub interval: Option<MediaTime>,
+}
+
+/// Work that precedes a requested document picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PictureStage {
+    /// Reading source bytes.
+    Scan,
+    /// Decoding preceding output pictures to restore decoder state.
+    Replay,
+}
+
 /// Describes one picture. On the wire its pixels follow immediately:
 /// `width * height * 3` bytes, rows top to bottom, R, G, B, no padding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,6 +226,8 @@ pub struct PictureHeader {
     pub generation: u64,
     /// Where it came from.
     pub origin: PictureOrigin,
+    /// Decoder evidence for a document output.
+    pub output: Option<OutputEvent>,
     /// The zero-based display index of the frame.
     pub frame: u64,
     /// The frame's presentation time; `None` when the stream has no timing.
@@ -238,6 +291,7 @@ mod tests {
         PictureHeader {
             generation: 1,
             origin: PictureOrigin::Source,
+            output: None,
             frame: 0,
             time: None,
             frame_count: None,

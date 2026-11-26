@@ -13,7 +13,8 @@
 //! `analyze-jobs` (two files read, one reading and one queued behind it,
 //! the first shown, for the Jobs list), and two documents restored from a last session:
 //! `analyze-changed` (the file was replaced since) and `analyze-missing`
-//! (nothing is at its path any more).
+//! (nothing is at its path any more). `analyze-playback` decodes an AV2 file
+//! from `STUDIO_PLAYBACK_FIXTURE` with the real preview engine.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,12 +23,14 @@ use std::time::{Duration, Instant};
 
 use studio_app::analysis::{Input, Origin, Phase, Restore, Saved};
 use studio_app::engine::{Delivery, ENGINE_NAME};
+use studio_app::preview::{self, StageState};
 use studio_app::recovery::{Recovered, RestoredView};
 use studio_app::session::{Route, Session};
 use studio_app::state::{AppState, INITIAL_SETTINGS, Intent, Startup};
 use studio_app::workspace::Workspace;
 use studio_domain::analysis::{KindFilter, RowFilter};
 use studio_domain::job::SourceFingerprint;
+use studio_domain::preview::PictureBox;
 
 /// The engine tests' `ivf()`: three records (TD and sequence header, an
 /// empty payload, TD and a tile group with the extension), 82 bytes.
@@ -86,16 +89,55 @@ impl Scenario {
 
     /// Delivers the engine's answers until nothing is asked for.
     fn settle(&mut self) -> Result<(), String> {
+        self.wait_until(|session| !session.analysis().waiting())
+    }
+
+    fn wait_until(&mut self, ready: impl Fn(&Session) -> bool) -> Result<(), String> {
         let deadline = Instant::now() + Duration::from_secs(30);
-        while self.session.analysis().waiting() {
+        while !ready(&self.session) {
             let left = deadline.saturating_duration_since(Instant::now());
             let (route, delivery) = self
                 .rx
                 .recv_timeout(left)
-                .map_err(|e| format!("the inspect engine did not answer: {e}"))?;
+                .map_err(|e| format!("The engine did not answer ({e})."))?;
             self.session.deliver(route, delivery, Instant::now());
         }
         Ok(())
+    }
+
+    pub fn playback(&mut self, stage: PictureBox) -> Result<(), String> {
+        let path = std::env::var_os("STUDIO_PLAYBACK_FIXTURE")
+            .map(PathBuf::from)
+            .ok_or("Set STUDIO_PLAYBACK_FIXTURE to an AV2 file.")?;
+        let path = path.canonicalize().map_err(|e| e.to_string())?;
+        self.input(Input::Open(vec![path]));
+        self.settle()?;
+        if self
+            .session
+            .analysis()
+            .shown()
+            .and_then(studio_app::analysis::Document::summary)
+            .is_none_or(|summary| summary.digest.is_none())
+        {
+            return Err("The inspection engine could not verify the file for playback.".into());
+        }
+        self.session.preview_input(preview::Input::Resized {
+            stage,
+            thumb: PictureBox::clamped(64, 36),
+        });
+        self.input(Input::TogglePlayback);
+        self.wait_until(|session| {
+            matches!(
+                session.preview().view().state,
+                StageState::Picture | StageState::Unavailable
+            )
+        })?;
+        let view = self.session.preview().view();
+        if view.state == StageState::Picture {
+            Ok(())
+        } else {
+            Err(view.message)
+        }
     }
 }
 
@@ -171,7 +213,7 @@ pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
         Instant::now(),
     );
     match name {
-        "analyze-empty" => {}
+        "analyze-empty" | "analyze-playback" => {}
         "analyze-opening" => {
             // Asked for, and never answered here.
             let path = scenario.file("park walk.ivf", &ivf())?;

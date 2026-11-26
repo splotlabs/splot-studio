@@ -159,6 +159,8 @@ pub struct Session {
     prepared: Option<(u64, JobSpec)>,
     confirming: Option<(u64, usize)>,
     preview: Preview,
+    /// The open inspection read whose playback panel is visible.
+    playback_document: Option<u64>,
     /// The preview process, started on first need, with its spawn number.
     previewer: Option<(u64, Worker)>,
     previewers_started: u64,
@@ -173,8 +175,6 @@ pub struct Session {
     analyze_dialog: bool,
     /// The Locate dialog is showing for the missing document of this path.
     locating: Option<PathBuf>,
-    /// The window is not minimized; the picture area also needs Encode shown.
-    window_visible: bool,
     journal: Option<Writer>,
     /// The journal bytes last submitted.
     saved: Option<Vec<u8>>,
@@ -208,6 +208,7 @@ impl Session {
             prepared: None,
             confirming: None,
             preview: Preview::new(),
+            playback_document: None,
             previewer: None,
             previewers_started: 0,
             analysis: Analysis::restored(view),
@@ -218,7 +219,6 @@ impl Session {
             inspectors_started: 0,
             analyze_dialog: false,
             locating: None,
-            window_visible: true,
             journal,
             saved: None,
             saved_view: None,
@@ -286,17 +286,10 @@ impl Session {
     }
 
     /// The user did something to the picture area or the window. The
-    /// picture area counts as visible only while Encode is shown.
+    /// picture area is visible when the window is visible.
     pub fn preview_input(&mut self, input: preview::Input) -> Outcome {
         let mut outcome = Outcome::nothing();
         if !self.shut_down {
-            let input = match input {
-                preview::Input::Visible(visible) => {
-                    self.window_visible = visible;
-                    preview::Input::Visible(self.picture_visible())
-                }
-                other => other,
-            };
             let effects = self.preview.input(input);
             self.send_preview(effects);
             outcome.preview = self.preview.take_dirty();
@@ -380,24 +373,56 @@ impl Session {
             if !batch_policy {
                 self.persist();
             }
-            let effects = self.preview.sync(preview::scene(&self.state));
-            self.send_preview(effects);
         }
         if self.state.workspace() != workspace {
-            // Playback stops and nothing is asked for while Encode is hidden.
-            let effects = self
-                .preview
-                .input(preview::Input::Visible(self.picture_visible()));
-            self.send_preview(effects);
             self.read_if_shown();
             outcome.analysis |= self.analysis.take_dirty();
+        }
+        if outcome.changed == Changed::Phase || self.state.workspace() != workspace {
+            self.sync_preview();
         }
         outcome.preview = self.preview.take_dirty();
         outcome
     }
 
-    const fn picture_visible(&self) -> bool {
-        self.window_visible && matches!(self.state.workspace(), Workspace::Encode)
+    fn sync_preview(&mut self) {
+        let scene = if self.state.workspace() == Workspace::Encode {
+            self.playback_document = None;
+            preview::scene(&self.state)
+        } else {
+            let stage = self
+                .analysis
+                .shown()
+                .filter(|doc| Some(doc.id()) == self.playback_document)
+                .and_then(|doc| {
+                    let summary = doc.summary()?;
+                    Some(preview::Subject::Document {
+                        document: doc.id(),
+                        path: WirePath::from_path(doc.path()),
+                        fingerprint: summary.fingerprint,
+                        digest: summary.digest.clone()?,
+                    })
+                });
+            if stage.is_none() {
+                self.playback_document = None;
+            }
+            preview::Scene {
+                stage,
+                thumbs: Vec::new(),
+            }
+        };
+        let effects = self.preview.sync(scene);
+        self.send_preview(effects);
+    }
+
+    /// Selects a byte range linked to the displayed output.
+    pub fn preview_show_bytes(&mut self, link: i32) -> Outcome {
+        if let Some((document, offset)) = self.preview.output_byte(link) {
+            let effects = self.preview.pause_document();
+            self.send_preview(effects);
+            return self.analysis_input(analysis::Input::PlaybackByte { document, offset });
+        }
+        Outcome::nothing()
     }
 
     /// The user did something in the Analyze workspace.
@@ -405,6 +430,15 @@ impl Session {
         let mut outcome = Outcome::nothing();
         if self.shut_down {
             return outcome;
+        }
+        if input == analysis::Input::TogglePlayback {
+            self.playback_document = if self.playback_document.is_some() {
+                None
+            } else {
+                self.analysis.shown().map(analysis::Document::id)
+            };
+            self.sync_preview();
+            return self.preview_outcome();
         }
         if input == analysis::Input::Resolve
             && let Some(doc) = self.analysis.shown()
@@ -422,6 +456,8 @@ impl Session {
         self.read_if_shown();
         self.persist_view();
         outcome.analysis = self.analysis.take_dirty();
+        self.sync_preview();
+        outcome.preview = self.preview.take_dirty();
         outcome
     }
 
@@ -582,8 +618,13 @@ impl Session {
         };
         self.send_inspect(effects);
         self.persist_view();
+        let analysis = self.analysis.take_dirty();
+        if analysis {
+            self.sync_preview();
+        }
         Outcome {
-            analysis: self.analysis.take_dirty(),
+            analysis,
+            preview: self.preview.take_dirty(),
             ..Outcome::nothing()
         }
     }
@@ -745,6 +786,15 @@ impl Session {
             },
             _ if !current => Vec::new(),
             Delivery::Event(envelope) => match envelope.body {
+                Event::PictureProgress {
+                    generation,
+                    stage,
+                    completed,
+                    total,
+                } => {
+                    self.preview.progress(generation, stage, completed, total);
+                    Vec::new()
+                }
                 Event::PictureUnavailable {
                     generation,
                     code,
@@ -779,6 +829,11 @@ impl Session {
     /// of stream is what reports it.
     fn send_preview(&mut self, effects: Vec<preview::Effect>) {
         for effect in effects {
+            if self.previewer.is_none()
+                && matches!(effect.command, Command::CloseDocumentPlayback { .. })
+            {
+                continue;
+            }
             if self.previewer.is_none() {
                 let spawn = self.previewers_started;
                 self.previewers_started += 1;
