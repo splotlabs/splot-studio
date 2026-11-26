@@ -751,6 +751,7 @@ fn the_scene_follows_the_file_from_source_to_live_to_result() {
             id,
             input: JobInput::Event(Event::Completed {
                 report: JobReport {
+                    pass_digest: None,
                     destination: destination.clone(),
                     frames: 30,
                     bytes: 1,

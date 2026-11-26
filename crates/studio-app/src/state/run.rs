@@ -230,6 +230,8 @@ impl AppState {
                         destination: WirePath::from_path(&item.destination.path),
                         settings: settings.clone(),
                         identity: identity.clone(),
+                        purpose: studio_domain::job::JobPurpose::Encode,
+                        pass_digest: None,
                         pass_artifact: None,
                     },
                     policy: Vec::new(),

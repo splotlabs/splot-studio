@@ -280,6 +280,8 @@ fn start_with(
         destination: WirePath::from_path(destination),
         settings: settings.into(),
         identity: capabilities.options,
+        purpose: studio_domain::job::JobPurpose::Encode,
+        pass_digest: None,
         pass_artifact: None,
     };
     let sent = worker.send(1, Command::Start { job, live: None });

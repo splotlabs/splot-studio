@@ -193,6 +193,7 @@ impl App {
             id,
             Event::Completed {
                 report: JobReport {
+                    pass_digest: None,
                     destination: destination.unwrap_or(WirePath::Utf8(String::new())),
                     frames: 3,
                     bytes: 100,

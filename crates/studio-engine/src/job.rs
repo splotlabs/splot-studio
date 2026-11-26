@@ -245,6 +245,7 @@ fn execute(
     });
     let bytes = output::publish(temp, &destination)?;
     Ok(JobReport {
+        pass_digest: None,
         destination: job.destination.clone(),
         frames,
         bytes,
@@ -583,6 +584,8 @@ mod tests {
                 values: BTreeMap::new(),
             },
             identity: Some(options_identity()),
+            purpose: studio_domain::job::JobPurpose::Encode,
+            pass_digest: None,
             pass_artifact: None,
         };
         Ok((dir, spec))

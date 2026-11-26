@@ -407,6 +407,7 @@ pub fn elapsed(duration: Duration) -> String {
 #[must_use]
 pub const fn stage(stage: Stage) -> &'static str {
     match stage {
+        Stage::FirstPass => "Analyzing frames",
         Stage::Checking => "Checking the frames",
         Stage::Encoding => "Encoding",
         Stage::Finalizing => "Finishing the file",
@@ -520,6 +521,7 @@ pub fn failure_text_with(failure: &Failure, verb: &str) -> String {
 #[must_use]
 pub const fn check_name(kind: CheckKind) -> &'static str {
     match kind {
+        CheckKind::PassArtifact => "First-pass artifact integrity",
         CheckKind::Structure => "Structure",
         CheckKind::SplotDecode => "Splot decode (same codebase as the encoder)",
         CheckKind::AvmDecode => "Independent AVM decode",

@@ -291,9 +291,23 @@ pub enum Disclosure {
     LayoutRepacked,
 }
 
-/// One immutable encode request.
+/// The operation requested for a source.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobPurpose {
+    /// Encode the source, optionally with verified first-pass costs.
+    #[default]
+    Encode,
+    /// Analyze every frame and publish a reusable local pass artifact.
+    FirstPass,
+}
+
+/// One immutable job request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobSpec {
+    /// Historical jobs encoded their source.
+    #[serde(default)]
+    pub purpose: JobPurpose,
     /// The file to read. It is never modified.
     pub source: WirePath,
     /// The file the user looked at, from [`SourceFacts::fingerprint`]. The
@@ -316,6 +330,9 @@ pub struct JobSpec {
     /// Local first-pass artifact selected for this job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pass_artifact: Option<WirePath>,
+    /// Expected SHA-256 digest from the completed first pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_digest: Option<String>,
 }
 
 /// Where a running job is.
@@ -326,6 +343,8 @@ pub enum Stage {
     /// format and constant timing. Only for sources read through `FFmpeg`.
     /// Nothing is written and no [`Progress`] is reported.
     Checking,
+    /// Analyzing source frames to measure their encoded costs.
+    FirstPass,
     /// Reading frames and writing packets.
     Encoding,
     /// Flushing the encoder and finishing the temporary file.
@@ -356,6 +375,8 @@ pub struct Progress {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckKind {
+    /// The worker verified a complete first-pass artifact.
+    PassArtifact,
     /// The container or stream framing parses and its counts match the encode.
     Structure,
     /// Splot's own decoder decodes every frame. Same codebase as the encoder,
@@ -397,7 +418,10 @@ pub struct Check {
 pub struct JobReport {
     /// The published file.
     pub destination: WirePath,
-    /// Frames encoded.
+    /// Digest of the verified first-pass artifact generated or used by this job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_digest: Option<String>,
+    /// Frames analyzed or encoded, according to the job purpose.
     pub frames: u64,
     /// Size of the published file in bytes.
     pub bytes: u64,

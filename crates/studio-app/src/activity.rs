@@ -393,6 +393,7 @@ mod tests {
 
     fn report() -> JobReport {
         JobReport {
+            pass_digest: None,
             destination: WirePath::Utf8("/out/clip.ivf".into()),
             frames: 90,
             bytes: 12_345,

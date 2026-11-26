@@ -19,6 +19,7 @@ studio-domain = { path = "crates/studio-domain", version = "0.1.0" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11.1"
 thiserror = "2"
 # Engine only. Tracks splot main until Splot has releases (owner decision,
 # 2026-11-20); Cargo.lock records the exact commit for every splot-* crate.

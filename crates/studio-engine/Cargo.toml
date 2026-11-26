@@ -21,6 +21,7 @@ studio-domain.workspace = true
 # serde derives the ffprobe JSON schema; already in the graph through studio-domain.
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 splot-core.workspace = true
 splot-decode.workspace = true
 splot-encode.workspace = true

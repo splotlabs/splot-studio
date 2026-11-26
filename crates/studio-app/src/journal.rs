@@ -954,6 +954,8 @@ mod tests {
             }
             .into(),
             identity: None,
+            purpose: studio_domain::job::JobPurpose::Encode,
+            pass_digest: None,
             pass_artifact: None,
         }
     }

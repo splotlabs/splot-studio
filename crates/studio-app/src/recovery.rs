@@ -461,6 +461,8 @@ mod tests {
             destination: WirePath::from_path(&destination_path()),
             settings: INITIAL_SETTINGS.into(),
             identity: None,
+            purpose: studio_domain::job::JobPurpose::Encode,
+            pass_digest: None,
             pass_artifact: None,
         }
     }
@@ -596,6 +598,7 @@ mod tests {
             JournalState::Completed {
                 job: job(),
                 report: JobReport {
+                    pass_digest: None,
                     destination: WirePath::from_path(&destination_path()),
                     frames: 3,
                     bytes: 99,
