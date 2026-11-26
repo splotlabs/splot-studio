@@ -81,15 +81,12 @@ impl Draft {
         purpose: ExportPurpose,
         sources: Vec<ExportSource>,
         current: Option<u64>,
-        frame_source: Option<ExportFrameSource>,
+        frame_source: Option<&ExportFrameSource>,
     ) -> Result<Self, String> {
-        let grain = frame_source
-            .as_ref()
-            .map_or(GrainPolicy::Apply, |frame| frame.grain);
+        let grain = frame_source.map_or(GrainPolicy::Apply, |frame| frame.grain);
         let frame = if purpose == ExportPurpose::Frame {
             Some(
                 frame_source
-                    .as_ref()
                     .map(|frame| SelectedFrame {
                         ordinal: frame.ordinal,
                         layer: frame.layer,
@@ -101,9 +98,7 @@ impl Draft {
         };
 
         let mut sources = if frame.is_some() {
-            frame_source
-                .as_ref()
-                .map_or_else(Vec::new, |frame| vec![frame.source.clone()])
+            frame_source.map_or_else(Vec::new, |frame| vec![frame.source.clone()])
         } else {
             sources
         }
@@ -111,7 +106,6 @@ impl Draft {
         .filter_map(|snapshot| {
             let path = snapshot.source.path.to_path_buf().ok()?;
             let format = frame_source
-                .as_ref()
                 .filter(|frame| frame.source.document == snapshot.document)
                 .map(|frame| frame.expected);
             let selected = frame.is_some() || Some(snapshot.document) == current;
@@ -433,7 +427,7 @@ fn output_layer(form: &ExportForm) -> Result<Option<ExportLayer>, String> {
     }))
 }
 
-fn index<T: PartialEq>(values: &[T], value: T) -> i32 {
+fn index<T: Copy + PartialEq>(values: &[T], value: T) -> i32 {
     values
         .iter()
         .position(|choice| *choice == value)
@@ -496,12 +490,7 @@ mod tests {
     fn frame_export_freezes_the_displayed_ordinal_layer_format_and_grain() -> Result<(), String> {
         let source = source("/one/test.obu", 8);
         let displayed = frame(source.clone());
-        let draft = Draft::new(
-            ExportPurpose::Frame,
-            vec![],
-            Some(8),
-            Some(displayed.clone()),
-        )?;
+        let draft = Draft::new(ExportPurpose::Frame, vec![], Some(8), Some(&displayed))?;
         let form = ExportForm {
             raw: true,
             use_range: true,
@@ -539,7 +528,7 @@ mod tests {
             ExportPurpose::Hashes,
             vec![a.clone(), b.clone()],
             Some(8),
-            Some(frame(a)),
+            Some(&frame(a)),
         )?;
         draft.select_source(1, true);
         let form = ExportForm {
@@ -591,7 +580,7 @@ mod tests {
             ExportPurpose::Video,
             vec![source.clone()],
             Some(8),
-            Some(frame(source)),
+            Some(&frame(source)),
         )?;
         let mut form = ExportForm {
             use_range: true,

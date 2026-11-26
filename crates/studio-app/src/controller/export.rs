@@ -35,7 +35,7 @@ impl Controller {
             let ctl = Rc::downgrade(self);
             move |index, selected| {
                 with(&ctl, |ctl| {
-                    ctl.edit_export(|draft| draft.select_source(index, selected))
+                    ctl.edit_export(|draft| draft.select_source(index, selected));
                 });
             }
         });
@@ -43,7 +43,7 @@ impl Controller {
             let ctl = Rc::downgrade(self);
             move |index, depth| {
                 with(&ctl, |ctl| {
-                    ctl.edit_export(|draft| draft.choose_depth(index, depth))
+                    ctl.edit_export(|draft| draft.choose_depth(index, depth));
                 });
             }
         });
@@ -51,7 +51,7 @@ impl Controller {
             let ctl = Rc::downgrade(self);
             move |index, chroma| {
                 with(&ctl, |ctl| {
-                    ctl.edit_export(|draft| draft.choose_chroma(index, chroma))
+                    ctl.edit_export(|draft| draft.choose_chroma(index, chroma));
                 });
             }
         });
@@ -78,6 +78,7 @@ impl Controller {
             || window.get_sheet_open()
             || window.get_validation_open()
             || session.export_active()
+            || (purpose == ExportPurpose::Frame && window.global::<crate::Playback>().get_playing())
         {
             return;
         }
@@ -85,7 +86,7 @@ impl Controller {
             purpose,
             session.export_sources(),
             session.analysis().shown().map(Document::id),
-            session.export_frame_source(),
+            session.export_frame_source().as_ref(),
         );
         drop(session);
         let export = window.global::<DecodeExport>();
@@ -173,7 +174,7 @@ impl Controller {
             };
             let chosen = file.map(|file| file.path().to_path_buf());
             with(&weak, |ctl| {
-                ctl.export_destination_picked(&ticket, plan, chosen)
+                ctl.export_destination_picked(&ticket, plan, chosen);
             });
         })
         .is_err()
@@ -233,6 +234,11 @@ pub(super) fn render_export_status(window: &AppWindow, session: &Session) {
         });
     export.set_active(active);
     export.set_can_start(!active && ready);
-    export.set_can_frame(!active && ready && session.export_frame_source().is_some());
+    export.set_can_frame(
+        !active
+            && ready
+            && !window.global::<crate::Playback>().get_playing()
+            && session.export_frame_source().is_some(),
+    );
     export.set_job_notice(session.export_notice().unwrap_or_default().into());
 }

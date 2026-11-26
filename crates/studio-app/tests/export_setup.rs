@@ -25,6 +25,10 @@ use studio_app::{AppWindow, DecodeExport, ExportPurpose};
 use studio_domain::preview::PictureBox;
 use studio_domain::protocol::Event;
 
+const CLIP: &[u8] = include_bytes!(
+    "../../studio-engine/tests/preview/fixtures/syn-3frame-padded-filters-422-134x69-10bit-q150.ivf"
+);
+
 struct Headless(Rc<MinimalSoftwareWindow>);
 
 impl Platform for Headless {
@@ -93,7 +97,7 @@ fn wire_window(window: &AppWindow, rig: &Rig, destination: PathBuf) {
                 purpose,
                 session.export_sources(),
                 session.analysis().shown().map(Document::id),
-                session.export_frame_source(),
+                session.export_frame_source().as_ref(),
             )
             .unwrap_or_else(|error| unreachable!("{error}"));
             let window = window
@@ -137,27 +141,14 @@ fn wire_window(window: &AppWindow, rig: &Rig, destination: PathBuf) {
     });
 }
 
-#[test]
-fn a_keyboard_selected_frame_exports_through_the_journal_and_worker()
--> Result<(), Box<dyn std::error::Error>> {
-    let scratch =
-        Scratch(std::env::temp_dir().join(format!("studio-export-ui-{}", std::process::id())));
-    std::fs::create_dir(&scratch.0)?;
-    let source = scratch.0.join("decoded samples.ivf");
-    std::fs::write(
-        &source,
-        include_bytes!(
-            "../../studio-engine/tests/preview/fixtures/syn-3frame-padded-filters-422-134x69-10bit-q150.ivf"
-        ),
-    )?;
+fn open_frame(source: PathBuf, journal_path: PathBuf) -> Result<Rig, Box<dyn std::error::Error>> {
     let engine = PathBuf::from(env!("CARGO_BIN_EXE_splot-studio"))
         .with_file_name(format!("{ENGINE_NAME}{}", std::env::consts::EXE_SUFFIX));
     assert!(
         engine.is_file(),
         "Build studio-engine in the same profile first."
     );
-    let journal_path = scratch.0.join("queue.json");
-    let journal = Writer::spawn(journal_path.clone(), |_| {})?;
+    let journal = Writer::spawn(journal_path, |_| {})?;
     let (tx, rx) = mpsc::channel();
     let session = Session::new(
         AppState::default(),
@@ -179,7 +170,7 @@ fn a_keyboard_selected_frame_exports_through_the_journal_and_worker()
             Intent::WorkspaceRequested(Workspace::Analyze),
             Instant::now(),
         );
-        session.analysis_input(AnalysisInput::Open(vec![source.clone()]));
+        session.analysis_input(AnalysisInput::Open(vec![source]));
         session.preview_input(preview::Input::Resized {
             stage: PictureBox::clamped(716, 240),
             thumb: PictureBox::clamped(64, 36),
@@ -196,6 +187,20 @@ fn a_keyboard_selected_frame_exports_through_the_journal_and_worker()
         .borrow_mut()
         .analysis_input(AnalysisInput::TogglePlayback);
     rig.wait(|session| session.export_frame_source().is_some())?;
+
+    Ok(rig)
+}
+
+#[test]
+fn a_keyboard_selected_frame_exports_through_the_journal_and_worker()
+-> Result<(), Box<dyn std::error::Error>> {
+    let scratch =
+        Scratch(std::env::temp_dir().join(format!("studio-export-ui-{}", std::process::id())));
+    std::fs::create_dir(&scratch.0)?;
+    let source = scratch.0.join("decoded samples.ivf");
+    std::fs::write(&source, CLIP)?;
+    let journal_path = scratch.0.join("queue.json");
+    let mut rig = open_frame(source.clone(), journal_path.clone())?;
 
     let platform = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     slint::platform::set_platform(Box::new(Headless(platform)))?;
@@ -247,11 +252,17 @@ fn a_keyboard_selected_frame_exports_through_the_journal_and_worker()
         .find(|job| job.kind == "Export raw")
         .unwrap_or_else(|| unreachable!("No export row."));
     assert_eq!(row.state, "Completed");
-    assert_eq!(row.detail, "Exported 1 frame.");
+    assert_eq!(row.detail.lines().next(), Some("Exported 1 frame."));
+    assert!(row.detail.contains("output.yuv.layout.json"));
     assert_eq!(std::fs::metadata(destination)?.len(), 36_984);
     let layout = std::fs::read(scratch.0.join("output.yuv.layout.json"))?;
-    assert!(serde_json::from_slice::<serde_json::Value>(&layout)?.is_object());
-    assert_eq!(std::fs::metadata(source)?.len(), 13_151);
+    let layout = serde_json::from_slice::<serde_json::Value>(&layout)?;
+    assert_eq!(layout["frames"], 1);
+    assert_eq!(layout["outputs"][0]["ordinal"], 0);
+    assert_eq!(layout["frame_bytes"], 36_984);
+    assert_eq!(layout["sample_format"]["bit_depth"], 10);
+    assert_eq!(layout["endianness"], "little");
+    assert_eq!(std::fs::read(source)?, CLIP);
     assert!(std::fs::read_to_string(journal_path)?.contains("output.yuv"));
     rig.session.borrow_mut().shutdown();
     Ok(())

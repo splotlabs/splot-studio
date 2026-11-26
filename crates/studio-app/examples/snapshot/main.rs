@@ -754,40 +754,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             analyze.session.state().clone()
         };
         studio_app::render(&window, analyze.session.state(), now);
-        if matches!(
-            name,
-            "analyze-playback" | "analyze-sample" | "analyze-export-setup"
-        ) {
-            window.show()?;
-            let stage = PictureBox::clamped(
-                u32::try_from(window.get_stage_px_width()).unwrap_or(1),
-                u32::try_from(window.get_stage_px_height()).unwrap_or(1),
-            );
-            analyze.playback(stage, name == "analyze-sample")?;
-            if name == "analyze-export-setup" {
-                studio_app::export_setup::Draft::new(
-                    studio_app::ExportPurpose::Frame,
-                    analyze.session.export_sources(),
-                    analyze
-                        .session
-                        .analysis()
-                        .shown()
-                        .map(studio_app::analysis::Document::id),
-                    analyze.session.export_frame_source(),
-                )?
-                .render(&window);
-            }
-            studio_app::render_preview(
-                &window,
-                analyze.session.state(),
-                analyze.session.preview(),
-                preview::Dirty {
-                    picture: true,
-                    view: true,
-                    thumbs: false,
-                },
-            );
-        }
+        analyze.render_picture(&window, name)?;
         studio_app::render_analysis(&window, analyze.session.analysis());
         studio_app::render_jobs(
             &window,
