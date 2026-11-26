@@ -628,6 +628,7 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
     a_large_findings_view_pages_retained_rows(&mut rig, &scratch);
     a_byte_only_finding_keeps_both_offsets(&mut rig, &scratch);
     layers::inspect(&mut rig, &scratch);
+    reference_table_follows_the_native_bridge(&mut rig, &scratch);
 
     eprintln!("Tab stops: navigator after {tabs}, byte view {byte_tabs} later");
     timeline::controls(&mut rig, &scratch);
@@ -921,4 +922,69 @@ fn line_offsets_are_never_cut(rig: &Rig) {
         "{}",
         rig.window.get_fitted_width()
     );
+}
+
+fn reference_table_follows_the_native_bridge(rig: &mut Rig, scratch: &Scratch) {
+    let path = scratch.0.join("reference bridge.ivf");
+    fs::write(
+        &path,
+        include_bytes!("../../studio-engine/tests/inspect/fixtures/syn-bridge-celu-64x64.ivf"),
+    )
+    .unwrap_or_else(|e| unreachable!("{e}"));
+    rig.session.analysis_input(Input::Open(vec![path]));
+    rig.idle("reference fixture");
+    rig.global().invoke_go_to("85".into());
+    rig.idle("bridge coded frame");
+    let bridge = rig.selected();
+    assert!(bridge.is_some());
+
+    rig.global().invoke_evidence_view(4);
+    rig.idle("reference inspector");
+    rig.window
+        .global::<studio_app::References>()
+        .invoke_inspect();
+    rig.idle("bridge references");
+    let references = rig.window.global::<studio_app::References>();
+    assert_eq!(references.get_frame(), "Coded frame at byte 85");
+    assert!(
+        references
+            .get_context()
+            .contains("Sequence header at byte 47")
+    );
+    let links = references.get_links();
+    assert_eq!(links.row_count(), 1);
+    let link = links.row_data(0).unwrap_or_default();
+    assert!(link.label.starts_with("Bridge source"));
+    assert!(link.detail.contains("Coded frame at byte 71"));
+    assert!(link.detail.contains("64 × 64 luma samples"));
+    assert!(link.available);
+    assert!(
+        references
+            .get_slots()
+            .iter()
+            .any(|row| row.before.contains("Coded frame at byte 71"))
+    );
+
+    rig.tab_to(Key::Return, |input| {
+        matches!(input, Input::FollowReference(0))
+    });
+    rig.inputs
+        .borrow_mut()
+        .retain(|input| matches!(input, Input::FollowReference(0)));
+    rig.idle("keyboard follows Bridge source");
+    let source = rig.selected();
+    assert_ne!(source, bridge);
+    assert_eq!(
+        rig.session.analysis().shown().map(|d| d.bytes().cursor),
+        Some(70)
+    );
+
+    rig.global().invoke_back();
+    rig.idle("return to Bridge investigation");
+    assert_eq!(rig.selected(), bridge);
+    assert_eq!(rig.global().get_evidence_tab(), 4);
+
+    rig.global().invoke_forward();
+    rig.idle("forward to the reference");
+    assert_eq!(rig.selected(), source);
 }

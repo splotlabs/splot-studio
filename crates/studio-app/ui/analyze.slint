@@ -12,6 +12,7 @@ import { TimelinePane, TimelineUi } from "timeline.slint";
 import { Button, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 import { LayerPanel, Layers } from "layers.slint";
 import { Tokens } from "tokens.slint";
+import { ReferencePane } from "references.slint";
 import { DecodeExport, ExportPurpose } from "export-setup.slint";
 import { FocusRing, KeyboardFocus } from "focus.slint";
 import { Caption, LinkButton, WorkspaceSwitch } from "controls.slint";
@@ -1384,7 +1385,7 @@ export component AnalyzeView inherits VerticalLayout {
                 spacing: Tokens.space-1;
 
                 WorkspaceSwitch {
-                    options: ["Properties", "Syntax", "Findings", "Layers"];
+                    options: ["Properties", "Syntax", "Findings", "Layers", "References"];
                     accessible-label: "Inspector views";
                     selected: Layers.shown ? 3 : Analysis.evidence-tab;
                     chosen(index) => {
@@ -1451,7 +1452,9 @@ export component AnalyzeView inherits VerticalLayout {
                     }
                 }
 
-                if !Layers.shown && Analysis.evidence-tab != 0: EvidencePane {
+                if !Layers.shown && Analysis.evidence-tab == 4: ReferencePane { }
+
+                if !Layers.shown && (Analysis.evidence-tab == 1 || Analysis.evidence-tab == 2): EvidencePane {
                     copy(text) => {
                         root.copy(text);
                     }

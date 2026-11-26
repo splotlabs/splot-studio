@@ -165,6 +165,7 @@ pub(super) struct Place {
     pub(super) evidence_tab: i32,
     pub(super) bytes_shown: bool,
     pub(super) timeline: Option<(u64, TimelineSelection)>,
+    pub(super) reference: Option<super::references::History>,
 }
 
 /// The byte view of one document.
@@ -210,6 +211,7 @@ pub struct Document {
     pub(crate) evidence: Evidence,
     pub(super) timeline: Timeline,
     pub(crate) layers: super::layers::LayerInspector,
+    pub(crate) references: super::references::References,
     /// Report awaiting source fingerprint verification at open.
     pub(super) pending_batch: Option<Box<crate::batch::Report>>,
     pub(super) at: usize,
@@ -248,6 +250,7 @@ impl Document {
             evidence: Evidence::default(),
             timeline: Timeline::default(),
             layers: super::layers::LayerInspector::default(),
+            references: super::references::References::default(),
             pending_batch: None,
             at: 0,
             bytes: Bytes {
@@ -277,6 +280,7 @@ impl Document {
             evidence_tab: self.evidence.tab,
             bytes_shown: self.bytes.shown,
             timeline: self.timeline.history(),
+            reference: None,
         });
         if self.history.len() > HISTORY {
             self.history.remove(0);
@@ -329,6 +333,7 @@ impl Document {
     /// The read ended without facts: keeps the view for the next read.
     pub(super) fn fail(&mut self, message: String, by: ReadEnd) {
         self.pending_batch = None;
+        self.references = super::references::References::default();
         self.restore = self.restore();
         self.partial = None;
         self.timeline = Timeline::default();

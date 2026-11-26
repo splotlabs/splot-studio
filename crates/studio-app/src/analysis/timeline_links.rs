@@ -533,6 +533,10 @@ impl Analysis {
                 .selected
                 .as_ref()
                 .is_none_or(|selected| selected.row.index != row.index);
+        if changed {
+            self.cancel_references(at, out);
+        }
+        let doc = &mut self.documents[at];
         doc.timeline.selection = Some(selection);
         doc.restore = None;
         doc.wanted = None;

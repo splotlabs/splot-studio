@@ -26,6 +26,7 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
     super::timeline::render(window, analysis);
     super::layers::render(window, analysis.shown());
     let global = window.global::<Global>();
+    super::references::render_document(&window.global::<crate::ui::References>(), analysis.shown());
     global.set_visible_rows(int(VISIBLE_ROWS));
     let documents: Vec<SharedString> = analysis
         .documents()

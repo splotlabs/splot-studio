@@ -1633,3 +1633,73 @@ fn resolve_timeline(
     let links = analysis.event(effects[0].request_id, timeline_reply(scan, selection));
     engine.settle(analysis, links);
 }
+
+#[test]
+fn reference_inspection_rejects_cancelled_and_mismatched_answers() {
+    use studio_domain::identity::DecodeLayers;
+    use studio_domain::references::{ReferenceEvidence, ReferenceFrame};
+
+    let (mut analysis, engine) = opened(5);
+    let effects = analysis.input(Input::RowClicked(1));
+    engine.settle(&mut analysis, effects);
+    let effects = analysis.input(Input::EvidenceView(references::TAB));
+    engine.settle(&mut analysis, effects);
+
+    let query = |analysis: &mut Analysis| {
+        analysis
+            .input(Input::InspectReferences)
+            .iter()
+            .find_map(|effect| match effect.command {
+                Command::AnalysisReferences { document, query } => {
+                    Some((effect.request_id, document, query))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| unreachable!("expected a reference query"))
+    };
+    let (request, document, original) = query(&mut analysis);
+    assert_eq!(original.coded_offset, 10);
+    let frame = ReferenceFrame {
+        coded_offset: original.coded_offset,
+        sequence_offset: 1,
+        layers: DecodeLayers {
+            extended: 0,
+            embedded: 0,
+            temporal: 0,
+        },
+        width: 64,
+        height: 64,
+    };
+    let reply = |query| Event::AnalysisReferencesReady {
+        document,
+        evidence: Box::new(ReferenceEvidence {
+            query,
+            frame,
+            frame_obu_type: 7,
+            refresh_mask: 1,
+            resets_sequence: false,
+            allowed_input_slots: None,
+            required_long_term_ids: Vec::new(),
+            slots: Vec::new(),
+            dependencies: Vec::new(),
+        }),
+    };
+    let stop = analysis.input(Input::StopReferences);
+    assert!(stop.iter().any(|effect| matches!(
+        effect.command, Command::AnalysisCancelReferences { reference, .. } if reference == request
+    )));
+    assert!(analysis.event(request, reply(original)).is_empty());
+    assert!(doc(&analysis).references.evidence().is_none());
+
+    let (request, _, _) = query(&mut analysis);
+    analysis.event(request, reply(original));
+    assert!(doc(&analysis).references.evidence().is_none());
+    assert!(!doc(&analysis).references.busy());
+
+    let (request, _, current) = query(&mut analysis);
+    analysis.event(request, reply(current));
+    assert!(doc(&analysis).references.evidence().is_some());
+    let effects = analysis.input(Input::RowClicked(2));
+    engine.settle(&mut analysis, effects);
+    assert!(doc(&analysis).references.evidence().is_none());
+}

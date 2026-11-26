@@ -8,6 +8,7 @@
 mod analysis;
 mod evidence;
 pub(crate) mod layers;
+mod references;
 pub(crate) mod timeline;
 
 use std::time::Instant;

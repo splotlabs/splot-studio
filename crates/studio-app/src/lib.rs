@@ -71,8 +71,8 @@ pub use render::{render, render_analysis, render_counters, render_jobs, render_p
 pub use ui::{
     Analysis, AnalysisState, AppWindow, ByteRegion, CheckRow, DecodeExport, ExportForm,
     ExportPurpose, ExportSourceRow, Fact, JobAction, JobRow, JobView, NavStep, Notice,
-    NoticeWindow, Palette, Playback, QueueRow, RowState, SourceView, StageState, TimelineUi, Tone,
-    ViewMode, WorkspaceView,
+    NoticeWindow, Palette, Playback, QueueRow, References, RowState, SourceView, StageState,
+    TimelineUi, Tone, ViewMode, WorkspaceView,
 };
 pub use ui::{LayerDetail, Layers};
 
@@ -366,6 +366,16 @@ pub fn bind_analysis(window: &AppWindow, send: impl Fn(analysis::Input) + Clone 
     global.on_byte_clicked(on(Input::ByteClicked));
     global.on_type_filter(on(Input::TypeFilter));
     global.on_layer_filter(on(Input::LayerFilter));
+    let references = window.global::<References>();
+    references.on_inspect({
+        let send = send.clone();
+        move || send(Input::InspectReferences)
+    });
+    references.on_cancel({
+        let send = send.clone();
+        move || send(Input::StopReferences)
+    });
+    references.on_follow(on(Input::FollowReference));
     global.on_evidence_view(on(Input::EvidenceView));
     global.on_evidence_severity(on(Input::EvidenceSeverity));
     global.on_evidence_layer(on(Input::EvidenceLayer));
