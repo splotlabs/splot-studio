@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use studio_domain::{
     job::WirePath,
-    preview::{PictureFailure, PictureFrame, PictureHeader, PictureOrigin, PictureTarget},
+    preview::{
+        PictureBox, PictureFailure, PictureFrame, PictureHeader, PictureOrigin, PictureTarget,
+    },
     protocol::{Command, Envelope, Event, read_event, write_message},
 };
 use studio_engine::inspect::document::Document;
@@ -21,6 +23,10 @@ use super::{BIG, Fallible, NATIVE, Preview, TestResult, play, rendered};
 
 const I420: [(usize, usize); 3] = [(64, 64), (32, 32), (32, 32)];
 const FRAME_SAMPLES: usize = 64 * 64 + 2 * 32 * 32;
+const FRAME_BOX: PictureBox = PictureBox {
+    width: 64,
+    height: 64,
+};
 
 struct Fixture {
     name: &'static str,
@@ -48,10 +54,10 @@ const ANNEX_B_8: Fixture = fixture!("syn-mlayer2-derived-sef-8bit.obu", 8, 4);
 const ANNEX_B_10: Fixture = fixture!("syn-mlayer2-crossref-10bit.obu", 10, 6);
 
 impl Fixture {
-    fn write(&self, dir: &Path) -> Fallible<PictureTarget> {
+    fn write(&self, dir: &Path, document: u64) -> Fallible<PictureTarget> {
         let path = dir.join(self.name);
         fs::write(&path, self.input)?;
-        target(&path, 1)
+        target(&path, document)
     }
 
     fn rgb(&self, ordinal: u64) -> Fallible<Vec<u8>> {
@@ -130,8 +136,8 @@ fn linear_and_random_document_outputs_match_avm() -> TestResult {
     let dir = tempfile::tempdir()?;
     let mut preview = Preview::spawn()?;
     let mut generation = 0;
-    for fixture in [IVF_8, IVF_10, ANNEX_B_8, ANNEX_B_10] {
-        let target = fixture.write(dir.path())?;
+    for (document, fixture) in (1..).zip([IVF_8, IVF_10, ANNEX_B_8, ANNEX_B_10]) {
+        let target = fixture.write(dir.path(), document)?;
         let mut linear = Vec::new();
         for ordinal in 0..fixture.outputs {
             generation += 1;
@@ -146,7 +152,16 @@ fn linear_and_random_document_outputs_match_avm() -> TestResult {
         );
         for ordinal in [fixture.outputs - 1, 0, 2, 1, fixture.outputs - 1] {
             generation += 1;
-            let (header, rgb) = preview.frame(generation, &target, ordinal)?;
+            // A different box bypasses the rendered cache at the same pixel size.
+            let (header, rgb) = preview
+                .ask(
+                    generation,
+                    &target,
+                    PictureFrame::Index { index: ordinal },
+                    NATIVE,
+                    FRAME_BOX,
+                )?
+                .map_err(|code| format!("{} output {ordinal}: {code:?}", fixture.name))?;
             check_picture(&header, &rgb, &fixture, ordinal)?;
             assert_eq!(header.frame_count, Some(fixture.outputs));
             assert_eq!(
@@ -161,7 +176,7 @@ fn linear_and_random_document_outputs_match_avm() -> TestResult {
 #[test]
 fn derived_show_existing_keeps_the_coded_and_showing_bytes() -> TestResult {
     let dir = tempfile::tempdir()?;
-    let target = ANNEX_B_8.write(dir.path())?;
+    let target = ANNEX_B_8.write(dir.path(), 1)?;
     let mut preview = Preview::spawn()?;
     for (ordinal, coded, showing) in [(2, 44, 1324), (3, 787, 1328)] {
         let (header, rgb) = preview.frame(ordinal, &target, ordinal)?;
@@ -188,7 +203,7 @@ fn derived_show_existing_keeps_the_coded_and_showing_bytes() -> TestResult {
 #[test]
 fn document_timing_uses_ivf_ticks_and_keeps_invalid_timing_unknown() -> TestResult {
     let dir = tempfile::tempdir()?;
-    let timed = IVF_10.write(dir.path())?;
+    let timed = IVF_10.write(dir.path(), 1)?;
     let mut preview = Preview::spawn()?;
     let (header, rgb) = preview.frame(1, &timed, 3)?;
     check_picture(&header, &rgb, &IVF_10, 3)?;
@@ -287,7 +302,7 @@ impl Read for ObserveInput {
 #[test]
 fn scrubbing_reaches_the_newest_document_output_with_a_blocked_writer() -> TestResult {
     let dir = tempfile::tempdir()?;
-    let target = ANNEX_B_10.write(dir.path())?;
+    let target = ANNEX_B_10.write(dir.path(), 1)?;
     let mut first = Vec::new();
     write_message(&mut first, &Envelope::new(1, picture(1, &target, 0)))?;
     let mut seeks = Vec::new();
