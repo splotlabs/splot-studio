@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
 import { ScrollView } from "std-widgets.slint";
+import { BlockMotionPane, BlockMotionView } from "block-motion.slint";
 import { Caption, LinkButton } from "controls.slint";
 import { Tokens } from "tokens.slint";
 
@@ -97,6 +98,7 @@ export component BlockPane inherits VerticalLayout {
                         Cell { width: 66px; text: row.quantizer; }
                     }
                 }
+                if BlockMotionView.active: BlockMotionPane { }
             }
         }
     }

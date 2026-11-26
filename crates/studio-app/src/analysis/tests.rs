@@ -1746,7 +1746,7 @@ fn following_a_reference_keeps_the_verified_index_while_its_page_loads() {
     let target =
         references::retained_frame(doc(&analysis).reference_evidence().unwrap(), 0).unwrap();
     let mut preview = Vec::new();
-    analysis.request_reference_preview(0, target, &mut preview);
+    analysis.request_reference_preview(0, query, target, &mut preview);
     let preview_request = preview[0].request_id;
     assert!(matches!(
         preview[0].command,
