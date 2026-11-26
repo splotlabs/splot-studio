@@ -1468,10 +1468,29 @@ fn reference_replay_links_slots_to_coded_offsets_and_rejects_source_changes() ->
         }))?),
         Some(AnalysisFailure::InvalidRequest)
     );
-    fs::write(&path, [])?;
+    #[cfg(windows)]
+    {
+        let error = fs::write(&path, [])
+            .err()
+            .ok_or("A verified reader allowed a write.")?;
+        assert_eq!(error.raw_os_error(), Some(32)); // ERROR_SHARING_VIOLATION
+        assert!(matches!(
+            inspect.ask(Command::AnalysisClose { document: 1 })?,
+            Event::AnalysisClosed { document: 1 },
+        ));
+        fs::write(&path, [])?;
+    }
+    #[cfg(not(windows))]
+    {
+        fs::write(&path, [])?;
+        assert_eq!(
+            failure(&inspect.ask(request(query))?),
+            Some(AnalysisFailure::SourceChanged)
+        );
+    }
     assert_eq!(
         failure(&inspect.ask(request(query))?),
-        Some(AnalysisFailure::SourceChanged)
+        Some(AnalysisFailure::UnknownDocument)
     );
     Ok(())
 }
