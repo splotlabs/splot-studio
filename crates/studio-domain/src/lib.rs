@@ -15,6 +15,7 @@
 
 pub mod analysis;
 pub mod job;
+pub mod options;
 pub mod preview;
 pub mod protocol;
 pub mod settings;

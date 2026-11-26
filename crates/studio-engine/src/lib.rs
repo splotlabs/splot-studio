@@ -28,6 +28,7 @@ pub mod inspect;
 pub mod job;
 pub mod live;
 pub mod media;
+mod options;
 pub mod output;
 pub mod picture;
 pub mod preview;
