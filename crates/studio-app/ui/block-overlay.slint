@@ -1,0 +1,256 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+import { ComboBox } from "std-widgets.slint";
+import { Caption, LinkButton } from "controls.slint";
+import { FocusRing, KeyboardFocus } from "focus.slint";
+import { Tokens } from "tokens.slint";
+
+export struct BlockOutline {
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    tint: color,
+    line: color,
+    strong: bool,
+    selected: bool,
+    label: string,
+}
+
+export struct OverlayRow {
+    label: string,
+    detail: string,
+    selected: bool,
+}
+
+export global BlockOverlay {
+    in-out property <int> mode;
+    in-out property <int> plane;
+    in-out property <int> tool;
+    in property <bool> can-pick;
+    in property <bool> busy;
+    in property <int> sample-width: 1;
+    in property <int> sample-height: 1;
+    in property <[BlockOutline]> outlines;
+    in property <[OverlayRow]> rows;
+    in property <int> first-row;
+    in property <int> row-count;
+    in property <string> status;
+    in property <string> legend;
+    in property <string> picked;
+    callback choose(int);
+    callback choose-plane(int);
+    callback choose-tool(int);
+    callback pick(int, int, int, int);
+    callback select(int);
+    callback move(int);
+    callback stop();
+}
+
+export component BlockOverlayMenu inherits ComboBox {
+    width: 136px;
+    model: ["Overlay Off", "Partitions", "Transforms", "Quantizer", "Segment", "Tool Use"];
+    current-index <=> BlockOverlay.mode;
+    accessible-label: "Decoder overlay";
+    selected => { BlockOverlay.choose(self.current-index); }
+}
+
+export component BlockOverlayPanel inherits VerticalLayout {
+    spacing: Tokens.space-2;
+
+    HorizontalLayout {
+        spacing: Tokens.space-2;
+
+        ComboBox {
+            width: 130px;
+            model: ["Picture plane", "Y luma", "U chroma", "V chroma"];
+            current-index <=> BlockOverlay.plane;
+            accessible-label: "Overlay plane";
+            selected => { BlockOverlay.choose-plane(self.current-index); }
+        }
+
+        if BlockOverlay.mode == 5: ComboBox {
+            width: 170px;
+            model: ["Intra Block Copy", "Palette", "Data-driven Intra", "Chroma From Luma"];
+            current-index <=> BlockOverlay.tool;
+            accessible-label: "Observed prediction tool";
+            selected => { BlockOverlay.choose-tool(self.current-index); }
+        }
+
+        Caption {
+            horizontal-stretch: 1;
+            text: BlockOverlay.status;
+            wrap: word-wrap;
+            vertical-alignment: center;
+            accessible-live-region: polite;
+        }
+
+        if BlockOverlay.busy: LinkButton {
+            text: "Stop";
+            description: "Stop capturing decoder evidence.";
+            clicked => { BlockOverlay.stop(); }
+        }
+    }
+
+    Caption {
+        text: BlockOverlay.legend;
+        wrap: word-wrap;
+    }
+
+    if BlockOverlay.rows.length > 0: HorizontalLayout {
+        spacing: Tokens.space-3;
+
+        records := KeyboardFocus {
+            horizontal-stretch: 1;
+            min-width: 260px;
+            height: BlockOverlay.rows.length * 24px;
+            accessible-role: list;
+            accessible-label: "Decoder regions";
+            accessible-description: "Use Up or Down to select a region. Use Page Up or Page Down to move by a page.";
+            key-pressed(event) => {
+                let step = event.text == Key.UpArrow ? -1 : event.text == Key.DownArrow ? 1
+                    : event.text == Key.PageUp ? -6 : event.text == Key.PageDown ? 6
+                    : event.text == Key.Home ? -2147483647 : event.text == Key.End ? 2147483647 : 0;
+                if step == 0 {
+                    return reject;
+                }
+                records.keyboard-used();
+                BlockOverlay.move(step);
+                accept
+            }
+
+            FocusRing {
+                shown: records.ring;
+                x: -3px;
+                y: -3px;
+                width: records.width + 6px;
+                height: records.height + 6px;
+                radius: Tokens.radius-small;
+            }
+
+            for row[index] in BlockOverlay.rows: Rectangle {
+                y: index * 24px;
+                width: parent.width;
+                height: 24px;
+                background: row.selected ? Tokens.row-selected : touch.has-hover ? Tokens.row-hover : Tokens.surface;
+                accessible-role: list-item;
+                accessible-label: row.label + ". " + row.detail;
+                accessible-item-selectable: true;
+                accessible-item-selected: row.selected;
+                accessible-item-index: BlockOverlay.first-row + index;
+                accessible-item-count: BlockOverlay.row-count;
+                accessible-action-default => { BlockOverlay.select(BlockOverlay.first-row + index); }
+
+                touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        records.focus();
+                        BlockOverlay.select(BlockOverlay.first-row + index);
+                    }
+                    scroll-event(event) => {
+                        if event.delta-y == 0 {
+                            return reject;
+                        }
+                        BlockOverlay.move(event.delta-y < 0 ? 6 : -6);
+                        accept
+                    }
+                }
+
+                if row.selected: Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: 3px;
+                    height: parent.height;
+                    background: Tokens.accent;
+                }
+
+                HorizontalLayout {
+                    padding-left: Tokens.space-2;
+                    padding-right: Tokens.space-2;
+                    spacing: Tokens.space-2;
+                    Caption {
+                        horizontal-stretch: 1;
+                        text: row.label;
+                        overflow: elide;
+                        vertical-alignment: center;
+                        accessible-role: none;
+                    }
+                    Caption {
+                        text: row.detail;
+                        vertical-alignment: center;
+                        accessible-role: none;
+                    }
+                }
+            }
+        }
+
+        Caption {
+            horizontal-stretch: 1;
+            text: BlockOverlay.picked;
+            wrap: word-wrap;
+            accessible-live-region: polite;
+        }
+    }
+}
+
+// The stage and picture use the same physical rectangle and clip.
+export component BlockDrawing inherits Rectangle {
+    clip: true;
+    accessible-role: none;
+
+    // Rust supplies only records in the bounded query that meet this crop.
+    for outline in BlockOverlay.outlines: Rectangle {
+        x: root.width * outline.x / max(1, BlockOverlay.sample-width);
+        y: root.height * outline.y / max(1, BlockOverlay.sample-height);
+        width: root.width * outline.width / max(1, BlockOverlay.sample-width);
+        height: root.height * outline.height / max(1, BlockOverlay.sample-height);
+        background: outline.tint;
+        border-width: outline.strong ? 2phx : 1phx;
+        border-color: outline.line;
+        accessible-role: none;
+
+        if outline.selected: Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            border-width: 3phx;
+            border-color: #101015;
+            accessible-role: none;
+
+            Rectangle {
+                x: 1phx;
+                y: 1phx;
+                width: max(0px, parent.width - 2phx);
+                height: max(0px, parent.height - 2phx);
+                border-width: 1phx;
+                border-color: white;
+                accessible-role: none;
+            }
+        }
+
+        if outline.label != "" && parent.width >= 30px && parent.height >= 18px: Rectangle {
+            x: 2phx;
+            y: 2phx;
+            width: label.preferred-width + 6px;
+            height: label.preferred-height + 2px;
+            visible: self.width <= parent.width - 4phx && self.height <= parent.height - 4phx;
+            border-radius: 2px;
+            background: #101015e6;
+            accessible-role: none;
+
+            label := Text {
+                width: parent.width;
+                height: parent.height;
+                color: white;
+                font-size: Tokens.type-caption * 1rem;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                text: outline.label;
+                overflow: elide;
+                accessible-role: none;
+            }
+        }
+    }
+}

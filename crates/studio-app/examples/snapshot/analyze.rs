@@ -19,6 +19,8 @@
 //! `analyze-export-setup` shows the export dialog for a real decoded frame.
 //! `analyze-layers` shows the layer inspector on an AVM content-interpretation fixture.
 //! `analyze-blocks-8bit` and `analyze-blocks-10bit` inspect the first coded frame.
+//! `analyze-overlay`, `analyze-transforms` and `analyze-quantizer` show a selected
+//! region on the decoded picture from `STUDIO_PLAYBACK_FIXTURE`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,7 +28,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use slint::ComponentHandle;
-use studio_app::analysis::{Input, Origin, Phase, Restore, Saved};
+use studio_app::analysis::{BlockOverlayInput, Input, Origin, Phase, Restore, Saved};
 use studio_app::engine::{Delivery, ENGINE_NAME};
 use studio_app::preview::{self, StageState};
 use studio_app::recovery::{Recovered, RestoredView};
@@ -67,6 +69,15 @@ fn ivf() -> Vec<u8> {
 const TRUNCATED: [u8; 11] = [
     0x01, 0x08, 0x04, 0x04, 0xAA, 0xBB, 0xCC, 0x83, 0x01, 0x64, 0x5A,
 ];
+
+fn overlay_mode(name: &str) -> Option<i32> {
+    match name {
+        "analyze-overlay" => Some(1),
+        "analyze-transforms" => Some(2),
+        "analyze-quantizer" => Some(3),
+        _ => None,
+    }
+}
 
 /// A session over the real inspect engine, and the folder of its files.
 pub struct Scenario {
@@ -115,16 +126,38 @@ impl Scenario {
         window: &studio_app::AppWindow,
         name: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if matches!(
-            name,
-            "analyze-playback" | "analyze-sample" | "analyze-export-setup"
-        ) {
+        let mode = overlay_mode(name);
+        if mode.is_some()
+            || matches!(
+                name,
+                "analyze-playback" | "analyze-sample" | "analyze-export-setup"
+            )
+        {
             window.show()?;
             let stage = PictureBox::clamped(
                 u32::try_from(window.get_stage_px_width()).unwrap_or(1),
                 u32::try_from(window.get_stage_px_height()).unwrap_or(1),
             );
             self.playback(stage, name == "analyze-sample")?;
+            if let Some(mode) = mode {
+                self.session
+                    .block_overlay_input(BlockOverlayInput::Mode(mode));
+                self.settle()?;
+                self.session.block_overlay_input(BlockOverlayInput::Pick {
+                    x: 33,
+                    y: 33,
+                    width: 100,
+                    height: 100,
+                });
+                self.settle()?;
+                studio_app::render_analysis(window, self.session.analysis());
+                let overlay = window.global::<studio_app::BlockOverlay>();
+                if overlay.get_row_count() == 0 {
+                    return Err(
+                        "The decoder did not return overlay records for this fixture.".into(),
+                    );
+                }
+            }
             if name == "analyze-export-setup" {
                 studio_app::export_setup::Draft::new(
                     studio_app::ExportPurpose::Frame,
@@ -296,6 +329,7 @@ pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
     );
     match name {
         "analyze-empty" | "analyze-playback" | "analyze-sample" | "analyze-export-setup" => {}
+        name if overlay_mode(name).is_some() => {}
         "analyze-layers" => layer_evidence(&mut scenario)?,
         "analyze-blocks-8bit" | "analyze-blocks-10bit" => block_evidence(&mut scenario, name)?,
         "analyze-opening" => {

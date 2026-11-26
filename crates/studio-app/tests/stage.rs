@@ -235,6 +235,12 @@ fn sample_hits_use_the_painted_physical_rectangle(
         let pick = pick.clone();
         move |x, y, width, height| *pick.borrow_mut() = Some((x, y, width, height))
     });
+    let overlay = window.global::<studio_app::BlockOverlay>();
+    let overlay_pick = Rc::new(RefCell::new(None));
+    overlay.on_pick({
+        let overlay_pick = overlay_pick.clone();
+        move |x, y, width, height| *overlay_pick.borrow_mut() = Some((x, y, width, height))
+    });
     for scale in [1_u16, 2] {
         let width = 800 * scale;
         let height = 680 * scale;
@@ -267,6 +273,14 @@ fn sample_hits_use_the_painted_physical_rectangle(
             Some((7, 5, 32, 32)),
             "at {scale}x"
         );
+        overlay.set_mode(1);
+        overlay.set_can_pick(true);
+        pointer(window, x, y, true);
+        pointer(window, x, y, false);
+        assert_eq!(overlay_pick.borrow_mut().take(), Some((7, 5, 32, 32)));
+        assert_eq!(*pick.borrow(), None);
+        overlay.set_mode(0);
+        overlay.set_can_pick(false);
     }
     window
         .window()

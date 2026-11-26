@@ -44,7 +44,7 @@ use crate::validation::{
 };
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;

@@ -132,6 +132,14 @@ fn row(record: &BlockRecord) -> BlockTableRow {
             (prediction, format!("Q {qindex}\nSeg {segment}"))
         }
         BlockData::Motion { motion } => (motion_text(*motion), "—".to_owned()),
+        BlockData::Transform { transform } => (
+            format!(
+                "Transform\n{:?} {}",
+                transform.id.plane,
+                rect(transform.id.coded)
+            ),
+            "—".to_owned(),
+        ),
     };
     BlockTableRow {
         identity: identity.into(),
@@ -141,11 +149,11 @@ fn row(record: &BlockRecord) -> BlockTableRow {
     }
 }
 
-fn rect(rect: BlockRect) -> String {
+pub(super) fn rect(rect: BlockRect) -> String {
     format!("({}, {}) {}×{}", rect.x, rect.y, rect.width, rect.height)
 }
 
-fn prediction_text(prediction: Option<&BlockPrediction>) -> String {
+pub(super) fn prediction_text(prediction: Option<&BlockPrediction>) -> String {
     match prediction {
         Some(BlockPrediction::Intra { luma, chroma }) => {
             let mut text = "Intra".to_owned();

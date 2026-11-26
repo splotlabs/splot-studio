@@ -273,6 +273,14 @@ impl Controller {
                 ctl.handle(outcome);
             });
         });
+        let weak = Rc::downgrade(self);
+        crate::bind_block_overlay(window, move |input| {
+            with(&weak, |ctl| {
+                ctl.check_visible();
+                let outcome = ctl.session.borrow_mut().block_overlay_input(input);
+                ctl.handle(outcome);
+            });
+        });
         let session = |act: fn(&mut Session, Instant) -> Outcome| {
             let ctl = Rc::downgrade(self);
             move || {

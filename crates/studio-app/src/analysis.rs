@@ -55,6 +55,7 @@ use studio_domain::protocol::{Command, Event};
 use studio_domain::timeline::{TimelineTarget, TimelineView};
 
 mod batch;
+pub(crate) mod block_overlay;
 pub(crate) mod blocks;
 mod bytes;
 mod document;
@@ -68,6 +69,7 @@ pub(crate) mod references;
 #[cfg(test)]
 mod tests;
 
+pub use block_overlay::BlockOverlayInput;
 pub use document::{
     Bytes, Document, Origin, Phase, Position, ReadEnd, Restore, ResultOf, Saved, Selected, extent,
     parse_offset, same_file,
@@ -273,6 +275,7 @@ enum Asked {
     CancelLayers,
     References(studio_domain::references::ReferenceQuery),
     Blocks(studio_domain::blocks::BlockQuery),
+    Overlay(studio_domain::blocks::BlockQuery),
     Cancel,
     Close,
     Page { generation: u64, first: u64 },
@@ -318,6 +321,7 @@ pub struct Analysis {
     storage: Option<String>,
     dirty: bool,
     reference_view: Option<(u64, crate::preview::HistoryView)>,
+    overlay: block_overlay::Overlay,
 }
 
 impl Analysis {
@@ -1100,6 +1104,9 @@ impl Analysis {
                     blocks.fail(request_id, None, "The engine sent invalid block evidence.");
                 }
             }
+            (Asked::Overlay(query), Event::AnalysisBlocksReady { evidence, .. }) => {
+                self.accept_overlay(request_id, query, evidence, out);
+            }
             (_, Event::AnalysisFailed { code, message, .. }) => {
                 self.failed(at, request_id, asked, Some(code), message);
                 self.retry_timeline_after_failure(at, asked, out);
@@ -1388,6 +1395,15 @@ impl Analysis {
                     doc.blocks.fail(request_id, code, &message);
                 }
             }
+            Asked::Overlay(_) => {
+                if matches!(
+                    code,
+                    Some(AnalysisFailure::SourceChanged | AnalysisFailure::UnknownDocument)
+                ) {
+                    fail_or_notice(doc, code, &message);
+                }
+                self.fail_overlay(request_id, code, &message);
+            }
             Asked::Cancel | Asked::Close | Asked::CancelLayers => {}
         }
     }
@@ -1426,6 +1442,7 @@ impl Analysis {
     /// Every document in the engine fails with `message`.
     fn end_reads(&mut self, message: &str, by: ReadEnd) {
         self.pending.clear();
+        self.overlay.end();
         if self.cache_clear.take().is_some() {
             self.notice = Some(format!("Studio could not clear the index cache. {message}"));
             self.dirty = true;
@@ -1529,6 +1546,7 @@ impl Analysis {
             return;
         };
         self.clear_frame_evidence(at, out);
+        self.restore_block_selection(place.block, out);
         let doc = &mut self.documents[at];
         doc.at = to;
         doc.wanted = None;
@@ -1559,6 +1577,14 @@ impl Analysis {
             self.reference_view = reference.view.map(|view| (doc.id, view));
             filter = Some(reference.filter).filter(|filter| *filter != doc.filter);
         }
+        if let Some(block) = place.block {
+            doc.layers.shown = false;
+            if doc.layer_decode_selection() != block.policy {
+                doc.layers.selection = block.policy;
+                doc.layers.decode = None;
+                policy_changed = true;
+            }
+        }
         if policy_changed {
             self.invalidate_timeline_policy(at, out);
         }
@@ -1567,7 +1593,10 @@ impl Analysis {
             .timeline
             .filter(|(scan, _)| Some(*scan) == doc.timeline.scan());
         doc.timeline.restore_selection(timeline);
-        if let Some((_, selection)) = timeline {
+        if let Some(block) = place.block {
+            self.timeline_picture = Some((doc.id, Some(block.output)));
+            self.reference_view = block.view.map(|view| (doc.id, view));
+        } else if let Some((_, selection)) = timeline {
             self.timeline_picture = Some((doc.id, selection.output_ordinal));
         } else if let Some(reference) = place.reference {
             self.timeline_picture = Some((

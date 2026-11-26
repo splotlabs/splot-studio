@@ -166,6 +166,7 @@ pub(super) struct Place {
     pub(super) bytes_shown: bool,
     pub(super) timeline: Option<(u64, TimelineSelection)>,
     pub(super) reference: Option<super::references::History>,
+    pub(super) block: Option<super::block_overlay::History>,
 }
 
 /// The byte view of one document.
@@ -283,6 +284,7 @@ impl Document {
             bytes_shown: self.bytes.shown,
             timeline: self.timeline.history(),
             reference: None,
+            block: None,
         });
         if self.history.len() > HISTORY {
             self.history.remove(0);

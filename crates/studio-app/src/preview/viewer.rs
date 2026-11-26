@@ -12,6 +12,8 @@ use studio_domain::protocol::Command;
 
 use super::{Effect, Preview, Sent, StageView};
 
+pub(crate) mod blocks;
+
 /// The magnifications in the Analyze viewer. Zero represents Fit.
 pub const ZOOMS: [u8; 6] = [0, 1, 2, 4, 8, 16];
 
@@ -451,12 +453,10 @@ fn valid_info(info: &DocumentPictureInfo) -> bool {
     {
         return false;
     }
-    let (sx, sy) = match info.chroma {
-        ChromaLayout::Monochrome => return info.u.is_none() && info.v.is_none(),
-        ChromaLayout::Yuv420 => (2, 2),
-        ChromaLayout::Yuv422 => (2, 1),
-        ChromaLayout::Yuv444 => (1, 1),
-    };
+    if info.chroma == ChromaLayout::Monochrome {
+        return info.u.is_none() && info.v.is_none();
+    }
+    let (sx, sy) = subsampling(info.chroma);
     let chroma = SampleRect {
         x: y.x / sx,
         y: y.y / sy,
@@ -467,6 +467,14 @@ fn valid_info(info: &DocumentPictureInfo) -> bool {
         && y.y.is_multiple_of(sy)
         && info.u == Some(chroma)
         && info.v == Some(chroma)
+}
+
+const fn subsampling(chroma: ChromaLayout) -> (u32, u32) {
+    match chroma {
+        ChromaLayout::Yuv420 => (2, 2),
+        ChromaLayout::Yuv422 => (2, 1),
+        ChromaLayout::Monochrome | ChromaLayout::Yuv444 => (1, 1),
+    }
 }
 
 pub(super) fn valid_geometry(

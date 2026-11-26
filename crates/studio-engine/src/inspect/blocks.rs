@@ -9,17 +9,18 @@ use splot_core::stream_reader::{ReaderError, TemporalUnitReader};
 use splot_decode::block_evidence::{
     BlockEvidenceCapture, BlockEvidenceData, BlockEvidenceId, BlockEvidenceKind as NativeKind,
     BlockEvidenceRecord, BlockEvidenceRequest, BlockEvidenceStatus, BlockEvidenceTree,
+    BlockPartition, BlockTransformId as NativeTransformId,
 };
 use splot_decode::{
-    DataProps, DecodeError, DecodeLimits, Decoder, ObuLocation, PlaneRect, SendStatus,
+    DataProps, DecodeError, DecodeLimits, Decoder, ObuLocation, PlaneId, PlaneRect, SendStatus,
 };
 use studio_domain::analysis::AnalysisFailure;
 use studio_domain::blocks::{
     BlockCoverage, BlockData, BlockEvidence, BlockEvidenceKind, BlockFrame, BlockId, BlockQuery,
-    BlockRecord, BlockRect, BlockTree,
+    BlockRecord, BlockRect, BlockTransform, BlockTransformDetails, BlockTransformId, BlockTree,
 };
 use studio_domain::identity::DecodeLayers;
-use studio_domain::preview::GrainPolicy;
+use studio_domain::preview::{GrainPolicy, SamplePlane};
 
 mod prediction;
 
@@ -50,8 +51,14 @@ pub(super) fn replay(
         BlockEvidenceKind::Structure => NativeKind::PartitionsAndBlocks,
         BlockEvidenceKind::Partitions => NativeKind::Partitions,
         BlockEvidenceKind::Coding => NativeKind::Blocks,
+        BlockEvidenceKind::Transforms => NativeKind::Transforms,
     })
     .with_cancellation(move || cancellation.is_set());
+    let request = if let Some(id) = query.detail {
+        request.with_transform_details(native_transform(id)?)
+    } else {
+        request
+    };
     let (mut decoder, capture) = Decoder::new_with_block_evidence(settings, request)
         .map_err(|error| decode_failed(&error))?;
     let mut progress = ReplayProgress {
@@ -245,10 +252,25 @@ fn block_id(id: BlockEvidenceId) -> Result<BlockId, Refusal> {
     })
 }
 
+fn native_transform(id: BlockTransformId) -> Result<NativeTransformId, Refusal> {
+    let tree = match id.block.tree {
+        BlockTree::Shared => BlockEvidenceTree::Shared,
+        BlockTree::Luma => BlockEvidenceTree::Luma,
+        BlockTree::Chroma => BlockEvidenceTree::Chroma,
+    };
+    let block = BlockEvidenceId::new(id.block.tile as usize, tree, native_rect(id.block.coded)?);
+    let plane = match id.plane {
+        SamplePlane::Y => PlaneId::Y,
+        SamplePlane::U => PlaneId::U,
+        SamplePlane::V => PlaneId::V,
+    };
+    Ok(NativeTransformId::new(block, plane, native_rect(id.coded)?))
+}
+
 fn record(record: &BlockEvidenceRecord) -> Result<BlockRecord, Refusal> {
     let data = match record.data {
         BlockEvidenceData::Partition(split) => BlockData::Partition {
-            split: format!("{split:?}"),
+            split: partition_name(split).to_owned(),
         },
         BlockEvidenceData::Block(facts) => BlockData::Coding {
             has_chroma: facts.has_chroma,
@@ -259,6 +281,25 @@ fn record(record: &BlockEvidenceRecord) -> Result<BlockRecord, Refusal> {
         BlockEvidenceData::Motion(motion) => BlockData::Motion {
             motion: prediction::motion(motion)?,
         },
+        BlockEvidenceData::Transform(transform) => BlockData::Transform {
+            transform: BlockTransform {
+                id: BlockTransformId {
+                    block: block_id(transform.id.block)?,
+                    plane: match transform.id.plane {
+                        PlaneId::Y => SamplePlane::Y,
+                        PlaneId::U => SamplePlane::U,
+                        PlaneId::V => SamplePlane::V,
+                    },
+                    coded: wire_rect(transform.id.coded)?,
+                },
+                luma_coded: wire_rect(transform.luma_coded)?,
+                details: transform.details.map(|details| BlockTransformDetails {
+                    has_coefficients: details.has_coefficients,
+                    plane_tx_type: details.plane_tx_type.map(|kind| kind.av2_name().to_owned()),
+                    lossless: details.lossless,
+                }),
+            },
+        },
         _ => return Err(unsupported("The decoder returned an unknown record kind.")),
     };
     Ok(BlockRecord {
@@ -267,6 +308,21 @@ fn record(record: &BlockEvidenceRecord) -> Result<BlockRecord, Refusal> {
         visible: record.visible.map(wire_rect).transpose()?,
         data,
     })
+}
+
+const fn partition_name(split: BlockPartition) -> &'static str {
+    match split {
+        BlockPartition::None => "PARTITION_NONE",
+        BlockPartition::Horz => "PARTITION_HORZ",
+        BlockPartition::Vert => "PARTITION_VERT",
+        BlockPartition::Horz3 => "PARTITION_HORZ_3",
+        BlockPartition::Vert3 => "PARTITION_VERT_3",
+        BlockPartition::Horz4A => "PARTITION_HORZ_4A",
+        BlockPartition::Horz4B => "PARTITION_HORZ_4B",
+        BlockPartition::Vert4A => "PARTITION_VERT_4A",
+        BlockPartition::Vert4B => "PARTITION_VERT_4B",
+        BlockPartition::Split => "PARTITION_SPLIT",
+    }
 }
 
 fn absolute(location: ObuLocation) -> Option<u64> {
@@ -339,6 +395,7 @@ mod tests {
             selection: LayerDecodeSelection::Default,
             kind: BlockEvidenceKind::Structure,
             region: None,
+            detail: None,
             max_events: MAX_BLOCK_RECORDS,
             max_bytes: MAX_BLOCK_BYTES,
         };

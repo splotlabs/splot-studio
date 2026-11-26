@@ -13,6 +13,7 @@ import { Button, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 import { LayerPanel, Layers } from "layers.slint";
 import { Tokens } from "tokens.slint";
 import { BlockPane } from "blocks.slint";
+import { BlockOverlay, BlockOverlayMenu, BlockOverlayPanel } from "block-overlay.slint";
 import { ReferencePane } from "references.slint";
 import { DecodeExport, ExportPurpose } from "export-setup.slint";
 import { FocusRing, KeyboardFocus } from "focus.slint";
@@ -1129,6 +1130,8 @@ export component AnalyzeView inherits VerticalLayout {
                     toggled => { Playback.toggle-grain(!Playback.grain); }
                 }
 
+                BlockOverlayMenu { }
+
                 Rectangle { horizontal-stretch: 1; }
             }
 
@@ -1136,6 +1139,8 @@ export component AnalyzeView inherits VerticalLayout {
                 document: true;
                 picture-height: root.playback-height;
             }
+
+            if BlockOverlay.mode != 0: BlockOverlayPanel { }
 
             if Playback.viewer-geometry != "": Caption {
                 text: Playback.viewer-geometry;
