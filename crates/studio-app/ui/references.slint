@@ -63,10 +63,10 @@ export component ReferencePane inherits VerticalLayout {
 
     if References.frame != "": ScrollView {
         vertical-stretch: 1;
-        viewport-width: self.visible-width;
+        content-width: self.visible-width;
 
         VerticalLayout {
-            width: parent.width;
+            width: parent.content-width;
             padding-right: Tokens.space-2;
             spacing: Tokens.space-2;
 
