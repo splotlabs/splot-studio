@@ -26,8 +26,8 @@ use crate::analysis::{AnalysisFailure, DocumentSummary, Framing, LocateTarget, R
 use crate::job::{Failure, JobReport, JobSpec, Progress, SourceFacts, Stage, WirePath};
 use crate::options::{EffectiveOption, FieldError, OptionDescriptor, OptionRequest};
 use crate::preview::{
-    MAX_PICTURE_BYTES, PictureBox, PictureFailure, PictureFrame, PictureHeader, PictureTarget,
-    PictureView,
+    MAX_PICTURE_BYTES, PictureBox, PictureFailure, PictureFrame, PictureHeader, PictureStage,
+    PictureTarget, PictureView,
 };
 use crate::settings::OutputKind;
 use crate::syntax::{SyntaxEvent, SyntaxSummary};
@@ -36,7 +36,7 @@ use crate::validation::{
 };
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -249,6 +249,11 @@ pub enum Command {
     /// Preview process only. Stops playback; answered by
     /// [`Event::PlaybackEnded`] when something was playing.
     StopPlayback,
+    /// Preview process only. Release the file and pictures for this document.
+    CloseDocumentPlayback {
+        /// The ID of the document to close.
+        document: u64,
+    },
     /// Inspect process only. Opens `source` read-only and reads all of its
     /// framing once. Answered by [`Event::AnalysisOpened`] or
     /// [`Event::AnalysisFailed`]. Requests are served one at a time, in
@@ -506,6 +511,17 @@ pub enum Event {
     Picture {
         /// What the pixels are.
         picture: PictureHeader,
+    },
+    /// Progress while the preview worker prepares a document picture.
+    PictureProgress {
+        /// The generation that requested the picture.
+        generation: u64,
+        /// The operation and its unit of measure.
+        stage: PictureStage,
+        /// Bytes read or preceding output pictures decoded.
+        completed: u64,
+        /// The target in the same unit, when known.
+        total: Option<u64>,
     },
     /// The requested picture or playback cannot be produced.
     PictureUnavailable {
@@ -893,6 +909,7 @@ mod tests {
         PictureHeader {
             generation: 3,
             origin: PictureOrigin::Live,
+            output: None,
             frame: 9,
             time: None,
             frame_count: None,
