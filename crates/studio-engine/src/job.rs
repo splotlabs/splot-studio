@@ -21,10 +21,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use splot_encode::{
-    BitDepth, CancelToken, Config, ContentDescription, Encoder, PixelFormat, Preset,
-    RateControlMode, SourceFrame,
-};
+use splot_encode::{CancelToken, Config, ContentDescription, Encoder, PixelFormat, SourceFrame};
 use studio_domain::job::{
     Check, CheckOutcome, Failure, FailureCode, JobReport, JobSpec, Progress, SourceReader, Stage,
     WirePath,
@@ -295,27 +292,18 @@ pub fn config(
     content: ContentDescription,
     settings: EncoderSettings,
 ) -> Result<Config, Stop> {
-    let invalid =
-        |e: splot_encode::Error| Stop::failed(FailureCode::InvalidSettings, e.to_string());
-    let mut config = Config::new(header.width, header.height);
-    config.bit_depth = match header.bit_depth {
-        8 => BitDepth::Eight,
-        10 => BitDepth::Ten,
-        bits => {
-            return Err(Stop::failed(
-                FailureCode::UnsupportedSource,
-                format!("{bits}-bit samples are not supported"),
-            ));
-        }
-    };
-    config.chroma = header.format;
-    config.frame_rate = header.frame_rate;
-    config.content = content;
-    config.rate_control = RateControlMode::Crf {
-        crf: settings.crf.get(),
-    };
-    config.preset = Preset::new(settings.preset.get()).map_err(invalid)?;
-    config.validate().map_err(invalid)?;
+    let config =
+        crate::options::config::from_header(header, content, settings).map_err(|error| {
+            let code = if error.field == "bit_depth" {
+                FailureCode::UnsupportedSource
+            } else {
+                FailureCode::InvalidSettings
+            };
+            Stop::failed(code, error.message)
+        })?;
+    config
+        .validate()
+        .map_err(|error| Stop::failed(FailureCode::InvalidSettings, error.to_string()))?;
     Ok(config)
 }
 

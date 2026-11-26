@@ -6,12 +6,17 @@ use std::num::{NonZeroU32, NonZeroUsize};
 
 use splot_encode::y4m::Y4mHeader;
 use splot_encode::{
-    BitDepth, Config, ContentDescription, CroppingWindow, Error, PixelFormat, Preset, PresetError,
-    RateControlMode, ThreadCount, TileLayout, Tune,
+    BitDepth, Config, ContentDescription, CroppingWindow, Error, KeyFrameMetadata, PixelFormat,
+    Preset, PresetError, RateControlMode, ThreadCount, TileLayout, Tune,
 };
 use studio_domain::job::{ChromaLayout, SourceFacts};
 use studio_domain::options::{FieldError, OptionValue};
+use studio_domain::protocol::MAX_MESSAGE_BYTES;
 use studio_domain::settings::EncoderSettings;
+
+// Each byte can use four JSON characters. The reply can include two copies
+// of the record, so reserve half the message for its other values and framing.
+pub(super) const MAX_METADATA_BYTES: u32 = MAX_MESSAGE_BYTES / 16;
 
 pub(super) fn from_source(
     source: &SourceFacts,
@@ -25,10 +30,11 @@ pub(super) fn from_source(
         ChromaLayout::Yuv444 => PixelFormat::Yuv444,
     };
     config.frame_rate = (source.frame_rate.num, source.frame_rate.den);
+    config.content.sample_aspect_ratio = source.pixel_aspect.map(|aspect| (aspect.num, aspect.den));
     Ok(config)
 }
 
-pub(super) fn from_header(
+pub(crate) fn from_header(
     header: &Y4mHeader,
     content: ContentDescription,
     base: EncoderSettings,
@@ -84,11 +90,16 @@ pub(super) fn apply(config: &mut Config, key: &str, value: &OptionValue) -> Resu
                 _ => Some(crop(&Record::new(key, value)?)?),
             };
         }
-        "threads" => {
-            config.threads = match value {
-                OptionValue::Choice(choice) if choice == "auto" => ThreadCount::Auto,
-                _ => ThreadCount::Fixed(nonzero(key, NonZeroUsize::new(integer(key, value)?))?),
-            };
+        "threads" => config.threads = threads(&Record::new(key, value)?)?,
+        "content" => {
+            let record = Record::new(key, value)?;
+            record.check_fields(&["timing_info"])?;
+            if let Some(value) = record.values.get("timing_info") {
+                config.content.timing_info = boolean("content.timing_info", value)?;
+            }
+        }
+        "key_frame_metadata" => {
+            config.key_frame_metadata = metadata(&Record::new(key, value)?)?;
         }
         "film_grain" => config.film_grain = boolean(key, value)?,
         "cbr_padding" => config.cbr_padding = boolean(key, value)?,
@@ -102,8 +113,8 @@ pub(super) fn apply(config: &mut Config, key: &str, value: &OptionValue) -> Resu
                 _ => return Err(FieldError::new(key, "Select psnr, ssim, or vq.")),
             };
         }
-        "width" | "height" | "bit_depth" | "chroma" | "frame_rate" | "content"
-        | "key_frame_metadata" | "first_pass" | "preset_overrides" | "preset" | "output" => {
+        "width" | "height" | "bit_depth" | "chroma" | "frame_rate" | "first_pass"
+        | "preset_overrides" | "preset" | "output" => {
             return Err(FieldError::new(key, "This option is read-only here."));
         }
         _ => return Err(FieldError::new(key, "The encoder option is unknown.")),
@@ -247,6 +258,53 @@ fn tiles(record: &Record<'_>) -> Result<TileLayout, FieldError> {
     }
 }
 
+fn threads(record: &Record<'_>) -> Result<ThreadCount, FieldError> {
+    match record.mode()? {
+        "auto" => {
+            record.check_fields(&["mode"])?;
+            Ok(ThreadCount::Auto)
+        }
+        "fixed" => {
+            record.check_fields(&["mode", "count"])?;
+            let count = nonzero("threads.count", NonZeroUsize::new(record.integer("count")?))?;
+            Ok(ThreadCount::Fixed(count))
+        }
+        _ => Err(FieldError::new(
+            record.path("mode"),
+            "Select auto or fixed.",
+        )),
+    }
+}
+
+fn metadata(record: &Record<'_>) -> Result<KeyFrameMetadata, FieldError> {
+    record.check_fields(&["icc_profile", "itut_t35", "user_data_unregistered"])?;
+    let mut remaining = MAX_METADATA_BYTES as usize;
+    let mut bytes = |field| {
+        let path = record.path(field);
+        match record.values.get(field) {
+            None | Some(OptionValue::None) => Ok(None),
+            Some(OptionValue::List(values)) if values.len() <= remaining => {
+                remaining -= values.len();
+                values
+                    .iter()
+                    .map(|byte| integer(&path, byte))
+                    .collect::<Result<Vec<u8>, _>>()
+                    .map(Some)
+            }
+            Some(OptionValue::List(_)) => Err(FieldError::new(
+                path,
+                format!("Use at most {MAX_METADATA_BYTES} bytes in total for key-frame metadata."),
+            )),
+            Some(_) => Err(FieldError::new(path, "Use a list of bytes or null.")),
+        }
+    };
+    let mut metadata = KeyFrameMetadata::default();
+    metadata.icc_profile = bytes("icc_profile")?;
+    metadata.itut_t35 = bytes("itut_t35")?;
+    metadata.user_data_unregistered = bytes("user_data_unregistered")?;
+    Ok(metadata)
+}
+
 fn crop(record: &Record<'_>) -> Result<CroppingWindow, FieldError> {
     record.check_fields(&["left", "right", "top", "bottom"])?;
     Ok(CroppingWindow {
@@ -263,16 +321,32 @@ pub(super) fn value(config: &Config, key: &str) -> Option<OptionValue> {
     Some(match key {
         "width" => number(config.width),
         "height" => number(config.height),
-        "bit_depth" => number(config.bit_depth.bits()),
-        "chroma" => choice(match config.chroma {
-            PixelFormat::Monochrome => "monochrome",
-            PixelFormat::Yuv420 => "yuv420",
-            PixelFormat::Yuv422 => "yuv422",
-            PixelFormat::Yuv444 => "yuv444",
+        "bit_depth" => choice(match config.bit_depth {
+            BitDepth::Eight => "8",
+            BitDepth::Ten => "10",
         }),
-        "frame_rate" => record([
-            ("numerator", number(config.frame_rate.0)),
-            ("denominator", number(config.frame_rate.1)),
+        "chroma" => choice(config.chroma.as_str()),
+        "frame_rate" => ratio(config.frame_rate),
+        "content" => {
+            let timing = ("timing_info", Bool(config.content.timing_info));
+            match config.content.sample_aspect_ratio {
+                Some(aspect) => record([timing, ("sample_aspect_ratio", ratio(aspect))]),
+                None => record([timing]),
+            }
+        }
+        "key_frame_metadata" => record([
+            (
+                "icc_profile",
+                byte_value(config.key_frame_metadata.icc_profile.as_deref()),
+            ),
+            (
+                "itut_t35",
+                byte_value(config.key_frame_metadata.itut_t35.as_deref()),
+            ),
+            (
+                "user_data_unregistered",
+                byte_value(config.key_frame_metadata.user_data_unregistered.as_deref()),
+            ),
         ]),
         "preset" => number(config.preset.get()),
         "rate_control" => rate_control_value(config.rate_control)?,
@@ -289,8 +363,11 @@ pub(super) fn value(config: &Config, key: &str) -> Option<OptionValue> {
             ])
         }),
         "threads" => match config.threads {
-            ThreadCount::Auto => choice("auto"),
-            ThreadCount::Fixed(count) => number(i64::try_from(count.get()).ok()?),
+            ThreadCount::Auto => record([("mode", choice("auto"))]),
+            ThreadCount::Fixed(count) => record([
+                ("mode", choice("fixed")),
+                ("count", number(i64::try_from(count.get()).ok()?)),
+            ]),
         },
         "film_grain" => Bool(config.film_grain),
         "cbr_padding" => Bool(config.cbr_padding),
@@ -358,6 +435,16 @@ fn tile_value(layout: &TileLayout) -> OptionValue {
             ("heights", list(heights)),
         ]),
     }
+}
+
+fn ratio((num, den): (u32, u32)) -> OptionValue {
+    record([("numerator", number(num)), ("denominator", number(den))])
+}
+
+fn byte_value(bytes: Option<&[u8]>) -> OptionValue {
+    bytes.map_or(OptionValue::None, |bytes| {
+        OptionValue::List(bytes.iter().copied().map(number).collect())
+    })
 }
 
 fn record(fields: impl IntoIterator<Item = (&'static str, OptionValue)>) -> OptionValue {
@@ -441,6 +528,32 @@ mod tests {
             assert_eq!(config.rate_control, mode);
             assert_eq!(value(&config, "rate_control"), Some(request));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_has_one_budget_and_round_trips_explicit_absence() -> Result<(), FieldError> {
+        let mut config = Config::new(64, 64);
+        let bytes = OptionValue::List(vec![number(0); MAX_METADATA_BYTES as usize]);
+        let accepted = record([("icc_profile", bytes.clone())]);
+        apply(&mut config, "key_frame_metadata", &accepted)?;
+        assert_eq!(
+            value(&config, "key_frame_metadata"),
+            Some(record([
+                ("icc_profile", bytes.clone()),
+                ("itut_t35", OptionValue::None),
+                ("user_data_unregistered", OptionValue::None),
+            ]))
+        );
+        let excessive = record([
+            ("icc_profile", bytes),
+            ("itut_t35", OptionValue::List(vec![number(1)])),
+        ]);
+        assert!(matches!(
+            apply(&mut config, "key_frame_metadata", &excessive),
+            Err(error) if error.field == "key_frame_metadata.itut_t35"
+        ));
+        assert!(config.key_frame_metadata.itut_t35.is_none());
         Ok(())
     }
 
