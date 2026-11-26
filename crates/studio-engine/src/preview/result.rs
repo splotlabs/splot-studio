@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use splot_core::annexb::AnnexBObuCursor;
-use splot_core::ivf::{IvfError, is_ivf, parse_ivf_header};
+use splot_core::ivf::{IvfError, IvfHeader, is_ivf, parse_ivf_header};
 use splot_core::span::ByteOffset;
 use splot_core::stream_reader::{ReaderError, TemporalUnitReader, is_random_access_point};
 use splot_core::types::ObuType;
@@ -31,7 +31,7 @@ use super::document::DocumentPicture;
 use super::{Context, Decoded, Outcome, Stopped};
 use crate::inspect::document::HashReader;
 use crate::output::FileId;
-use crate::source::{self, Selection};
+use crate::source::{self, FileChangeStamp, Selection};
 use crate::stream::{
     self, MAX_DOCUMENT_UNITS as MAX_UNITS, MAX_UNIT_BYTES, PREVIEW_DECODE_THREADS,
 };
@@ -66,7 +66,7 @@ pub struct ResultPictures {
     path: PathBuf,
     fingerprint: SourceFingerprint,
     /// Present for a document, whose identity must match analysis.
-    document_id: Option<FileId>,
+    document_id: Option<(FileId, FileChangeStamp)>,
     verified_bytes: u64,
     file: File,
     units: Vec<Unit>,
@@ -115,7 +115,12 @@ impl ResultPictures {
         if !named.is_file() {
             return Err(unreadable("The preview path must name a regular file."));
         }
-        let file = File::open(&path).map_err(open_error)?;
+        let opened = if document.is_some() {
+            source::open_verified(&path)
+        } else {
+            File::open(&path)
+        };
+        let file = opened.map_err(open_error)?;
         let metadata = file.metadata().map_err(inspect_error)?;
         if !metadata.is_file() {
             return Err(unreadable("The preview file must be a regular file."));
@@ -129,41 +134,13 @@ impl ResultPictures {
                 return Err(changed());
             }
             let id = FileId::of_file(&file, &path).map_err(inspect_error)?;
-            source::still_the_same(&path, &id, fingerprint).map_err(Stopped::from_stop)?;
-            let reader = ScanReader {
-                context,
-                inner: reader.take(digest.bytes),
-                completed: 0,
-                total: digest.bytes,
-            };
-            // Any legal IVF file header fits within this buffer. Hash these
-            // bytes with the rest of the verified scope before exposing them.
-            let mut reader = HashReader::new(reader);
-            let verify_error = |e| {
-                context
-                    .check()
-                    .err()
-                    .unwrap_or_else(|| unreadable(format!("Cannot verify the document bytes. {e}")))
-            };
-            let mut header = Vec::new();
-            reader
-                .by_ref()
-                .take(u64::from(u16::MAX))
-                .read_to_end(&mut header)
-                .map_err(verify_error)?;
-            let header = is_ivf(&header).then(|| parse_ivf_header(&header));
-            io::copy(&mut reader, &mut io::sink()).map_err(verify_error)?;
-            if &reader.finish() != digest {
-                return Err(changed());
-            }
-            source::still_the_same(&path, &id, fingerprint).map_err(Stopped::from_stop)?;
-            let header = match header.transpose() {
-                Ok(header) => header,
-                Err(IvfError::TruncatedHeader { .. }) if digest.bytes < fingerprint.len => {
-                    return Err(partial_coverage(digest.bytes));
-                }
-                Err(e) => return Err(unreadable(format!("Cannot parse the preview file. {e}"))),
-            };
+            let stamp = FileChangeStamp::of(&metadata);
+            source::still_verified(&path, &id, fingerprint, &file, stamp)
+                .map_err(Stopped::from_stop)?;
+            let header =
+                verify_document_bytes(reader, digest, digest.bytes < fingerprint.len, context)?;
+            source::still_verified(&path, &id, fingerprint, &file, stamp)
+                .map_err(Stopped::from_stop)?;
             if header.is_some_and(|header| header.fourcc != *b"AV02") {
                 return Err(Stopped::unavailable(
                     PictureFailure::Unsupported,
@@ -173,7 +150,11 @@ impl ResultPictures {
             let time_base = header
                 .map(|header| (header.timebase_numerator, header.timebase_denominator))
                 .filter(|(num, den)| *num != 0 && *den != 0);
-            ((Vec::new(), None, time_base), Some(id), digest.bytes)
+            (
+                (Vec::new(), None, time_base),
+                Some((id, stamp)),
+                digest.bytes,
+            )
         } else {
             (index(reader), None, fingerprint.len)
         };
@@ -213,8 +194,8 @@ impl ResultPictures {
     }
 
     pub fn check(&self) -> Outcome<()> {
-        if let Some(id) = &self.document_id {
-            return source::still_the_same(&self.path, id, self.fingerprint)
+        if let Some((id, stamp)) = &self.document_id {
+            return source::still_verified(&self.path, id, self.fingerprint, &self.file, *stamp)
                 .map_err(Stopped::from_stop);
         }
         let now = std::fs::metadata(&self.path)
@@ -600,6 +581,45 @@ struct Damage {
 
 type Index = (Vec<Unit>, Option<Damage>, Option<(u32, u32)>);
 
+fn verify_document_bytes(
+    file: File,
+    digest: &SourceDigest,
+    partial: bool,
+    context: &Context<'_>,
+) -> Outcome<Option<IvfHeader>> {
+    let reader = ScanReader {
+        context,
+        inner: file.take(digest.bytes),
+        completed: 0,
+        total: digest.bytes,
+    };
+    // Any legal IVF file header fits within this buffer. Hash these
+    // bytes with the rest of the verified scope before exposing them.
+    let mut reader = HashReader::new(reader);
+    let verify_error = |e| {
+        context
+            .check()
+            .err()
+            .unwrap_or_else(|| unreadable(format!("Cannot verify the document bytes. {e}")))
+    };
+    let mut header = Vec::new();
+    reader
+        .by_ref()
+        .take(u64::from(u16::MAX))
+        .read_to_end(&mut header)
+        .map_err(verify_error)?;
+    let header = is_ivf(&header).then(|| parse_ivf_header(&header));
+    io::copy(&mut reader, &mut io::sink()).map_err(verify_error)?;
+    if &reader.finish() != digest {
+        return Err(changed());
+    }
+    match header.transpose() {
+        Ok(header) => Ok(header),
+        Err(IvfError::TruncatedHeader { .. }) if partial => Err(partial_coverage(digest.bytes)),
+        Err(e) => Err(unreadable(format!("Cannot parse the preview file. {e}"))),
+    }
+}
+
 /// Check cancellation between local reads, including reads inside one unit.
 struct ScanReader<'a, R> {
     context: &'a Context<'a>,
@@ -798,8 +818,9 @@ mod tests {
             let mut source = tempfile::NamedTempFile::new()?;
             source.write_all(&bytes)?;
             source.as_file().set_len(3 << 30)?;
-            let path = WirePath::from_path(source.path());
-            let fingerprint = SourceFingerprint::of(&source.as_file().metadata()?);
+            let source = source.into_temp_path();
+            let path = WirePath::from_path(&source);
+            let fingerprint = SourceFingerprint::of(&std::fs::metadata(&source)?);
             let mut hash = HashReader::new(&bytes[..end]);
             io::copy(&mut hash, &mut io::sink())?;
             let digest = hash.finish();
@@ -867,8 +888,9 @@ mod tests {
         let mut hash = HashReader::new(File::open(source.path())?);
         io::copy(&mut hash, &mut io::sink())?;
         let digest = hash.finish();
-        let path = WirePath::from_path(source.path());
-        let fingerprint = SourceFingerprint::of(&source.as_file().metadata()?);
+        let source = source.into_temp_path();
+        let path = WirePath::from_path(&source);
+        let fingerprint = SourceFingerprint::of(&std::fs::metadata(&source)?);
         let shared = super::super::Shared::default();
         let context = Context {
             shared: &shared,
