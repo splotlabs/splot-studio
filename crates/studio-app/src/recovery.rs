@@ -783,7 +783,7 @@ mod tests {
         assert!(restored.items[0].attempt().is_none());
         assert_eq!(restored.items[0].submitted, stored.items[0].submitted);
         assert_eq!(restored.items[1].state(), ItemState::Interrupted);
-        assert!(restored.cleanups.is_empty());
+        assert_eq!(restored.cleanups.as_slice(), &[]);
         let attempt = restored.items[1]
             .attempt()
             .unwrap_or_else(|| unreachable!());

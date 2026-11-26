@@ -1077,7 +1077,7 @@ mod tests {
             for i in 0..migrated.items.len() {
                 let item = &migrated.items[i];
                 assert_eq!(item.submitted, None);
-                assert!(item.attempt_policy.is_empty());
+                assert_eq!(item.attempt_policy.as_slice(), &[]);
                 let job = &mut expected["items"][i]["state"]["job"];
                 job["settings"] = json!({"base": job["settings"], "values": {}});
             }
