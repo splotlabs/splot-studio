@@ -31,7 +31,7 @@ use studio_domain::job::{SourceFingerprint, WirePath};
 use studio_domain::protocol::MAX_MESSAGE_BYTES;
 
 use crate::output::FileId;
-use crate::source;
+use crate::source::{self, FileChangeStamp};
 
 mod cache;
 mod cache_session;
@@ -94,6 +94,7 @@ pub struct Document {
     path: PathBuf,
     file: File,
     id: FileId,
+    stamp: FileChangeStamp,
     summary: DocumentSummary,
     index: Index,
     scan: Option<Scan<BufReader<HashReader<File>>>>,
@@ -144,7 +145,7 @@ impl Document {
         if !named.is_file() {
             return Err(not_a_file());
         }
-        let file = File::open(&path).map_err(|e| io("cannot open the file", e))?;
+        let file = source::open_verified(&path).map_err(|e| io("cannot open the file", e))?;
         // The file opened, in case the path changed after the check.
         let metadata = file
             .metadata()
@@ -153,12 +154,19 @@ impl Document {
             return Err(not_a_file());
         }
         let fingerprint = SourceFingerprint::of(&metadata);
+        let stamp = FileChangeStamp::of(&metadata);
         let id = FileId::of_file(&file, &path).map_err(|e| io("cannot identify the file", e))?;
         // A cloned handle shares the seek position on supported platforms.
-        let mut reader = File::open(&path).map_err(|e| io("Cannot read the file", e))?;
+        let mut reader = source::open_verified(&path).map_err(|e| io("Cannot read the file", e))?;
         let scan_id =
             FileId::of_file(&reader, &path).map_err(|e| io("Cannot identify the file", e))?;
-        if id != scan_id {
+        let scan_metadata = reader
+            .metadata()
+            .map_err(|e| io("Cannot inspect the file", e))?;
+        if id != scan_id
+            || fingerprint != SourceFingerprint::of(&scan_metadata)
+            || stamp != FileChangeStamp::of(&scan_metadata)
+        {
             return Err(Refusal::new(
                 AnalysisFailure::SourceChanged,
                 "The source changed during open.",
@@ -218,6 +226,7 @@ impl Document {
             path,
             file,
             id,
+            stamp,
             index,
             scan: outcome.is_none().then_some(scan),
             evidence: Evidence::default(),
@@ -316,7 +325,9 @@ impl Document {
         count: u32,
     ) -> Result<(u64, Vec<Row>), Refusal> {
         self.check()?;
-        self.index.page(filter, first, count)
+        let page = self.index.page(filter, first, count);
+        self.check()?;
+        page
     }
 
     /// The element `target` names and its row among those `filter` admits.
@@ -330,7 +341,9 @@ impl Document {
         target: LocateTarget,
     ) -> Result<(Option<u64>, Row), Refusal> {
         self.check()?;
-        self.index.locate(filter, target)
+        let row = self.index.locate(filter, target);
+        self.check()?;
+        row
     }
 
     /// The file's bytes `offset..offset + len`.
@@ -350,7 +363,14 @@ impl Document {
 
     /// Whether the path still names the opened file, unchanged.
     fn check(&self) -> Result<(), Refusal> {
-        source::still_the_same(&self.path, &self.id, self.summary.fingerprint).map_err(|_| {
+        source::still_verified(
+            &self.path,
+            &self.id,
+            self.summary.fingerprint,
+            &self.file,
+            self.stamp,
+        )
+        .map_err(|_| {
             Refusal::new(
                 AnalysisFailure::SourceChanged,
                 "the file changed or was replaced since it was opened",
