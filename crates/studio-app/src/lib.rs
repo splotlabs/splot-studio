@@ -278,7 +278,13 @@ pub fn build_with_engine(
                 }
             },
         );
-    let session = Session::new(state, engine, controller::post(), writer);
+    let session = Session::with_inspect_data_dir(
+        state,
+        engine,
+        controller::post(),
+        writer,
+        instance.as_ref().map(|owner| owner.dir().to_owned()),
+    );
     let ctl = Controller::start(&window, session, files);
     Ok(Studio {
         window,

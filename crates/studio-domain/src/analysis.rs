@@ -30,6 +30,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::job::SourceFingerprint;
 
+/// The app passes its locked data directory to the inspection process through this variable.
+pub const INSPECT_DATA_DIR_VAR: &str = "SPLOT_STUDIO_INSPECT_DATA_DIR";
+
 /// The most elements one page request may ask for. A page holds fewer when
 /// the file ends first or when they would not fit in one protocol message.
 pub const MAX_PAGE_ELEMENTS: u32 = 256;
