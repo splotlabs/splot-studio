@@ -20,6 +20,7 @@
 //! only while the file, stream and settings it was given for are unchanged.
 
 mod files;
+mod options;
 mod run;
 #[cfg(test)]
 mod tests;
@@ -37,9 +38,10 @@ use crate::activity::{self, Changed};
 use crate::analysis::ResultOf;
 use crate::queue::{Acknowledgement, Item, ItemId, ItemState, PartialFate};
 use crate::recovery::{Disk, Recovered, RestoredView};
-use crate::simple::{Priority, Quality};
 use crate::source::{ProbeFailure, ProbeRequest, TrackPicker};
 use crate::workspace::Workspace;
+
+use self::options::OptionHistory;
 
 /// `splot_encode::Config::DEFAULT_CRF` at the pinned codec revision.
 const CODEC_DEFAULT_CRF: u8 = 20;
@@ -104,9 +106,9 @@ pub enum Intent {
     PresetEdited(i32),
     /// A rate factor as typed or stepped in the widget.
     CrfEdited(i32),
-    /// A Quality step, by index into [`Quality::ALL`].
+    /// A Quality step, by index into [`Quality::ALL`](crate::simple::Quality::ALL).
     QualitySelected(i32),
-    /// A Priority step, by index into [`Priority::ALL`].
+    /// A Priority step, by index into [`Priority::ALL`](crate::simple::Priority::ALL).
     PrioritySelected(i32),
     /// Sets one typed override. An absent value removes the override.
     OptionEdited {
@@ -115,6 +117,12 @@ pub enum Intent {
         /// An explicit option value, or absence to inherit.
         value: Option<OptionValue>,
     },
+    /// Replaces the editable option draft with one undoable edit.
+    ReplaceOptions(OptionRequest),
+    /// Restores the previous option draft.
+    UndoOptions,
+    /// Restores the next option draft after an undo.
+    RedoOptions,
     /// Clear the one file to start over (Convert Another).
     ResetRequested,
     /// Show another workspace. Refused while it has no flow in this build.
@@ -357,6 +365,8 @@ pub struct SettingsView {
     /// They are a file's snapshot (it is converting or converted), not the
     /// current settings, and cannot be changed.
     pub read_only: bool,
+    quality_override: bool,
+    priority_override: bool,
 }
 
 /// The queue, the current settings and what the engine reported.
@@ -365,6 +375,7 @@ pub struct AppState {
     items: Vec<Item>,
     next_id: ItemId,
     settings: OptionRequest,
+    option_history: OptionHistory,
     /// `None` until the startup handshake answers; `Err` when the engine
     /// cannot be used, with the reason for the user.
     engine: Option<Result<Capabilities, String>>,
@@ -408,6 +419,7 @@ impl AppState {
                 base: INITIAL_SETTINGS,
                 values: BTreeMap::new(),
             },
+            option_history: OptionHistory::default(),
             engine: None,
             selected: None,
             run: None,
@@ -538,15 +550,11 @@ impl AppState {
             | Intent::PresetEdited(_)
             | Intent::CrfEdited(_)
             | Intent::QualitySelected(_)
-            | Intent::PrioritySelected(_) => {
-                if !self.settings_view().read_only {
-                    self.edit_settings(&intent, disk);
-                }
-            }
-            Intent::OptionEdited { key, value } if !self.settings_view().read_only && !modal => {
-                self.edit_option(key, value);
-            }
-            Intent::OptionEdited { .. } => {}
+            | Intent::PrioritySelected(_)
+            | Intent::OptionEdited { .. }
+            | Intent::ReplaceOptions(_)
+            | Intent::UndoOptions
+            | Intent::RedoOptions => self.edit_options(intent, disk),
             Intent::ResetRequested => {
                 if self.items.len() == 1 && !self.items[0].state.is_active() {
                     self.remove(self.items[0].id);
@@ -575,24 +583,6 @@ impl AppState {
             self.dialog = None;
             if let Some(path) = path {
                 self.choose_destination(id, path);
-            }
-        }
-    }
-
-    fn edit_option(&mut self, key: String, value: Option<OptionValue>) {
-        let changed = match value {
-            Some(value) if self.settings.values.get(&key) == Some(&value) => false,
-            Some(value) => {
-                self.settings.values.insert(key, value);
-                true
-            }
-            None => self.settings.values.remove(&key).is_some(),
-        };
-        if changed {
-            for item in &mut self.items {
-                if item.submitted.is_none() {
-                    item.ack = None;
-                }
             }
         }
     }
@@ -874,33 +864,6 @@ impl AppState {
             .map_or(&self.settings, |run| &run.settings)
     }
 
-    /// The settings the window shows: the selected file's snapshot while it
-    /// converts or once converted (and in one-file mode only while it
-    /// converts, as before there was a queue), otherwise the current ones.
-    #[must_use]
-    pub fn settings_view(&self) -> SettingsView {
-        let item = match self.mode() {
-            Mode::Single => self.items.first().filter(|i| i.state.is_active()),
-            // Only a row the user selected; the fallback shows the current
-            // settings, which is what the next files will use.
-            Mode::List => self
-                .selected
-                .and_then(|id| self.item(id))
-                .filter(|i| i.state.is_active() || i.state == ItemState::Completed),
-            Mode::Empty => None,
-        };
-        match item.and_then(|i| i.attempt.as_ref()) {
-            Some(attempt) => SettingsView {
-                settings: attempt.job.settings.base,
-                read_only: true,
-            },
-            None => SettingsView {
-                settings: self.settings.base,
-                read_only: false,
-            },
-        }
-    }
-
     /// The index of `kind` in [`OutputKind::ALL`].
     #[must_use]
     pub fn output_index(kind: OutputKind) -> i32 {
@@ -1069,47 +1032,4 @@ impl AppState {
         self.next_request += 1;
         id
     }
-
-    /// Applies a settings edit; out-of-range values change nothing.
-    fn edit_settings(&mut self, intent: &Intent, disk: &dyn Disk) {
-        match *intent {
-            Intent::OutputSelected(index) => {
-                if let Some(output) = step(&OutputKind::ALL, index) {
-                    self.settings.base.output = output;
-                    self.follow_output_kind(disk);
-                }
-            }
-            Intent::PresetEdited(value) => {
-                if let Some(preset) = to_u8(value).and_then(|v| SpeedPreset::new(v).ok()) {
-                    self.settings.base.preset = preset;
-                }
-            }
-            Intent::CrfEdited(value) => {
-                if let Some(crf) = to_u8(value).and_then(|v| Crf::new(v).ok()) {
-                    self.settings.base.crf = crf;
-                }
-            }
-            Intent::QualitySelected(index) => {
-                if let Some(quality) = step(&Quality::ALL, index) {
-                    self.settings.base.crf = quality.crf();
-                }
-            }
-            Intent::PrioritySelected(index) => {
-                if let Some(priority) = step(&Priority::ALL, index) {
-                    self.settings.base.preset = priority.preset();
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn step<T: Copy>(all: &[T], index: i32) -> Option<T> {
-    usize::try_from(index)
-        .ok()
-        .and_then(|i| all.get(i).copied())
-}
-
-fn to_u8(value: i32) -> Option<u8> {
-    u8::try_from(value).ok()
 }

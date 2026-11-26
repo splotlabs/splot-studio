@@ -6,6 +6,8 @@
 //! Worker events and journal results reach this thread through
 //! [`slint::invoke_from_event_loop`].
 
+mod advanced;
+
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
@@ -37,6 +39,8 @@ pub struct Controller {
     cancel_deadline: Timer,
     /// Fires [`RESIZE_SETTLE`] after the picture area's size last changed.
     resize_settle: Timer,
+    advanced: RefCell<advanced::Editor>,
+    advanced_settle: Timer,
     /// The window was not minimized when last looked at.
     visible: Cell<bool>,
 }
@@ -117,12 +121,16 @@ fn physical(logical: f32, scale: f32) -> i64 {
     }
 }
 
-/// Sizes the window to its content (the window is the card).
+/// Fits the card without requesting a size the window already has.
 fn fit(window: &slint::Weak<AppWindow>) {
     if let Some(window) = window.upgrade() {
         let size = slint::LogicalSize::new(window.get_fitted_width(), window.get_fitted_height());
-        if size.width > 0.0 && size.height > 0.0 {
-            window.window().set_size(size);
+        let native = window.window();
+        if size.width > 0.0
+            && size.height > 0.0
+            && size.to_physical(native.scale_factor()) != native.size()
+        {
+            native.set_size(size);
         }
     }
 }
@@ -137,6 +145,8 @@ impl Controller {
             clock: Timer::default(),
             cancel_deadline: Timer::default(),
             resize_settle: Timer::default(),
+            advanced: RefCell::default(),
+            advanced_settle: Timer::default(),
             visible: Cell::new(true),
         });
         CONTROLLER.with(|c| *c.borrow_mut() = Rc::downgrade(&ctl));
@@ -212,6 +222,7 @@ impl Controller {
             // Only fails when no event loop is running, so there is nothing to quit.
             let _ = slint::quit_event_loop();
         });
+        ctl.wire_advanced(window);
         ctl.wire_preview(window);
         ctl.wire_analysis(window);
 
@@ -230,6 +241,12 @@ impl Controller {
     /// Applies an intent and handles what it leads to.
     pub fn dispatch(self: &Rc<Self>, intent: Intent) {
         self.check_visible();
+        if matches!(intent, Intent::ConvertRequested) && self.block_invalid_advanced() {
+            return;
+        }
+        if self.preview_simple_preset(&intent) {
+            return;
+        }
         let outcome = self.session.borrow_mut().dispatch(intent, Instant::now());
         self.handle(outcome);
     }
@@ -409,6 +426,9 @@ impl Controller {
             Changed::Counters => render_counters(&window, state, now),
             Changed::Phase => render(&window, state, now),
         }
+        if outcome.advanced || outcome.changed == Changed::Phase {
+            self.render_advanced(&window, &session);
+        }
         if outcome.preview.any() {
             render_preview(&window, state, session.preview(), outcome.preview);
         }
@@ -417,6 +437,10 @@ impl Controller {
         }
         if outcome.analysis || outcome.changed != Changed::Nothing {
             render_jobs(&window, &session.jobs());
+        }
+        drop(session);
+        if outcome.advanced || outcome.changed == Changed::Phase {
+            self.check_preset_preview();
         }
     }
 

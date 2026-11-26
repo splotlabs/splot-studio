@@ -139,7 +139,9 @@ fn event(rx: &Receiver<Delivery>, id: u64, timeout: Duration) -> Event {
             e.body
         }
         Delivery::Ended(ending) => unreachable!("worker ended early: {ending:?}"),
-        Delivery::JournalSaved(_) => unreachable!("a worker cannot acknowledge a journal write"),
+        Delivery::Advanced(_) | Delivery::JournalSaved(_) => {
+            unreachable!("unexpected app delivery")
+        }
         Delivery::Pictures(_) => unreachable!("no live pictures were asked for"),
     }
 }
@@ -151,7 +153,9 @@ fn expect_clean_end(rx: &Receiver<Delivery>) -> Ending {
             ending
         }
         Delivery::Event(e) => unreachable!("expected the end, got {e:?}"),
-        Delivery::JournalSaved(_) => unreachable!("a worker cannot acknowledge a journal write"),
+        Delivery::Advanced(_) | Delivery::JournalSaved(_) => {
+            unreachable!("unexpected app delivery")
+        }
         Delivery::Pictures(_) => unreachable!("no live pictures were asked for"),
     }
 }
@@ -544,8 +548,8 @@ fn shutdown_mid_job_stops_and_reaps_the_worker() {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Delivery::Event(_) | Delivery::Pictures(_)) => {}
             Ok(Delivery::Ended(_)) => break,
-            Ok(Delivery::JournalSaved(_)) => {
-                unreachable!("a worker cannot acknowledge a journal write")
+            Ok(Delivery::Advanced(_) | Delivery::JournalSaved(_)) => {
+                unreachable!("unexpected app delivery")
             }
             Err(e) => unreachable!("worker not reaped: {e}"),
         }
@@ -581,8 +585,8 @@ fn a_killed_worker_ends_without_a_terminal_event() {
                 );
                 break;
             }
-            Ok(Delivery::JournalSaved(_)) => {
-                unreachable!("a worker cannot acknowledge a journal write")
+            Ok(Delivery::Advanced(_) | Delivery::JournalSaved(_)) => {
+                unreachable!("unexpected app delivery")
             }
             Err(e) => unreachable!("worker not reaped: {e}"),
         }

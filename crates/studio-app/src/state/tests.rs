@@ -481,7 +481,13 @@ fn convert_builds_the_job_from_the_probe_and_the_current_settings() {
     let view = app.state.settings_view();
     assert!(view.read_only);
     let before = app.state.clone();
+    let replacement = OptionRequest::from(INITIAL_SETTINGS);
+    assert!(!app.state.can_undo_options());
+    assert_eq!(app.state.visible_option_request(), &job.settings);
     for intent in [
+        Intent::ReplaceOptions(replacement),
+        Intent::UndoOptions,
+        Intent::RedoOptions,
         Intent::ReplaceRequested,
         Intent::VideoTrackSelected(1),
         Intent::ChooseDestinationRequested,
@@ -534,6 +540,76 @@ fn simple_steps_and_raw_values_are_one_setting() {
         app.apply(Intent::PrioritySelected(bad));
     }
     assert_eq!(app.state.settings().crf.get(), 28);
+}
+
+#[test]
+fn simple_and_advanced_edits_share_one_history() {
+    let mut app = App::new();
+    app.add(&["/m/clip.y4m"], ready);
+    let initial = app.state.option_request().clone();
+    let mut explicit = initial.clone();
+    explicit
+        .values
+        .insert("preset.tcq".into(), OptionValue::Bool(false));
+    explicit.values.insert(
+        "rate_control".into(),
+        OptionValue::Record(BTreeMap::from([
+            ("mode".into(), OptionValue::Choice("crf".into())),
+            ("crf".into(), OptionValue::Integer(20)),
+        ])),
+    );
+    explicit.values.insert("crop".into(), OptionValue::None);
+    app.apply(Intent::ReplaceOptions(explicit.clone()));
+    let view = app.state.settings_view();
+    assert_eq!(view.quality(), None);
+    assert_eq!(view.priority(), None);
+
+    let intent = Intent::PrioritySelected(0);
+    let expected = app.state.proposed_options(&intent);
+    assert_eq!(app.state.option_request(), &explicit);
+    app.apply(intent);
+    assert_eq!(expected.as_ref(), Some(app.state.option_request()));
+    assert_eq!(app.state.option_request().values, explicit.values);
+
+    app.apply(Intent::OutputSelected(1));
+    assert_eq!(app.state.items()[0].destination().path, abs("/m/clip.obu"));
+    app.apply(Intent::UndoOptions);
+    assert_eq!(expected.as_ref(), Some(app.state.option_request()));
+    assert_eq!(app.state.items()[0].destination().path, abs("/m/clip.ivf"));
+    app.apply(Intent::UndoOptions);
+    assert_eq!(app.state.option_request(), &explicit);
+    app.apply(Intent::UndoOptions);
+    assert_eq!(app.state.option_request(), &initial);
+    assert!(!app.state.can_undo_options());
+    assert!(app.state.can_redo_options());
+
+    app.apply(Intent::RedoOptions);
+    assert_eq!(app.state.option_request(), &explicit);
+    app.apply(Intent::ReplaceOptions(explicit));
+    assert!(app.state.can_redo_options(), "A no-op must keep redo.");
+    app.apply(Intent::QualitySelected(0));
+    assert!(
+        !app.state.can_redo_options(),
+        "A different edit replaces the redo branch."
+    );
+    assert_eq!(app.state.settings_view().quality(), None);
+    assert_eq!(app.state.options_generation(), 8);
+}
+
+#[test]
+fn draft_history_has_a_fixed_limit() {
+    let mut app = App::new();
+    for change in 0..40 {
+        app.apply(Intent::CrfEdited(if change % 2 == 0 { 21 } else { 22 }));
+    }
+    let mut restored = 0;
+    while app.state.can_undo_options() {
+        app.apply(Intent::UndoOptions);
+        restored += 1;
+        assert!(restored <= 32);
+    }
+    assert_eq!(restored, 32);
+    assert_eq!(app.state.settings().crf.get(), 22);
 }
 
 #[test]

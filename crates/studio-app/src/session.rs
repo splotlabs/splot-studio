@@ -41,6 +41,7 @@ use crate::source::ProbeFailure;
 use crate::state::{AppState, Effect, Intent, JournalProblem};
 use crate::workspace::Workspace;
 
+mod advanced;
 mod preflight;
 
 /// The request id of the startup `Hello`; probes and jobs count from 1.
@@ -57,6 +58,8 @@ pub enum Route {
     Job(u64),
     /// The journal save that authorizes a prepared job, by job request ID.
     Journal(u64),
+    /// The Advanced request generation.
+    Advanced(u64),
     /// The preview process, by how many were started before it.
     Preview(u64),
     /// The inspect process, by how many were started before it.
@@ -105,6 +108,8 @@ pub struct Outcome {
     pub preview: Dirty,
     /// The Analyze workspace changed.
     pub analysis: bool,
+    /// The Advanced editor needs to redraw.
+    pub advanced: bool,
 }
 
 impl Outcome {
@@ -118,6 +123,7 @@ impl Outcome {
                 thumbs: false,
             },
             analysis: false,
+            advanced: false,
         }
     }
 
@@ -129,6 +135,7 @@ impl Outcome {
         self.preview.view |= other.preview.view;
         self.preview.thumbs |= other.preview.thumbs;
         self.analysis |= other.analysis;
+        self.advanced |= other.advanced;
     }
 }
 
@@ -141,6 +148,7 @@ pub struct Session {
     probe: Option<(u64, Worker)>,
     job: Option<(u64, Worker)>,
     preflight: Option<preflight::Preflight>,
+    advanced: advanced::Advanced,
     preflight_queue: VecDeque<preflight::Request>,
     prepared: Option<(u64, JobSpec)>,
     confirming: Option<(u64, usize)>,
@@ -186,6 +194,7 @@ impl Session {
             probe: None,
             job: None,
             preflight: None,
+            advanced: advanced::Advanced::default(),
             preflight_queue: VecDeque::new(),
             prepared: None,
             confirming: None,
@@ -534,7 +543,7 @@ impl Session {
             return Outcome::nothing();
         }
         let effects = match delivery {
-            Delivery::JournalSaved(_) => return Outcome::nothing(),
+            Delivery::Advanced(_) | Delivery::JournalSaved(_) => return Outcome::nothing(),
             Delivery::Event(envelope) => self.analysis.event(envelope.request_id, envelope.body),
             Delivery::Pictures(slot) => {
                 // The inspect process sends no pictures.
@@ -573,7 +582,7 @@ impl Session {
             }
             Route::Probe(id) => {
                 let result = match delivery {
-                    Delivery::JournalSaved(_) => return nothing,
+                    Delivery::Advanced(_) | Delivery::JournalSaved(_) => return nothing,
                     Delivery::Event(e) if e.request_id != id => return nothing,
                     Delivery::Pictures(slot) => {
                         let _ = slot.take();
@@ -619,6 +628,7 @@ impl Session {
                     _ => nothing,
                 }
             }
+            Route::Advanced(generation) => self.deliver_advanced(generation, delivery),
             Route::Preview(spawn) => self.deliver_preview(spawn, delivery),
             Route::Inspect(spawn) => self.deliver_inspect(spawn, delivery),
         }
@@ -634,7 +644,7 @@ impl Session {
             return self.deliver_preflight(id, delivery, now);
         }
         let input = match delivery {
-            Delivery::JournalSaved(_) => return nothing,
+            Delivery::Advanced(_) | Delivery::JournalSaved(_) => return nothing,
             Delivery::Event(e) if e.request_id != id => {
                 eprintln!(
                     "{}: ignoring an event for request {} during job {id}",
@@ -691,7 +701,7 @@ impl Session {
     fn deliver_preview(&mut self, spawn: u64, delivery: Delivery) -> Outcome {
         let current = self.previewer.as_ref().is_some_and(|(n, _)| *n == spawn);
         let effects = match delivery {
-            Delivery::JournalSaved(_) => return Outcome::nothing(),
+            Delivery::Advanced(_) | Delivery::JournalSaved(_) => return Outcome::nothing(),
             Delivery::Pictures(slot) => match slot.take() {
                 Some(picture) if current => self.preview.picture(picture),
                 _ => Vec::new(),
@@ -919,6 +929,7 @@ impl Session {
         if self.shut_down {
             return;
         }
+        self.close_advanced();
         self.state.interrupt_for_shutdown();
         self.persist();
         if let Some(writer) = &self.journal {

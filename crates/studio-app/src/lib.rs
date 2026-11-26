@@ -27,6 +27,7 @@
 //! separate written license from Bartosz Tomczyk.
 
 pub mod activity;
+mod advanced;
 pub mod analysis;
 mod controller;
 pub mod cpu;
@@ -236,6 +237,19 @@ impl Drop for Studio {
 /// # Errors
 /// Returns a [`slint::PlatformError`] when no window can be created.
 pub fn build(prepared: Prepared, files: Vec<PathBuf>) -> Result<Studio, slint::PlatformError> {
+    let engine = engine::sibling_path().map_err(|e| format!("cannot locate the app: {e}"));
+    build_with_engine(prepared, files, engine)
+}
+
+/// Creates the main window and connects it to the specified engine.
+///
+/// # Errors
+/// Returns a platform error if Slint cannot create the window.
+pub fn build_with_engine(
+    prepared: Prepared,
+    files: Vec<PathBuf>,
+    engine: Result<PathBuf, String>,
+) -> Result<Studio, slint::PlatformError> {
     let window = new_window()?;
     let Prepared {
         instance,
@@ -259,7 +273,6 @@ pub fn build(prepared: Prepared, files: Vec<PathBuf>) -> Result<Studio, slint::P
                 }
             },
         );
-    let engine = engine::sibling_path().map_err(|e| format!("cannot locate the app: {e}"));
     let session = Session::new(state, engine, controller::post(), writer);
     let ctl = Controller::start(&window, session, files);
     Ok(Studio {
