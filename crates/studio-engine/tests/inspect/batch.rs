@@ -467,6 +467,7 @@ fn validation_matches_the_index_beyond_the_old_resident_limit() -> TestResult {
     assert_eq!(digest.bytes, contents.len() as u64);
     assert_eq!(digest.sha256, sha256(&contents));
 
+    drop(inspect);
     let tail = contents.last_mut().ok_or("expected an IVF tail")?;
     *tail = 0x06;
     fs::write(&path, &contents)?;
@@ -474,9 +475,12 @@ fn validation_matches_the_index_beyond_the_old_resident_limit() -> TestResult {
         .write(true)
         .open(&path)?
         .set_times(fs::FileTimes::new().set_modified(modified))?;
+    let mut inspect = Inspect::spawn()?;
     let indexed = inspect.open(2, &path)?;
-    assert_eq!(indexed.digest.as_deref(), Some(&*indexed_digest));
     assert_eq!(indexed.fingerprint, fingerprint);
+    let changed_index_digest = indexed
+        .digest
+        .ok_or("expected index digest after reopening")?;
     let latest = inspect.next_id;
     inspect.send(vec![validate(&path)])?;
     let BatchOutcome::Validated {
@@ -486,6 +490,7 @@ fn validation_matches_the_index_beyond_the_old_resident_limit() -> TestResult {
         return Err("expected updated validation evidence".into());
     };
     assert_eq!(updated.bytes, digest.bytes);
+    assert_eq!(*changed_index_digest, updated);
     assert_eq!(updated.sha256, sha256(&contents));
     assert_ne!(updated.sha256, digest.sha256);
     Ok(())

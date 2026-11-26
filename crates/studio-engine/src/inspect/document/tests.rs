@@ -1123,6 +1123,7 @@ fn byte_ranges_are_exact_bounded_and_inside_the_file() -> Result<(), Refusal> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 #[test]
 fn a_changed_or_replaced_source_is_refused() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
@@ -1248,6 +1249,7 @@ fn a_cancel_inside_one_large_unit_stops_its_read() {
 }
 
 /// The file changes while the open reads it: the open is refused.
+#[cfg(not(windows))]
 #[test]
 fn a_source_that_changes_during_the_open_is_refused() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
@@ -1487,5 +1489,46 @@ fn a_large_ivf_record_yields_and_cancels_during_payload_indexing()
     assert!(matches!(&rows[0].element, Element::Unparsed { span, .. }
         if span.offset == header.len() as u64 + IVF_FRAME_HEADER_SIZE as u64 + doc.summary().obus * 2
             && span.len + span.offset == doc.summary().fingerprint.len));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn restoring_modification_time_does_not_hide_a_source_change()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("source.obu");
+    let mut bytes = annex_b();
+    std::fs::write(&path, &bytes)?;
+    let doc = Document::open(&WirePath::from_path(&path), &never).map_err(|error| error.message)?;
+    let modified = std::fs::metadata(&path)?.modified()?;
+    if let Some(last) = bytes.last_mut() {
+        *last ^= 1;
+    }
+    std::fs::write(&path, bytes)?;
+    File::options()
+        .write(true)
+        .open(&path)?
+        .set_times(std::fs::FileTimes::new().set_modified(modified))?;
+    assert!(matches!(
+        doc.page(RowFilter::default(), 0, 1),
+        Err(Refusal {
+            code: AnalysisFailure::SourceChanged,
+            ..
+        })
+    ));
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn an_indexed_source_cannot_be_modified_while_open() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("source.obu");
+    std::fs::write(&path, annex_b())?;
+    let doc = Document::open(&WirePath::from_path(&path), &never).map_err(|error| error.message)?;
+    assert!(File::options().write(true).open(&path).is_err());
+    drop(doc);
+    assert!(File::options().write(true).open(&path).is_ok());
     Ok(())
 }
