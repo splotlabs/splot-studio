@@ -127,7 +127,7 @@ impl AppState {
                 if original.state != ItemState::Waiting || !vbr(self.option_request()) {
                     return None;
                 }
-                let destination = original.destination.path.with_extension("splot-pass.json");
+                let destination = original.destination.path.with_extension("splotpass");
                 JobSpec {
                     source: WirePath::from_path(&original.source),
                     fingerprint: facts.fingerprint,

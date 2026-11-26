@@ -171,7 +171,10 @@ pub(super) fn load(
     }
     let expected = header(job, source, policy, cancel)?;
     let frame_count = match source.facts.reader {
-        SourceReader::Y4m => None,
+        SourceReader::Y4m => {
+            check_y4m_count(source, artifact.bits.len() as u64, cancel)?;
+            None
+        }
         SourceReader::Ffmpeg => Some(
             source
                 .frame_count()

@@ -319,7 +319,7 @@ impl Controller {
                         let outcome = ctl.session.borrow_mut().generate_pass(Instant::now());
                         ctl.handle(outcome);
                     }
-                })
+                });
             }
         });
         window.on_job_related_approve({

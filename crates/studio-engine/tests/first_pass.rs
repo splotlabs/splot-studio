@@ -8,7 +8,7 @@ mod common;
 use std::error::Error;
 use std::fs;
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command as Process, Stdio};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
@@ -224,7 +224,7 @@ fn both_depths_and_formats_use_the_verified_pass() -> TestResult {
             }
             kept.extend([output.as_path(), artifact.as_path()]);
         }
-        assert!(leftovers(dir.path(), &kept).is_empty());
+        assert_eq!(leftovers(dir.path(), &kept), Vec::<PathBuf>::new());
         assert!(fs::read(input)? == clip.bytes());
     }
     Ok(())
@@ -255,7 +255,7 @@ fn missing_last_cost(original: &[u8]) -> Result<(Vec<u8>, String), Box<dyn Error
 
     assert_eq!(original.get(..8), Some(&b"SPLT1ST\x01"[..]));
     let frames = u32::from_le_bytes(original[12..16].try_into()?);
-    assert_eq!(frames, FRAMES as u32);
+    assert_eq!(usize::try_from(frames), Ok(FRAMES));
     let mut incomplete = original[..original.len() - 32 - 8].to_vec();
     incomplete[12..16].copy_from_slice(&(frames - 1).to_le_bytes());
     let bytes = Sha256::digest(&incomplete);
@@ -336,7 +336,10 @@ fn wrong_or_incomplete_passes_fail_before_opening_output() -> TestResult {
 
     Clip::new(64, 48, "420", FRAMES - 1).write(&input)?;
     refused(final_job, FailureCode::SourceChanged, None);
-    assert!(leftovers(dir.path(), &[&input, &path, &other]).is_empty());
+    assert_eq!(
+        leftovers(dir.path(), &[&input, &path, &other]),
+        Vec::<PathBuf>::new()
+    );
     Ok(())
 }
 
@@ -358,13 +361,13 @@ fn cancelled_and_failed_passes_publish_no_artifact() -> TestResult {
             .iter()
             .any(|event| matches!(event, Event::Working { .. }))
     );
-    assert!(leftovers(dir.path(), &[&input]).is_empty());
+    assert_eq!(leftovers(dir.path(), &[&input]), Vec::<PathBuf>::new());
 
     // A file in the destination's parent path makes creation fail on every host.
     let blocked = first_pass(&input, &input.join("statistics.pass"), OutputKind::Ivf);
     let (_, end) = run_job(blocked, |_, _| {});
     failed(&end, FailureCode::Output);
-    assert!(leftovers(dir.path(), &[&input]).is_empty());
+    assert_eq!(leftovers(dir.path(), &[&input]), Vec::<PathBuf>::new());
 
     // Make another file claim the name after the worker verified the statistics.
     let racer = artifact.clone();
@@ -380,7 +383,10 @@ fn cancelled_and_failed_passes_publish_no_artifact() -> TestResult {
     });
     failed(&end, FailureCode::DestinationExists);
     assert_eq!(fs::read(&artifact)?, b"Keep this file.");
-    assert!(leftovers(dir.path(), &[&input, &artifact]).is_empty());
+    assert_eq!(
+        leftovers(dir.path(), &[&input, &artifact]),
+        Vec::<PathBuf>::new()
+    );
     Ok(())
 }
 
@@ -440,7 +446,7 @@ fn worker_death_during_first_pass_cannot_publish_an_artifact() -> TestResult {
     ready?;
     killed?;
     assert!(!status.success());
-    assert!(leftovers(dir.path(), &[&input]).is_empty());
+    assert_eq!(leftovers(dir.path(), &[&input]), Vec::<PathBuf>::new());
     assert!(!artifact.exists());
     Ok(())
 }

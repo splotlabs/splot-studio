@@ -75,7 +75,7 @@ fn describe_worker() -> TestResult<BTreeMap<String, OptionDescriptor>> {
         };
         assert_eq!(answered, request_id);
         assert_eq!(start, first);
-        assert!(!options.is_empty());
+        assert_ne!(options.len(), 0);
         for option in options {
             assert!(descriptors.insert(option.key.clone(), option).is_none());
         }

@@ -27,7 +27,7 @@ fn descriptors() -> TestResult<Vec<OptionDescriptor>> {
         let first = u32::try_from(result.len())?;
         let (total, mut page) = describe(OPTIONS_SCHEMA_VERSION, first, MAX_OPTIONS_PAGE_ITEMS)
             .unwrap_or_else(|error| unreachable!("{error:?}"));
-        assert!(!page.is_empty());
+        assert_ne!(page.len(), 0);
         result.append(&mut page);
         if result.len() == usize::try_from(total)? {
             return Ok(result);
