@@ -600,7 +600,7 @@ fn progressive_open_serves_pages_before_its_terminal_reply() -> TestResult {
         partial.body,
         Event::AnalysisOpenProgress { document: 1, summary }
             if summary.outcome == ScanOutcome::Scanning && summary.elements > 0 &&
-                summary.digest.is_none()
+                summary.digest.is_some_and(|digest| digest.bytes < summary.fingerprint.len)
     ));
     let response = inspect.next()?;
     assert_eq!(response.request_id, page);

@@ -301,8 +301,8 @@ pub enum Command {
     },
     /// Inspect process only. Opens a read-only document and scans its framing.
     /// If the scan continues after the first slice, the engine sends
-    /// [`Event::AnalysisOpenProgress`]. Page, locate and byte requests can use
-    /// the document after that event. The final reply is [`Event::AnalysisOpened`]
+    /// [`Event::AnalysisOpenProgress`]. Page, locate, byte and syntax requests
+    /// can use the document after that event. The final reply is [`Event::AnalysisOpened`]
     /// or [`Event::AnalysisFailed`].
     AnalysisOpenProgressive {
         /// A document ID greater than each previously accepted ID.

@@ -601,12 +601,6 @@ fn work<W: Write>(queue: &Receiver<Queued>, shared: &Shared<W>) {
                 None => failed(document, unknown()),
             },
             Request::Inspect(query) => match open {
-                Some(_)
-                    if matches!(query, Query::Syntax { .. })
-                        && scans.iter().any(|scan| scan.document == document) =>
-                {
-                    failed(document, scan_pending())
-                }
                 Some(at) => match serve_document(&mut documents[at].1, document, id, query) {
                     Ok(answer) => answer,
                     Err(refusal) => {
