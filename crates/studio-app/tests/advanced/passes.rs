@@ -276,18 +276,27 @@ fn long_jobs(rig: &Rig) -> Result<(), Box<dyn Error>> {
         native.set_size(LogicalSize::new(640.0, 600.0));
         update_timers_and_animations();
         window.set_jobs(ModelRc::new(VecModel::from(rows.clone())));
-        window.invoke_show_jobs();
-        for _ in 0..ROWS {
-            press(Key::Tab);
+        let last = i32::try_from(ROWS - 1)?;
+        // Native styles can give the scroll bar a Tab stop.
+        for tabs in (ROWS - 2)..=(ROWS + 4) {
+            shown.set(None);
+            press(Key::Escape);
+            window.invoke_show_jobs();
+            for _ in 0..tabs {
+                press(Key::Tab);
+            }
+            rig.until("the Jobs list to scroll to the focused action", || {
+                !native.has_active_animations()
+            });
+            if let Some(folder) = &folder {
+                write_snapshot(rig, folder, label)?;
+            }
+            press(Key::Return);
+            if shown.get() == Some(last) {
+                break;
+            }
         }
-        rig.until("the Jobs list to scroll to the focused action", || {
-            !native.has_active_animations()
-        });
-        if let Some(folder) = &folder {
-            write_snapshot(rig, folder, label)?;
-        }
-        press(Key::Return);
-        assert_eq!(shown.get(), Some(i32::try_from(ROWS - 1)?));
+        assert_eq!(shown.get(), Some(last));
     }
     Ok(())
 }

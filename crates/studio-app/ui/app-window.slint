@@ -2580,7 +2580,7 @@ export component AppWindow inherits Window {
         width: min(420px, root.width - 2 * Tokens.space-3);
         // Slint sets the popup size when it opens. Keep the viewport large enough
         // for a preview to appear later, and scroll its content within it.
-        height: min(480px, root.height - 2 * Tokens.space-6);
+        height: min(min(480px, 236px + 84px * root.jobs.length), root.height - 2 * Tokens.space-6);
         x: root.width - self.width - Tokens.space-3;
         y: Tokens.space-6;
 
