@@ -11,15 +11,17 @@
 //!
 //! The [`Ledger`] serializes cancellation and terminal replies. Both threads
 //! write complete replies under one lock. One additional thread can collect
-//! document validation evidence while the work thread serves foreground queries.
+//! document evidence while the work thread serves foreground queries.
 
 mod batch;
+mod identity;
 pub mod document;
 mod report;
 mod syntax;
 mod validation;
 
 use std::collections::VecDeque;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -27,8 +29,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use studio_domain::analysis::{AnalysisFailure, LocateTarget, RowFilter, SourceDigest};
+use studio_domain::analysis::{AnalysisFailure, LocateTarget, RowFilter, ScanOutcome, SourceDigest};
+use studio_domain::identity::IdentityKind;
 use studio_domain::job::WirePath;
+use studio_domain::preview::GrainPolicy;
 use studio_domain::protocol::{
     AnalysisEvidenceIdentity, Command, Envelope, ErrorCode, Event, ProtocolError, decode,
     read_frame, write_message,
@@ -98,8 +102,8 @@ pub fn run(input: &mut impl Read, output: impl Write + Send) -> Result<(), Sessi
 #[derive(Debug)]
 enum Request {
     Open { source: WirePath, progressive: bool },
-    Validate { settings: ValidationSettings },
-    ValidationDone(Box<ValidationResult>),
+    Evidence(EvidenceRequest),
+    EvidenceDone(Box<EvidenceResult>),
     ReaderStopped,
     Inspect(Query),
     Batch(batch::Request),
@@ -136,11 +140,87 @@ enum Query {
         first: u64,
         count: u32,
     },
+    IdentityPage {
+        scan: u64,
+        first: u64,
+        count: u32,
+        kind: IdentityKind,
+    },
 }
 
 /// A queued request: its `request_id`, its document and what it asks.
 type Queued = (u64, u64, Request);
 type ValidationResult = Result<(ValidationEvidence, SourceDigest), Refusal>;
+
+#[derive(Debug)]
+enum EvidenceRequest {
+    Validate(ValidationSettings),
+    Identity(GrainPolicy),
+}
+
+impl EvidenceRequest {
+    fn pending(&self, document: u64, id: u64) -> Pending {
+        match self {
+            Self::Validate(_) => Pending::Validation { document, validation: id },
+            Self::Identity(_) => Pending::Identity { document, scan: id },
+        }
+    }
+
+    fn prepare(self, doc: &mut Document, id: u64) -> Result<EvidenceTask, Refusal> {
+        Ok(match self {
+            Self::Validate(settings) => EvidenceTask::Validate(doc.prepare_validation(id)?, settings),
+            Self::Identity(grain) => {
+                let file = doc.open_evidence_source()?;
+                let index = doc.begin_identity(id, grain)?;
+                let digest = doc.summary().digest.clone();
+                EvidenceTask::Identity { file, index, digest }
+            }
+        })
+    }
+}
+
+enum EvidenceTask {
+    Validate(File, ValidationSettings),
+    Identity {
+        file: File,
+        index: identity::IdentityIndex,
+        digest: Option<Box<SourceDigest>>,
+    },
+}
+
+impl EvidenceTask {
+    fn run(self, cancelled: &dyn Fn() -> bool) -> EvidenceResult {
+        match self {
+            Self::Validate(mut file, settings) => {
+                EvidenceResult::Validation(validation::validate(&mut file, &settings, cancelled))
+            }
+            Self::Identity { mut file, index, digest } => {
+                EvidenceResult::Identity(index.scan(&mut file, digest.as_deref(), cancelled))
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum EvidenceResult {
+    Validation(ValidationResult),
+    Identity(Result<(), Refusal>),
+}
+
+impl EvidenceResult {
+    fn finish(self, doc: &mut Document, document: u64, id: u64) -> Result<Event, Refusal> {
+        match self {
+            Self::Validation(result) => {
+                let (summary, total) = doc.complete_validation(id, result)?;
+                Ok(Event::AnalysisValidated { document, summary: Box::new(summary), total })
+            }
+            Self::Identity(result) => {
+                let summary = doc.complete_identity(id, result)?;
+                Ok(Event::AnalysisIdentityScanned { document, summary: Box::new(summary) })
+            }
+        }
+    }
+}
 
 struct Shared<W> {
     out: Mutex<Out<W>>,
@@ -160,6 +240,16 @@ enum Pending {
     Open(u64),
     BatchValidation(u64),
     Validation { document: u64, validation: u64 },
+    Identity { document: u64, scan: u64 },
+}
+
+impl Pending {
+    fn belongs_to(self, member: u64) -> bool {
+        match self {
+            Self::Validation { document, .. } | Self::Identity { document, .. } => document == member,
+            _ => false,
+        }
+    }
 }
 
 /// Long operations that the reader can cancel.
@@ -167,7 +257,7 @@ enum Pending {
 struct Ledger {
     /// The newest document id an open was queued for.
     newest: u64,
-    /// At most the queue capacity and the one request running.
+    /// At most the queued requests and active scans and evidence pass.
     pending: Vec<(Pending, bool)>,
 }
 
@@ -338,7 +428,13 @@ fn serve<W: Write>(
                 queue_open(shared, requests, id, document, source, true);
             }
             Command::AnalysisValidate { document, settings } => {
-                queue_validation(shared, requests, id, document, settings);
+                queue_evidence(shared, requests, id, document, EvidenceRequest::Validate(settings));
+            }
+            Command::AnalysisIdentityScan { document, grain } => {
+                queue_evidence(shared, requests, id, document, EvidenceRequest::Identity(grain));
+            }
+            Command::AnalysisCancelIdentity { document, scan } => {
+                shared.cancel(id, Pending::Identity { document, scan });
             }
             Command::BatchCancel { validation } => {
                 shared.cancel(id, Pending::BatchValidation(validation));
@@ -418,6 +514,10 @@ fn queued_request(command: &Command) -> Option<(u64, Request)> {
                 count,
             }),
         ),
+        Command::AnalysisIdentityPage { document, scan, first, count, kind } => (
+            document,
+            Request::Inspect(Query::IdentityPage { scan, first, count, kind }),
+        ),
         Command::AnalysisClose { document } => (document, Request::Close),
         _ => return None,
     })
@@ -469,17 +569,14 @@ fn queue_open<W: Write>(
     }
 }
 
-fn queue_validation<W: Write>(
+fn queue_evidence<W: Write>(
     shared: &Shared<W>,
     requests: &SyncSender<Queued>,
     id: u64,
     document: u64,
-    settings: ValidationSettings,
+    request: EvidenceRequest,
 ) {
-    let operation = Pending::Validation {
-        document,
-        validation: id,
-    };
+    let operation = request.pending(document, id);
     let mut ledger = shared.ledger();
     if ledger.contains(operation) {
         drop(ledger);
@@ -489,12 +586,12 @@ fn queue_validation<W: Write>(
                 document,
                 Refusal::new(
                     AnalysisFailure::InvalidRequest,
-                    "This validation request ID is already pending.",
+                    "This request ID is already pending.",
                 ),
             ),
         );
     } else if requests
-        .try_send((id, document, Request::Validate { settings }))
+        .try_send((id, document, Request::Evidence(request)))
         .is_ok()
     {
         ledger.pending.push((operation, false));
@@ -535,20 +632,20 @@ fn work<'scope, W: Write + Send>(
     let mut documents: Vec<(u64, Document)> = Vec::new();
     let mut batch = batch::Archive::default();
     let mut scans = VecDeque::<Scan>::new();
-    let mut validations = VecDeque::<Queued>::new();
-    let mut validation = None;
+    let mut queued_evidence = VecDeque::<Queued>::new();
+    let mut active_evidence = None;
     let mut burst = 0;
     let mut reader_stopped = false;
     loop {
-        let ready_validation = if validation.is_none() {
-            validations.pop_front()
+        let ready_evidence = if active_evidence.is_none() {
+            queued_evidence.pop_front()
         } else {
             None
         };
-        let request = if ready_validation.is_some() {
-            ready_validation
+        let request = if ready_evidence.is_some() {
+            ready_evidence
         } else if scans.is_empty() {
-            if reader_stopped && validation.is_none() {
+            if reader_stopped && active_evidence.is_none() {
                 break;
             }
             queue.recv().ok()
@@ -562,7 +659,7 @@ fn work<'scope, W: Write + Send>(
                 break;
             };
             if let Some(at) = documents.iter().position(|(id, _)| *id == scan.document) {
-                advance_scan(shared, &mut documents, at, &mut scans, scan, false);
+                advance_scan(shared, &mut documents, at, &mut scans, scan);
             }
             burst = 0;
             continue;
@@ -593,86 +690,84 @@ fn work<'scope, W: Write + Send>(
                 }
                 continue;
             }
-            Request::Validate { settings } => {
+            Request::Evidence(request) => {
+                let operation = request.pending(document, id);
                 let result = match open {
-                    Some(_) if scans.iter().any(|scan| scan.document == document) => {
+                    Some(_) if matches!(request, EvidenceRequest::Validate(_))
+                        && scans.iter().any(|scan| scan.document == document) =>
+                    {
                         Err(scan_pending())
                     }
-                    Some(_) if validation.is_some() => {
-                        if validations.len() < REQUEST_BACKLOG {
-                            validations.push_back((id, document, Request::Validate { settings }));
+                    Some(_) if active_evidence.is_some() => {
+                        if queued_evidence.len() < REQUEST_BACKLOG {
+                            queued_evidence.push_back((id, document, Request::Evidence(request)));
                             continue;
                         }
                         Err(Refusal::new(
                             AnalysisFailure::LimitReached,
-                            "The validation queue is full.",
+                            "The evidence queue is full.",
                         ))
                     }
-                    Some(at) => documents[at].1.prepare_validation(id),
+                    Some(at) => request.prepare(&mut documents[at].1, id),
                     None => Err(unknown()),
                 };
                 let answer = match result {
-                    Ok(mut file) => {
-                        let operation = Pending::Validation {
-                            document,
-                            validation: id,
-                        };
+                    Ok(task) => {
                         let job = thread::Builder::new()
-                            .name("studio-inspect-validation".to_owned())
+                            .name("studio-inspect-evidence".to_owned())
                             .stack_size(JOB_STACK_BYTES)
                             .spawn_scoped(scope, move || {
-                                let result = validation::validate(&mut file, &settings, &|| {
-                                    shared.cancelled(operation)
-                                });
-                                let _ = replies.send((
-                                    id,
-                                    document,
-                                    Request::ValidationDone(Box::new(result)),
-                                ));
+                                let result = task.run(&|| shared.cancelled(operation));
+                                let _ = replies.send((id, document, Request::EvidenceDone(Box::new(result))));
                             });
                         match job {
                             Ok(job) => {
-                                validation = Some((operation, job));
+                                active_evidence = Some((operation, job));
                                 continue;
                             }
-                            Err(error) => failed(
-                                document,
-                                Refusal::new(
-                                    AnalysisFailure::Io,
-                                    format!("Cannot start validation. {error}"),
-                                ),
-                            ),
+                            Err(error) => {
+                                if let (Some(at), Pending::Identity { .. }) = (open, operation) {
+                                    documents[at].1.drop_identity(id);
+                                }
+                                failed(
+                                    document,
+                                    Refusal::new(
+                                        AnalysisFailure::Io,
+                                        format!("Cannot start the evidence thread. {error}"),
+                                    ),
+                                )
+                            }
                         }
                     }
                     Err(error) => match open {
-                        Some(at) => dropped(&mut documents, at, document, error),
+                        Some(at) => drop_evidence_source(shared, &mut documents, &mut scans, at, document, error),
                         None => failed(document, error),
                     },
                 };
-                settle_validation(shared, id, document, answer);
+                settle_evidence(shared, id, operation, answer);
                 continue;
             }
-            Request::ValidationDone(result) => {
-                if let Some((_, job)) = validation.take() {
-                    let _ = job.join();
-                }
+            Request::EvidenceDone(result) => {
+                let Some((operation, job)) = active_evidence.take() else {
+                    continue;
+                };
+                let _ = job.join();
                 let answer = match open {
-                    Some(at) => match documents[at].1.complete_validation(id, *result) {
-                        Ok((summary, total)) => Event::AnalysisValidated {
-                            document,
-                            summary: Box::new(summary),
-                            total,
-                        },
-                        Err(error) => dropped(&mut documents, at, document, error),
+                    Some(at) => match result.finish(&mut documents[at].1, document, id) {
+                        Ok(event) => event,
+                        Err(error) => drop_evidence_source(shared, &mut documents, &mut scans, at, document, error),
                     },
                     None => failed(document, unknown()),
                 };
-                settle_validation(shared, id, document, answer);
+                settle_evidence(shared, id, operation, answer);
                 continue;
             }
             Request::ReaderStopped => {
                 reader_stopped = true;
                 continue;
+            }
+            Request::ClearCache if !scans.is_empty() => {
+                refusal(ErrorCode::Busy, "Wait for the document scans to finish.")
             }
             Request::ClearCache => match document::clear_cache() {
                 Ok(()) => Event::AnalysisCacheCleared,
@@ -681,7 +776,7 @@ fn work<'scope, W: Write + Send>(
             Request::Close => match open {
                 Some(at) => {
                     documents.remove(at);
-                    cancel_validation(shared, document, validation.as_ref().map(|(op, _)| *op));
+                    cancel_evidence(shared, document, active_evidence.as_ref().map(|(op, _)| *op));
                     abandon_scan(
                         shared,
                         &mut scans,
@@ -698,10 +793,10 @@ fn work<'scope, W: Write + Send>(
                     Ok(answer) => answer,
                     Err(refusal) => {
                         if refusal.code == AnalysisFailure::SourceChanged {
-                            cancel_validation(
+                            cancel_evidence(
                                 shared,
                                 document,
-                                validation.as_ref().map(|(op, _)| *op),
+                                active_evidence.as_ref().map(|(op, _)| *op),
                             );
                             abandon_scan(
                                 shared,
@@ -721,24 +816,15 @@ fn work<'scope, W: Write + Send>(
     }
 }
 
-fn cancel_validation<W: Write>(shared: &Shared<W>, document: u64, operation: Option<Pending>) {
-    if let Some(
-        op @ Pending::Validation {
-            document: active, ..
-        },
-    ) = operation
-        && active == document
-    {
+fn cancel_evidence<W: Write>(shared: &Shared<W>, document: u64, operation: Option<Pending>) {
+    if let Some(op) = operation.filter(|op| op.belongs_to(document)) {
         shared.ledger().cancel(op);
     }
 }
 
-fn settle_validation<W: Write>(shared: &Shared<W>, id: u64, document: u64, answer: Event) {
+fn settle_evidence<W: Write>(shared: &Shared<W>, id: u64, operation: Pending, answer: Event) {
     let mut ledger = shared.ledger();
-    ledger.settle(Pending::Validation {
-        document,
-        validation: id,
-    });
+    ledger.settle(operation);
     shared.send(id, answer);
     drop(ledger);
 }
@@ -803,6 +889,13 @@ fn serve_document(
                 events: page.entries,
             }
         }
+        Query::IdentityPage { scan, first, count, kind } => {
+            Event::AnalysisIdentityPage {
+                document,
+                scan,
+                page: Box::new(doc.identity_page(scan, kind, first, count)?),
+            }
+        }
         Query::Findings {
             validation,
             first,
@@ -831,6 +924,20 @@ fn dropped(
         documents.remove(at);
     }
     failed(document, refusal)
+}
+
+fn drop_evidence_source<W: Write>(
+    shared: &Shared<W>,
+    documents: &mut Vec<(u64, Document)>,
+    scans: &mut VecDeque<Scan>,
+    at: usize,
+    document: u64,
+    error: Refusal,
+) -> Event {
+    if error.code == AnalysisFailure::SourceChanged {
+        abandon_scan(shared, scans, document, error.code, &error.message);
+    }
+    dropped(documents, at, document, error)
 }
 
 fn scan_pending() -> Refusal {
@@ -876,20 +983,18 @@ fn start_scan<W: Write>(
     };
     match opened {
         Ok(doc) => {
-            let at = documents.len();
+            let summary = doc.summary().clone();
             documents.push((document, doc));
-            advance_scan(
-                shared,
-                documents,
-                at,
-                scans,
-                Scan {
+            if summary.outcome == ScanOutcome::Scanning {
+                shared.send(id, Event::AnalysisOpenProgress { document, summary });
+                scans.push_back(Scan {
                     request: id,
                     document,
                     reported: Instant::now(),
-                },
-                true,
-            );
+                });
+            } else {
+                settle_open(shared, id, document, Event::AnalysisOpened { document, summary });
+            }
         }
         Err(error) => settle_open(shared, id, document, failed(document, error)),
     }
@@ -901,7 +1006,6 @@ fn advance_scan<W: Write>(
     at: usize,
     scans: &mut VecDeque<Scan>,
     mut scan: Scan,
-    first: bool,
 ) {
     let Scan {
         request, document, ..
@@ -918,7 +1022,7 @@ fn advance_scan<W: Write>(
             );
         }
         Ok(false) => {
-            if first || scan.reported.elapsed() >= PROGRESS_INTERVAL {
+            if scan.reported.elapsed() >= PROGRESS_INTERVAL {
                 shared.send(
                     request,
                     Event::AnalysisOpenProgress {

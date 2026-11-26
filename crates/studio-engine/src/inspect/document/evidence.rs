@@ -7,19 +7,22 @@ use std::fs::File;
 
 use serde::Serialize;
 use studio_domain::analysis::{AnalysisFailure, Element, Framing, MAX_PAGE_ELEMENTS, SourceDigest};
+use studio_domain::identity::{IdentityKind, IdentityPage, IdentitySummary};
+use studio_domain::preview::GrainPolicy;
 use studio_domain::syntax::{SyntaxEvent, SyntaxSummary};
 use studio_domain::validation::{
     Finding, ValidationEvidence, ValidationSettings, ValidationSummary,
 };
 
 use super::{Document, Item, PAGE_BUDGET, Refusal, Seek, SeekFrom, read_file_range};
-use crate::inspect::{ValidationResult, syntax, validation};
+use crate::inspect::{ValidationResult, identity::IdentityIndex, syntax, validation};
 use crate::output::FileId;
 
 #[derive(Debug, Default)]
 pub(super) struct Evidence {
     trace: Option<(u64, u64, Vec<SyntaxEvent>)>,
     report: Option<(u64, Vec<Finding>)>,
+    identity: Option<(u64, IdentityIndex)>,
 }
 
 pub(in crate::inspect) struct EvidencePage<T> {
@@ -101,6 +104,11 @@ impl Document {
                 "Use a request ID greater than the last validation request ID.",
             ));
         }
+        self.open_evidence_source()
+    }
+
+    pub(in crate::inspect) fn open_evidence_source(&self) -> Result<File, Refusal> {
+        self.check()?;
         self.require_av2()?;
         let opened = File::open(&self.path);
         self.check()?;
@@ -119,10 +127,54 @@ impl Document {
         if id != self.id {
             return Err(Refusal::new(
                 AnalysisFailure::SourceChanged,
-                "The source changed before validation started.",
+                "The source changed before the evidence pass started.",
             ));
         }
         Ok(file)
+    }
+
+    pub(in crate::inspect) fn begin_identity(
+        &mut self, request: u64, grain: GrainPolicy,
+    ) -> Result<IdentityIndex, Refusal> {
+        if self.evidence.identity.as_ref().is_some_and(|(id, _)| request <= *id) {
+            return Err(invalid("Use a request ID greater than the last identity scan request ID."));
+        }
+        let index = IdentityIndex::new(grain, self.summary.fingerprint)?;
+        self.evidence.identity = Some((request, index.clone()));
+        Ok(index)
+    }
+
+    pub(in crate::inspect) fn drop_identity(&mut self, request: u64) {
+        if self.evidence.identity.as_ref().is_some_and(|(id, _)| request == *id) {
+            self.evidence.identity = None;
+        }
+    }
+
+    fn identity_index(&self, request: u64) -> Result<&IdentityIndex, Refusal> {
+        self.check()?;
+        match &self.evidence.identity {
+            Some((id, index)) if *id == request => Ok(index),
+            _ => Err(invalid("The requested identity scan is unavailable.")),
+        }
+    }
+
+    pub(in crate::inspect) fn complete_identity(
+        &mut self, request: u64, result: Result<(), Refusal>,
+    ) -> Result<IdentitySummary, Refusal> {
+        self.check()?;
+        if let Err(error) = result {
+            self.drop_identity(request);
+            return Err(error);
+        }
+        Ok(self.identity_index(request)?.summary())
+    }
+
+    pub(in crate::inspect) fn identity_page(
+        &self, request: u64, kind: IdentityKind, first: u64, count: u32,
+    ) -> Result<IdentityPage, Refusal> {
+        let page = self.identity_index(request)?.page(kind, first, count)?;
+        self.check()?;
+        Ok(page)
     }
 
     pub(in crate::inspect) fn complete_validation(
