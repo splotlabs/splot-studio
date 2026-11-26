@@ -42,8 +42,8 @@ impl Table {
 
     fn append(&mut self, record: Record) -> io::Result<()> {
         let mut bytes = [0; RECORD_BYTES];
-        for (chunk, value) in bytes.chunks_exact_mut(8).zip(record) {
-            chunk.copy_from_slice(&value.to_le_bytes());
+        for (chunk, value) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(record) {
+            *chunk = value.to_le_bytes();
         }
         self.seek(self.count)?;
         self.file.write_all(&bytes)?;
@@ -60,10 +60,8 @@ impl Table {
         let mut bytes = [0; RECORD_BYTES];
         self.file.read_exact(&mut bytes)?;
         let mut words = [0; 4];
-        for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(8)) {
-            let mut value = [0; 8];
-            value.copy_from_slice(chunk);
-            *word = u64::from_le_bytes(value);
+        for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<8>().0) {
+            *word = u64::from_le_bytes(*chunk);
         }
         Ok(words)
     }
@@ -133,10 +131,10 @@ pub(super) struct IdentityIndex(Arc<Mutex<State>>);
 impl IdentityIndex {
     pub(super) fn new(grain: GrainPolicy, fingerprint: SourceFingerprint) -> Result<Self, Refusal> {
         Ok(Self(Arc::new(Mutex::new(State {
-            temporal: Table::new().map_err(storage)?,
-            coded: Table::new().map_err(storage)?,
-            continuation: Table::new().map_err(storage)?,
-            output: Table::new().map_err(storage)?,
+            temporal: Table::new().map_err(|error| storage(&error))?,
+            coded: Table::new().map_err(|error| storage(&error))?,
+            continuation: Table::new().map_err(|error| storage(&error))?,
+            output: Table::new().map_err(|error| storage(&error))?,
             fingerprint,
             grain,
             digest: None,
@@ -175,11 +173,12 @@ impl IdentityIndex {
                 "The first row is past the end of the identity table.",
             ));
         }
-        let count = (table.count - first).min(u64::from(count)) as usize;
+        let count = usize::try_from((table.count - first).min(u64::from(count)))
+            .map_err(|_| invalid("The identity page size is out of range."))?;
         let mut rows = Vec::with_capacity(count);
-        table.seek(first).map_err(storage)?;
+        table.seek(first).map_err(|error| storage(&error))?;
         for _ in 0..count {
-            let [a, b, c, d] = table.read().map_err(storage)?;
+            let [a, b, c, d] = table.read().map_err(|error| storage(&error))?;
             rows.push(match kind {
                 IdentityKind::Temporal => IdentityRow::Temporal {
                     delimiter_offset: a,
@@ -300,7 +299,7 @@ impl IdentityIndex {
             let props = DataProps::default().with_user_data(unit.offset.get());
             if decoder
                 .send_data(unit.bytes, props)
-                .map_err(decode_failed)?
+                .map_err(|error| decode_failed(&error))?
                 != SendStatus::Accepted
             {
                 return Err("The decoder refused an identity scan submission.".into());
@@ -312,7 +311,10 @@ impl IdentityIndex {
 
     fn receive(&self, decoder: &mut Decoder, cancelled: &dyn Fn() -> bool) -> Result<(), String> {
         while !self.stopped(cancelled) {
-            let Some(picture) = decoder.wait_picture().map_err(decode_failed)? else {
+            let Some(picture) = decoder
+                .wait_picture()
+                .map_err(|error| decode_failed(&error))?
+            else {
                 break;
             };
             let location = picture.provenance();
@@ -387,7 +389,7 @@ fn unpack_layers(value: u64) -> DecodeLayers {
     }
 }
 
-fn decode_failed(error: splot_decode::DecodeError) -> String {
+fn decode_failed(error: &splot_decode::DecodeError) -> String {
     format!("Cannot decode the source for the identity index. {error}")
 }
 
@@ -395,7 +397,7 @@ fn invalid(message: &str) -> Refusal {
     Refusal::new(AnalysisFailure::InvalidRequest, message)
 }
 
-fn storage(error: io::Error) -> Refusal {
+fn storage(error: &io::Error) -> Refusal {
     Refusal::new(
         AnalysisFailure::Io,
         format!("Cannot access the identity index. {error}"),
@@ -561,7 +563,7 @@ mod tests {
         let page = index.page(IdentityKind::Output, 0, 1).map_err(refusal)?;
         assert_eq!(page.summary.completion, IdentityCompletion::Cancelled);
         assert!(!page.summary.matches_structure);
-        assert!(page.rows.is_empty());
+        assert_eq!(page.rows, [] as [IdentityRow; 0]);
         Ok(())
     }
 }
