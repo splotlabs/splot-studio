@@ -974,7 +974,7 @@ fn reference_preview_verifies_the_coded_source_without_replacing_the_main_pictur
     assert_eq!(cancel.request_id, generation);
     assert!(!preview.document_decoding());
     preview.sample_answer(generation, ordinal, grain, point, 10);
-    assert!(preview.view().viewer.sample_copy.is_empty());
+    assert_eq!(preview.view().viewer.sample_copy, "");
     assert!(matches!(
         request.command,
         Command::Picture {
