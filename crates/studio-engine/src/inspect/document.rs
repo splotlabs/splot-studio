@@ -241,14 +241,20 @@ impl Document {
         }
         // Cache verification gets one bounded step per scan batch. Cold
         // discovery continues while a candidate is verified.
-        if let Some(cache) = &mut self.cache
-            && let Progress::Warm(index, summary) = cache.advance(&self.summary, cancelled)?
-        {
-            self.check()?;
-            self.index = index;
-            self.summary = summary;
-            self.scan = None;
-            return Ok(true);
+        let mut cache_cancelled = false;
+        if let Some(cache) = &mut self.cache {
+            match cache.advance(&self.summary, cancelled) {
+                Ok(Progress::Warm(index, summary)) => {
+                    self.check()?;
+                    self.index = index;
+                    self.summary = summary;
+                    self.scan = None;
+                    return Ok(true);
+                }
+                Ok(Progress::Cold | Progress::Reading) => {}
+                Err(error) if error.code == AnalysisFailure::Cancelled => cache_cancelled = true,
+                Err(error) => return Err(error),
+            }
         }
         let Some(scan) = &mut self.scan else {
             return Ok(true);
@@ -258,7 +264,9 @@ impl Document {
         let rows = self.index.len();
         let mut outcome = None;
         for _ in 0..256 {
-            outcome = scan.step(fingerprint.len, &mut self.index, cancelled)?;
+            outcome = scan.step(fingerprint.len, &mut self.index, &|| {
+                cache_cancelled || cancelled()
+            })?;
             if outcome.is_some()
                 || self.index.len() - rows >= 256
                 || scan.units.get_ref().get_ref().bytes - start >= 4 << 20
