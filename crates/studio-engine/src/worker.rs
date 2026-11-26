@@ -233,6 +233,8 @@ fn serve<'scope>(
             | Command::AnalysisTimelineLocate { .. }
             | Command::AnalysisReferences { .. }
             | Command::AnalysisCancelReferences { .. }
+            | Command::AnalysisBlocks { .. }
+            | Command::AnalysisCancelBlocks { .. }
             | Command::AnalysisCancel { .. }
             | Command::AnalysisPage { .. }
             | Command::AnalysisLocate { .. }

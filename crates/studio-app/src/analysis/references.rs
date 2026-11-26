@@ -63,8 +63,8 @@ impl References {
 }
 
 impl Document {
-    pub(crate) fn reference_offset(&self) -> Option<u64> {
-        if let Some(frame) = self.reference_timeline() {
+    pub(crate) fn coded_offset(&self) -> Option<u64> {
+        if let Some(frame) = self.coded_timeline() {
             return Some(frame.coded_offset);
         }
         let Element::Obu { obu } = &self.selected.as_ref()?.row.element else {
@@ -73,12 +73,12 @@ impl Document {
         Some(obu.header.offset)
     }
 
-    pub(crate) fn reference_timeline(&self) -> Option<&TimelineSelection> {
+    pub(crate) fn coded_timeline(&self) -> Option<&TimelineSelection> {
         self.timeline.selection_for(self.layer_decode_selection())
     }
 
     pub(crate) fn reference_evidence(&self) -> Option<&ReferenceEvidence> {
-        let offset = self.reference_offset()?;
+        let offset = self.coded_offset()?;
         self.references.evidence().filter(|evidence| {
             evidence.query.coded_offset == offset
                 && evidence.query.selection == self.layer_decode_selection()
@@ -112,7 +112,7 @@ impl Analysis {
         if doc.evidence.tab != TAB || doc.selection_pending() || doc.references.busy() {
             return;
         }
-        let Some(coded_offset) = doc.reference_offset() else {
+        let Some(coded_offset) = doc.coded_offset() else {
             return;
         };
         let query = ReferenceQuery {

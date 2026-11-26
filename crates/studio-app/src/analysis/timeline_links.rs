@@ -237,6 +237,7 @@ impl Analysis {
     }
 
     pub(super) fn invalidate_timeline_policy(&mut self, at: usize, out: &mut Vec<Effect>) {
+        self.clear_frame_evidence(at, out);
         let shown = self.documents[at].timeline.shown();
         self.timeline_input(at, &Input::TimelineCancel, out);
         self.cancel_timeline_location(at);
@@ -260,7 +261,7 @@ impl Analysis {
             Input::TimelineBuild if !doc.timeline.collecting => {
                 let document = doc.id;
                 let selection = doc.layer_decode_selection();
-                self.cancel_references(at, out);
+                self.clear_frame_evidence(at, out);
                 self.documents[at].timeline = Timeline::default();
                 let id = self.send(
                     document,
@@ -563,7 +564,7 @@ impl Analysis {
                 .as_ref()
                 .is_none_or(|selected| selected.row.index != row.index);
         if changed {
-            self.cancel_references(at, out);
+            self.clear_frame_evidence(at, out);
         }
         let doc = &mut self.documents[at];
         doc.timeline.selection = Some(selection);

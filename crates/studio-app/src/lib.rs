@@ -69,7 +69,7 @@ use crate::state::{AppState, JournalProblem, Startup};
 
 pub use render::{render, render_analysis, render_counters, render_jobs, render_preview};
 pub use ui::{
-    Analysis, AnalysisState, AppWindow, ByteRegion, CheckRow, DecodeExport, ExportForm,
+    Analysis, AnalysisState, AppWindow, Blocks, ByteRegion, CheckRow, DecodeExport, ExportForm,
     ExportPurpose, ExportSourceRow, Fact, JobAction, JobRow, JobView, NavStep, Notice,
     NoticeWindow, Palette, Playback, QueueRow, References, RowState, SourceView, StageState,
     TimelineUi, Tone, ViewMode, WorkspaceView,
@@ -376,6 +376,15 @@ pub fn bind_analysis(window: &AppWindow, send: impl Fn(analysis::Input) + Clone 
         move || send(Input::StopReferences)
     });
     references.on_follow(on(Input::FollowReference));
+    let blocks = window.global::<Blocks>();
+    blocks.on_inspect({
+        let send = send.clone();
+        move || send(Input::InspectBlocks)
+    });
+    blocks.on_cancel({
+        let send = send.clone();
+        move || send(Input::StopBlocks)
+    });
     global.on_evidence_view(on(Input::EvidenceView));
     global.on_evidence_severity(on(Input::EvidenceSeverity));
     global.on_evidence_layer(on(Input::EvidenceLayer));

@@ -306,6 +306,7 @@ impl Activity {
             | Event::AnalysisTimeline { .. }
             | Event::AnalysisTimelineLocated { .. }
             | Event::AnalysisReferencesReady { .. }
+            | Event::AnalysisBlocksReady { .. }
             | Event::BatchSettingsChecked
             | Event::BatchValidating { .. }
             | Event::BatchValidated { .. }

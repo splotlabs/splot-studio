@@ -1680,7 +1680,7 @@ fn reference_inspection_keeps_coded_identity_without_a_range_page() {
         ] if *reference == request
     ));
     assert!(!doc(&analysis).references.busy());
-    assert_eq!(doc(&analysis).reference_offset(), Some(37));
+    assert_eq!(doc(&analysis).coded_offset(), Some(37));
 }
 
 #[test]
@@ -1917,4 +1917,71 @@ fn reference_history_restores_non_default_decode_policy_and_filter() {
         doc(&analysis).selected().map(|selected| selected.row.index),
         Some(2)
     );
+}
+
+#[test]
+fn block_inspection_stops_and_ignores_replies_from_an_earlier_selection() {
+    use studio_domain::analysis::SourceDigest;
+    use studio_domain::blocks::{BlockCoverage, BlockEvidence};
+
+    let (mut analysis, engine) = opened(6);
+    if let Phase::Open(summary) = &mut analysis.documents[0].phase {
+        summary.digest = Some(Box::new(SourceDigest {
+            sha256: String::new(),
+            bytes: summary.fingerprint.len,
+        }));
+    }
+    for input in [Input::RowClicked(1), Input::EvidenceView(blocks::TAB)] {
+        let effects = analysis.input(input);
+        engine.settle(&mut analysis, effects);
+    }
+
+    let inspection = analysis.input(Input::InspectBlocks);
+    let [Command::AnalysisBlocks { document, query }] = commands(&inspection)[..] else {
+        unreachable!("expected a block query");
+    };
+    let request = inspection[0].request_id;
+    let reply = |query, coverage| Event::AnalysisBlocksReady {
+        document: *document,
+        evidence: Box::new(BlockEvidence {
+            query,
+            frame: None,
+            coverage,
+            replayed_through: 0,
+            records: Vec::new(),
+        }),
+    };
+
+    let stopping = analysis.input(Input::StopBlocks);
+    assert!(
+        matches!(commands(&stopping)[..], [Command::AnalysisCancelBlocks { blocks, .. }] if *blocks == request)
+    );
+    assert!(doc(&analysis).blocks.stopping());
+    analysis.event(request, reply(*query, BlockCoverage::Cancelled));
+    assert_eq!(
+        doc(&analysis)
+            .block_evidence()
+            .map(|evidence| evidence.coverage),
+        Some(BlockCoverage::Cancelled)
+    );
+
+    let earlier = analysis.input(Input::InspectBlocks);
+    let effects = analysis.input(Input::RowClicked(3));
+    engine.settle(&mut analysis, effects);
+    let current = analysis.input(Input::InspectBlocks);
+    assert!(doc(&analysis).blocks.busy());
+    assert_ne!(earlier[0].request_id, current[0].request_id);
+    analysis.event(
+        earlier[0].request_id,
+        reply(*query, BlockCoverage::Cancelled),
+    );
+    assert!(doc(&analysis).block_evidence().is_none());
+    assert!(doc(&analysis).blocks.busy());
+
+    analysis.event(
+        current[0].request_id,
+        reply(*query, BlockCoverage::Cancelled),
+    );
+    assert!(doc(&analysis).block_evidence().is_none());
+    assert!(!doc(&analysis).blocks.busy());
 }

@@ -158,7 +158,7 @@ impl Document {
         Ok((*element, page(events, first, count)?))
     }
 
-    pub(in crate::inspect) fn prepare_references(
+    pub(in crate::inspect) fn prepare_replay(
         &self,
         coded_offset: u64,
     ) -> Result<(File, u64), Refusal> {
@@ -166,7 +166,7 @@ impl Document {
         let Some(limit) = self.summary.digest.as_deref().map(|digest| digest.bytes) else {
             return Err(Refusal::new(
                 AnalysisFailure::Unsupported,
-                "Reference replay needs an indexed source prefix.",
+                "Decoder replay needs an indexed source prefix.",
             ));
         };
         if coded_offset >= limit {
@@ -177,7 +177,7 @@ impl Document {
         Ok((self.open_evidence_source()?, limit))
     }
 
-    pub(in crate::inspect) fn verify_references(&self) -> Result<(), Refusal> {
+    pub(in crate::inspect) fn verify_replay(&self) -> Result<(), Refusal> {
         self.check()
     }
 

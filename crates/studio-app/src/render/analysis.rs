@@ -24,6 +24,7 @@ use crate::ui::{
 /// Public so renderer snapshots and UI tests can show a state.
 pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
     super::timeline::render(window, analysis);
+    super::blocks::render_document(&window.global::<crate::ui::Blocks>(), analysis.shown());
     super::layers::render(window, analysis.shown());
     let global = window.global::<Global>();
     super::references::render_document(&window.global::<crate::ui::References>(), analysis.shown());

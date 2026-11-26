@@ -34,6 +34,8 @@ use studio_app::state::{AppState, Intent};
 use studio_app::workspace::Workspace;
 use studio_app::{AnalysisState, AppWindow, ByteRegion};
 
+#[path = "analyze/blocks.rs"]
+mod blocks;
 #[path = "analyze/layers.rs"]
 mod layers;
 #[path = "analyze/timeline.rs"]
@@ -632,6 +634,7 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
 
     eprintln!("Tab stops: navigator after {tabs}, byte view {byte_tabs} later");
     timeline::controls(&mut rig, &scratch);
+    blocks::inspect(&mut rig, &scratch);
 }
 
 /// A malformed trailing bit has a native rule, a known bit position and
@@ -999,7 +1002,7 @@ fn reference_table_follows_the_native_bridge(rig: &mut Rig, scratch: &Scratch) {
 
     assert!(references.get_output().contains("records no output"));
 
-    activate_reference_key(rig, &Input::FollowReference(0));
+    activate_analyze_key(rig, &Input::FollowReference(0));
     rig.idle("keyboard follows Bridge source");
     let source = reference_selection(rig, document, &path, 71, 0, Some(0));
     assert_eq!(source, bridge);
@@ -1011,7 +1014,7 @@ fn reference_table_follows_the_native_bridge(rig: &mut Rig, scratch: &Scratch) {
         reference_picture(session, 4)
     });
 
-    activate_reference_key(rig, &Input::Back);
+    activate_analyze_key(rig, &Input::Back);
     rig.idle("keyboard returns to Bridge investigation");
     assert_eq!(
         reference_selection(rig, document, &path, 85, 1, None),
@@ -1020,7 +1023,7 @@ fn reference_table_follows_the_native_bridge(rig: &mut Rig, scratch: &Scratch) {
     assert_eq!(rig.global().get_evidence_tab(), 4);
     assert_eq!(rig.session.preview().view().output, None);
 
-    activate_reference_key(rig, &Input::Forward);
+    activate_analyze_key(rig, &Input::Forward);
     rig.idle("keyboard returns to the reference source");
     assert!(reference_selection(rig, document, &path, 71, 0, Some(0)).is_all());
     rig.settle("restored reference picture and zoom", |session| {
@@ -1056,7 +1059,7 @@ fn filter_to_bridge_type(rig: &mut Rig) {
     rig.idle("Bridge OBU type filter");
 }
 
-fn activate_reference_key(rig: &mut Rig, expected: &Input) {
+fn activate_analyze_key(rig: &mut Rig, expected: &Input) {
     for _ in 0..64 {
         rig.press(Key::Tab);
         rig.press(Key::Return);

@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+import { ScrollView } from "std-widgets.slint";
+import { Caption, LinkButton } from "controls.slint";
+import { Tokens } from "tokens.slint";
+
+export struct BlockTableRow {
+    identity: string,
+    geometry: string,
+    prediction: string,
+    quantizer: string,
+}
+
+export global Blocks {
+    in property <string> status;
+    in property <string> context;
+    in property <bool> busy;
+    in property <bool> stopping;
+    in property <bool> can-inspect;
+    in property <[BlockTableRow]> rows;
+    callback inspect();
+    callback cancel();
+}
+
+component Cell inherits Caption {
+    wrap: word-wrap;
+    color: Tokens.text;
+    accessible-role: none;
+}
+
+export component BlockPane inherits VerticalLayout {
+    spacing: Tokens.space-2;
+
+    HorizontalLayout {
+        spacing: Tokens.space-2;
+        Caption {
+            horizontal-stretch: 1;
+            text: Blocks.status;
+            wrap: word-wrap;
+            accessible-live-region: polite;
+        }
+        if Blocks.can-inspect: LinkButton {
+            text: "Inspect";
+            description: "Read decoder block records for the selected coded frame.";
+            clicked => { Blocks.inspect(); }
+        }
+        if Blocks.busy: LinkButton {
+            enabled: !Blocks.stopping;
+            text: "Stop";
+            description: "Stop block inspection.";
+            clicked => { Blocks.cancel(); }
+        }
+    }
+
+    if Blocks.context != "": Caption {
+        text: Blocks.context;
+        wrap: word-wrap;
+    }
+
+    if Blocks.rows.length > 0: VerticalLayout {
+        spacing: Tokens.space-1;
+        HorizontalLayout {
+            padding-right: Tokens.space-2;
+            spacing: Tokens.space-2;
+            Caption { width: 74px; text: "Tile and tree"; }
+            Caption { horizontal-stretch: 1; text: "Geometry"; }
+            Caption { horizontal-stretch: 1; text: "Prediction"; }
+            Caption { width: 66px; text: "Quantizer"; }
+        }
+
+        ScrollView {
+            vertical-stretch: 1;
+            content-width: self.visible-width;
+
+            VerticalLayout {
+                width: parent.content-width;
+                padding-right: Tokens.space-2;
+                spacing: Tokens.space-1;
+                accessible-role: list;
+                accessible-label: "Decoder block records";
+                for row[index] in Blocks.rows: Rectangle {
+                    background: Tokens.surface;
+                    accessible-role: list-item;
+                    accessible-label: row.identity + ". Geometry. " + row.geometry
+                        + ". Prediction. " + row.prediction + ". Quantizer. " + row.quantizer;
+                    accessible-item-index: index;
+                    accessible-item-count: Blocks.rows.length;
+
+                    HorizontalLayout {
+                        padding-top: Tokens.space-1;
+                        padding-bottom: Tokens.space-1;
+                        spacing: Tokens.space-2;
+                        Cell { width: 74px; text: row.identity; }
+                        Cell { horizontal-stretch: 1; text: row.geometry; }
+                        Cell { horizontal-stretch: 1; text: row.prediction; }
+                        Cell { width: 66px; text: row.quantizer; }
+                    }
+                }
+            }
+        }
+    }
+}
