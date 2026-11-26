@@ -94,6 +94,7 @@ impl Analysis {
             selection: doc.layer_decode_selection(),
             kind: BlockEvidenceKind::Structure,
             region: None,
+            detail: None,
             max_events: MAX_BLOCK_RECORDS,
             max_bytes: MAX_BLOCK_BYTES,
         };

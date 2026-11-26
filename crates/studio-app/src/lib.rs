@@ -69,8 +69,8 @@ use crate::state::{AppState, JournalProblem, Startup};
 
 pub use render::{render, render_analysis, render_counters, render_jobs, render_preview};
 pub use ui::{
-    Analysis, AnalysisState, AppWindow, Blocks, ByteRegion, CheckRow, DecodeExport, ExportForm,
-    ExportPurpose, ExportSourceRow, Fact, JobAction, JobRow, JobView, NavStep, Notice,
+    Analysis, AnalysisState, AppWindow, BlockOverlay, Blocks, ByteRegion, CheckRow, DecodeExport,
+    ExportForm, ExportPurpose, ExportSourceRow, Fact, JobAction, JobRow, JobView, NavStep, Notice,
     NoticeWindow, Palette, Playback, QueueRow, References, RowState, SourceView, StageState,
     TimelineUi, Tone, ViewMode, WorkspaceView,
 };
@@ -319,6 +319,34 @@ pub fn new_window() -> Result<AppWindow, slint::PlatformError> {
     ));
     render::render_analysis(&window, &analysis::Analysis::new());
     Ok(window)
+}
+
+/// Wires the decoder overlay controls to the session.
+pub fn bind_block_overlay(
+    window: &AppWindow,
+    send: impl Fn(analysis::BlockOverlayInput) + Clone + 'static,
+) {
+    use analysis::BlockOverlayInput as Input;
+    let overlay = window.global::<BlockOverlay>();
+    let action = |input: fn(i32) -> Input| {
+        let send = send.clone();
+        move |value| send(input(value))
+    };
+    overlay.on_choose(action(Input::Mode));
+    overlay.on_choose_plane(action(Input::Plane));
+    overlay.on_choose_tool(action(Input::Tool));
+    overlay.on_select(action(Input::Select));
+    overlay.on_move(action(Input::Move));
+    let pick = send.clone();
+    overlay.on_pick(move |x, y, width, height| {
+        pick(Input::Pick {
+            x,
+            y,
+            width,
+            height,
+        })
+    });
+    overlay.on_stop(move || send(Input::Stop));
 }
 
 /// Wires the Analyze workspace's callbacks to `send`, as the app does.

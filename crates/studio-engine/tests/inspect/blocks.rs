@@ -29,6 +29,7 @@ fn query(coded_offset: u64, x: u32, y: u32) -> BlockQuery {
             width: 1,
             height: 1,
         }),
+        detail: None,
         max_events: MAX_BLOCK_RECORDS,
         max_bytes: MAX_BLOCK_BYTES,
     }

@@ -421,6 +421,8 @@ impl Session {
         }
         if outcome.changed == Changed::Phase || self.state.workspace() != workspace {
             self.sync_preview();
+            self.sync_block_overlay();
+            outcome.analysis |= self.analysis.take_dirty();
         }
         self.advance_export(now);
         outcome.preview = self.preview.take_dirty();
@@ -477,6 +479,37 @@ impl Session {
         }
     }
 
+    fn sync_block_overlay(&mut self) {
+        let picture = (self.state.workspace() == Workspace::Analyze)
+            .then(|| self.preview.block_picture())
+            .flatten();
+        let effects = self.analysis.sync_overlay(picture);
+        self.send_inspect(effects);
+    }
+
+    /// Applies an action for the displayed block overlay.
+    pub fn block_overlay_input(&mut self, input: analysis::BlockOverlayInput) -> Outcome {
+        if self.shut_down || self.state.workspace() != Workspace::Analyze {
+            return Outcome::nothing();
+        }
+        let picture = self.preview.block_picture();
+        let view = picture.and_then(|picture| self.preview.history_view(picture.document));
+        let point = if let analysis::BlockOverlayInput::Pick {
+            x,
+            y,
+            width,
+            height,
+        } = input
+        {
+            self.preview.block_point(x, y, width, height)
+        } else {
+            None
+        };
+        let effects = self.analysis.change_overlay(input, picture, point, view);
+        self.send_inspect(effects);
+        self.preview_outcome()
+    }
+
     /// Selects a byte range linked to the displayed output.
     pub fn preview_show_bytes(&mut self, link: i32) -> Outcome {
         if let Some((document, offset)) = self.preview.output_byte(link) {
@@ -527,8 +560,9 @@ impl Session {
         // A document shown now, or relinked, may not be read yet.
         self.read_if_shown();
         self.persist_view();
-        outcome.analysis = self.analysis.take_dirty();
         self.sync_analysis_preview();
+        self.sync_block_overlay();
+        outcome.analysis = self.analysis.take_dirty();
         outcome.preview = self.preview.take_dirty();
         outcome
     }
@@ -702,9 +736,10 @@ impl Session {
         let analysis = self.analysis.take_dirty();
         if analysis {
             self.sync_analysis_preview();
+            self.sync_block_overlay();
         }
         Outcome {
-            analysis,
+            analysis: self.analysis.take_dirty() || analysis,
             preview: self.preview.take_dirty(),
             ..Outcome::nothing()
         }
@@ -859,17 +894,13 @@ impl Session {
     }
 
     fn preview_outcome(&mut self) -> Outcome {
-        let analysis = if let Some((document, selection, status)) =
-            self.preview.take_layer_decode_feedback()
-        {
+        if let Some((document, selection, status)) = self.preview.take_layer_decode_feedback() {
             self.analysis
                 .update_layer_decode_status(document, selection, status);
-            self.analysis.take_dirty()
-        } else {
-            false
-        };
+        }
+        self.sync_block_overlay();
         Outcome {
-            analysis,
+            analysis: self.analysis.take_dirty(),
             preview: self.preview.take_dirty(),
             ..Outcome::nothing()
         }

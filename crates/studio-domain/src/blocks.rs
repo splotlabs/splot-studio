@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 pub use self::prediction::*;
 use crate::identity::DecodeLayers;
 use crate::layers::LayerDecodeSelection;
+use crate::preview::SamplePlane;
 
 mod prediction;
 
@@ -31,6 +32,8 @@ pub enum BlockEvidenceKind {
     Partitions,
     /// Coding block and motion records.
     Coding,
+    /// Transform geometry, or details for one selected transform.
+    Transforms,
 }
 
 /// A rectangle in the coded frame's luma coordinate system.
@@ -82,6 +85,9 @@ pub struct BlockQuery {
     pub kind: BlockEvidenceKind,
     /// Optional intersection filter in coded-luma coordinates.
     pub region: Option<BlockRect>,
+    /// Return details for exactly this transform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<BlockTransformId>,
     /// Maximum number of records to capture.
     pub max_events: u32,
     /// Maximum native record bytes to capture.
@@ -95,6 +101,11 @@ impl BlockQuery {
         (1..=MAX_BLOCK_RECORDS).contains(&self.max_events)
             && (1..=MAX_BLOCK_BYTES).contains(&self.max_bytes)
             && self.region.is_none_or(BlockRect::is_valid)
+            && self.detail.is_none_or(|id| {
+                self.kind == BlockEvidenceKind::Transforms
+                    && id.block.coded.is_valid()
+                    && id.coded.is_valid()
+            })
     }
 }
 
@@ -132,6 +143,39 @@ pub struct BlockId {
     pub coded: BlockRect,
 }
 
+/// A transform's stable identity in native plane coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockTransformId {
+    /// Coding block that owns the transform.
+    pub block: BlockId,
+    /// Plane that contains the transform.
+    pub plane: SamplePlane,
+    /// Coded rectangle in samples of the plane.
+    pub coded: BlockRect,
+}
+
+/// Facts available for an exact transform selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockTransformDetails {
+    /// The plane codes one or more nonzero coefficients.
+    pub has_coefficients: bool,
+    /// The canonical AV2 PlaneTxType, if the plane codes coefficients.
+    pub plane_tx_type: Option<String>,
+    /// Whether the segment is lossless.
+    pub lossless: bool,
+}
+
+/// Evidence for one decoded transform region.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockTransform {
+    /// Stable identity including the native plane and coded size.
+    pub id: BlockTransformId,
+    /// Coded rectangle projected into the luma grid.
+    pub luma_coded: BlockRect,
+    /// Details present only for a query for this exact transform.
+    pub details: Option<BlockTransformDetails>,
+}
+
 /// Facts associated with a partition node or a coding block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -156,6 +200,11 @@ pub enum BlockData {
     Motion {
         /// The motion facts available from the decoder.
         motion: BlockMotion,
+    },
+    /// A decoded transform region owned by this coding block.
+    Transform {
+        /// Geometry and optional details.
+        transform: BlockTransform,
     },
 }
 
@@ -203,7 +252,7 @@ pub struct BlockEvidence {
     pub coverage: BlockCoverage,
     /// End of the last source unit submitted to the decoder, in file bytes.
     pub replayed_through: u64,
-    /// Decoder records. They do not include transform or sample data.
+    /// Decoder records, including any requested transform geometry.
     pub records: Vec<BlockRecord>,
 }
 
@@ -235,8 +284,12 @@ impl BlockEvidence {
 
 impl BlockRecord {
     fn matches(&self, query: BlockQuery) -> bool {
-        let coded = self.id.coded;
-        coded.is_valid()
+        let coded = match &self.data {
+            BlockData::Transform { transform } => transform.luma_coded,
+            _ => self.id.coded,
+        };
+        self.id.coded.is_valid()
+            && coded.is_valid()
             && query.region.is_none_or(|region| region.intersects(coded))
             && self
                 .visible
@@ -248,14 +301,35 @@ impl BlockRecord {
             })
             && match &self.data {
                 BlockData::Partition { split } => {
-                    query.kind != BlockEvidenceKind::Coding && valid_label(split)
+                    matches!(
+                        query.kind,
+                        BlockEvidenceKind::Structure | BlockEvidenceKind::Partitions
+                    ) && valid_label(split)
                 }
                 BlockData::Coding { prediction, .. } => {
-                    query.kind != BlockEvidenceKind::Partitions
-                        && prediction.as_ref().is_none_or(BlockPrediction::is_valid)
+                    matches!(
+                        query.kind,
+                        BlockEvidenceKind::Structure | BlockEvidenceKind::Coding
+                    ) && prediction.as_ref().is_none_or(BlockPrediction::is_valid)
                 }
                 BlockData::Motion { motion } => {
-                    query.kind != BlockEvidenceKind::Partitions && motion.is_valid()
+                    matches!(
+                        query.kind,
+                        BlockEvidenceKind::Structure | BlockEvidenceKind::Coding
+                    ) && motion.is_valid()
+                }
+                BlockData::Transform { transform } => {
+                    query.kind == BlockEvidenceKind::Transforms
+                        && self.id == transform.id.block
+                        && transform.id.coded.is_valid()
+                        && match (query.detail, &transform.details) {
+                            (None, None) => true,
+                            (Some(id), Some(details)) if id == transform.id => details
+                                .plane_tx_type
+                                .as_deref()
+                                .is_none_or(|name| details.has_coefficients && valid_label(name)),
+                            _ => false,
+                        }
                 }
             }
     }
@@ -278,6 +352,7 @@ mod tests {
             selection: LayerDecodeSelection::Default,
             kind: BlockEvidenceKind::Structure,
             region: None,
+            detail: None,
             max_events: MAX_BLOCK_RECORDS,
             max_bytes: MAX_BLOCK_BYTES,
         }

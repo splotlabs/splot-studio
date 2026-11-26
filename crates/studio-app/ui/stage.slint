@@ -5,6 +5,7 @@
 // callback is an intent. Nothing here decodes or asks for pictures.
 
 import { Caption } from "controls.slint";
+import { BlockDrawing, BlockOverlay } from "block-overlay.slint";
 import { Tokens } from "tokens.slint";
 import { FocusRing, KeyboardFocus } from "focus.slint";
 
@@ -341,7 +342,8 @@ export component Stage inherits KeyboardFocus {
     accessible-description: (root.can-compare ? "Press and hold, or hold O, to see the original. " : "")
         + (root.navigable ? "Space plays or pauses. Left and Right step one frame. Home goes to the first." : "")
         + (root.navigable && root.can-end ? " End goes to the last." : "")
-        + (root.precise && root.can-sample ? " Click a sample or enter its coordinates below." : "")
+        + (root.precise && BlockOverlay.can-pick ? " Click the picture to inspect a block."
+            : root.precise && root.can-sample ? " Click a sample or enter its coordinates below." : "")
         + (root.precise && root.magnification > 0 ? " Press W, A, S or D to pan." : "");
     // Screen readers cannot hold: activating switches sides until activated again.
     accessible-action-default => {
@@ -474,6 +476,13 @@ export component Stage inherits KeyboardFocus {
             accessible-role: none;
         }
 
+        if root.state == StageState.picture && root.precise && BlockOverlay.mode != 0: BlockDrawing {
+            x: root.paint-x;
+            y: root.paint-y;
+            width: root.paint-width;
+            height: root.paint-height;
+        }
+
         if root.state == StageState.loading || root.state == StageState.unavailable: Text {
             x: Tokens.space-6;
             width: parent.width - 2 * Tokens.space-6;
@@ -528,10 +537,16 @@ export component Stage inherits KeyboardFocus {
             }
         }
         clicked => {
-            if root.precise && root.can-sample && !root.dragged {
-                root.pick-sample(floor((self.mouse-x - root.paint-x) / 1phx),
-                    floor((self.mouse-y - root.paint-y) / 1phx),
-                    round(root.paint-width / 1phx), round(root.paint-height / 1phx));
+            if root.precise && !root.dragged {
+                let x = floor((self.mouse-x - root.paint-x) / 1phx);
+                let y = floor((self.mouse-y - root.paint-y) / 1phx);
+                let width = round(root.paint-width / 1phx);
+                let height = round(root.paint-height / 1phx);
+                if BlockOverlay.can-pick {
+                    BlockOverlay.pick(x, y, width, height);
+                } else if root.can-sample {
+                    root.pick-sample(x, y, width, height);
+                }
             }
         }
         scroll-event(event) => {

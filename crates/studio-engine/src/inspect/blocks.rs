@@ -9,17 +9,18 @@ use splot_core::stream_reader::{ReaderError, TemporalUnitReader};
 use splot_decode::block_evidence::{
     BlockEvidenceCapture, BlockEvidenceData, BlockEvidenceId, BlockEvidenceKind as NativeKind,
     BlockEvidenceRecord, BlockEvidenceRequest, BlockEvidenceStatus, BlockEvidenceTree,
+    BlockTransformId as NativeTransformId,
 };
 use splot_decode::{
-    DataProps, DecodeError, DecodeLimits, Decoder, ObuLocation, PlaneRect, SendStatus,
+    DataProps, DecodeError, DecodeLimits, Decoder, ObuLocation, PlaneId, PlaneRect, SendStatus,
 };
 use studio_domain::analysis::AnalysisFailure;
 use studio_domain::blocks::{
     BlockCoverage, BlockData, BlockEvidence, BlockEvidenceKind, BlockFrame, BlockId, BlockQuery,
-    BlockRecord, BlockRect, BlockTree,
+    BlockRecord, BlockRect, BlockTransform, BlockTransformDetails, BlockTransformId, BlockTree,
 };
 use studio_domain::identity::DecodeLayers;
-use studio_domain::preview::GrainPolicy;
+use studio_domain::preview::{GrainPolicy, SamplePlane};
 
 mod prediction;
 
@@ -50,8 +51,14 @@ pub(super) fn replay(
         BlockEvidenceKind::Structure => NativeKind::PartitionsAndBlocks,
         BlockEvidenceKind::Partitions => NativeKind::Partitions,
         BlockEvidenceKind::Coding => NativeKind::Blocks,
+        BlockEvidenceKind::Transforms => NativeKind::Transforms,
     })
     .with_cancellation(move || cancellation.is_set());
+    let request = if let Some(id) = query.detail {
+        request.with_transform_details(native_transform(id)?)
+    } else {
+        request
+    };
     let (mut decoder, capture) = Decoder::new_with_block_evidence(settings, request)
         .map_err(|error| decode_failed(&error))?;
     let mut progress = ReplayProgress {
@@ -245,6 +252,21 @@ fn block_id(id: BlockEvidenceId) -> Result<BlockId, Refusal> {
     })
 }
 
+fn native_transform(id: BlockTransformId) -> Result<NativeTransformId, Refusal> {
+    let tree = match id.block.tree {
+        BlockTree::Shared => BlockEvidenceTree::Shared,
+        BlockTree::Luma => BlockEvidenceTree::Luma,
+        BlockTree::Chroma => BlockEvidenceTree::Chroma,
+    };
+    let block = BlockEvidenceId::new(id.block.tile as usize, tree, native_rect(id.block.coded)?);
+    let plane = match id.plane {
+        SamplePlane::Y => PlaneId::Y,
+        SamplePlane::U => PlaneId::U,
+        SamplePlane::V => PlaneId::V,
+    };
+    Ok(NativeTransformId::new(block, plane, native_rect(id.coded)?))
+}
+
 fn record(record: &BlockEvidenceRecord) -> Result<BlockRecord, Refusal> {
     let data = match record.data {
         BlockEvidenceData::Partition(split) => BlockData::Partition {
@@ -258,6 +280,25 @@ fn record(record: &BlockEvidenceRecord) -> Result<BlockRecord, Refusal> {
         },
         BlockEvidenceData::Motion(motion) => BlockData::Motion {
             motion: prediction::motion(motion)?,
+        },
+        BlockEvidenceData::Transform(transform) => BlockData::Transform {
+            transform: BlockTransform {
+                id: BlockTransformId {
+                    block: block_id(transform.id.block)?,
+                    plane: match transform.id.plane {
+                        PlaneId::Y => SamplePlane::Y,
+                        PlaneId::U => SamplePlane::U,
+                        PlaneId::V => SamplePlane::V,
+                    },
+                    coded: wire_rect(transform.id.coded)?,
+                },
+                luma_coded: wire_rect(transform.luma_coded)?,
+                details: transform.details.map(|details| BlockTransformDetails {
+                    has_coefficients: details.has_coefficients,
+                    plane_tx_type: details.plane_tx_type.map(|kind| kind.av2_name().to_owned()),
+                    lossless: details.lossless,
+                }),
+            },
         },
         _ => return Err(unsupported("The decoder returned an unknown record kind.")),
     };
