@@ -354,6 +354,10 @@ impl Session {
     }
 
     fn export_event(&mut self, id: u64, event: Event) -> Outcome {
+        let temps_saved = self
+            .export
+            .as_ref()
+            .is_some_and(|active| active.save.is_none());
         let Some(job) = self.exports.job(id).filter(|job| job.phase.active()) else {
             return Outcome::nothing();
         };
@@ -393,15 +397,17 @@ impl Session {
                     ..Outcome::nothing()
                 };
             }
-            Event::ExportPublishReady { frames } => match job.authorize_publication(frames) {
-                Ok(true) => {
-                    if let Err(message) = self.send_export(id, Command::ExportPublish) {
-                        self.interrupt_export(id, message);
+            Event::ExportPublishReady { frames } => {
+                match job.authorize_publication(frames, temps_saved) {
+                    Ok(true) => {
+                        if let Err(message) = self.send_export(id, Command::ExportPublish) {
+                            self.interrupt_export(id, message);
+                        }
                     }
+                    Ok(false) => return Outcome::nothing(),
+                    Err(message) => self.fail_export(id, message.to_owned()),
                 }
-                Ok(false) => return Outcome::nothing(),
-                Err(message) => self.fail_export(id, message.to_owned()),
-            },
+            }
             Event::ExportPublished { file } => {
                 if job.published(file) {
                     self.persist();

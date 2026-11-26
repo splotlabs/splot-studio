@@ -196,9 +196,16 @@ impl ExportJob {
         allowed
     }
 
-    pub(crate) fn authorize_publication(&mut self, frames: u64) -> Result<bool, &'static str> {
+    pub(crate) fn authorize_publication(
+        &mut self,
+        frames: u64,
+        temps_saved: bool,
+    ) -> Result<bool, &'static str> {
         match self.phase {
             Phase::Cancelling => Ok(false),
+            _ if !temps_saved => {
+                Err("The export's temporary files have not been saved in the journal.")
+            }
             Phase::Running(ExportStage::Verifying) if self.frames_match(frames) => {
                 // Remove kill eligibility before the worker can claim publication.
                 self.verified_frames = Some(frames);
@@ -604,8 +611,8 @@ mod tests {
         assert!(!job.set_stage(ExportStage::Publishing));
         assert!(job.set_stage(ExportStage::Verifying));
         assert!(!job.set_stage(ExportStage::Publishing));
-        assert!(job.authorize_publication(2).is_err());
-        assert_eq!(job.authorize_publication(1), Ok(true));
+        assert!(job.authorize_publication(2, true).is_err());
+        assert_eq!(job.authorize_publication(1, true), Ok(true));
         assert!(job.set_stage(ExportStage::Publishing));
         let failure = Failure {
             code: FailureCode::Output,
@@ -628,7 +635,7 @@ mod tests {
         request.range = ExportRange::All;
         let mut job = ExportJob::queued(2, request);
         job.phase = Phase::Running(ExportStage::Verifying);
-        assert_eq!(job.authorize_publication(1), Ok(true));
+        assert_eq!(job.authorize_publication(1, true), Ok(true));
         job.published.push(file.clone());
         job.finish(ExportOutcome::Completed {
             frames: 2,
@@ -646,12 +653,14 @@ mod tests {
         job.publication_possible = true;
         job.phase = Phase::Cancelling;
 
-        assert_eq!(job.authorize_publication(1), Ok(false));
+        assert_eq!(job.authorize_publication(1, true), Ok(false));
         assert_eq!(job.phase, Phase::Cancelling);
         assert!(!job.set_stage(ExportStage::Publishing));
 
         job.phase = Phase::Running(ExportStage::Verifying);
-        assert_eq!(job.authorize_publication(1), Ok(true));
+        assert!(job.authorize_publication(1, false).is_err());
+        assert_eq!(job.phase, Phase::Running(ExportStage::Verifying));
+        assert_eq!(job.authorize_publication(1, true), Ok(true));
         assert_eq!(job.phase, Phase::Running(ExportStage::Publishing));
         assert!(!export(&job).can_cancel());
     }
