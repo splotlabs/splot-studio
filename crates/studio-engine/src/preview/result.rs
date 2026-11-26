@@ -22,6 +22,7 @@ use splot_decode::{
 };
 use studio_domain::analysis::SourceDigest;
 use studio_domain::job::{SourceFingerprint, WirePath};
+use studio_domain::layers::LayerDecodeSelection;
 use studio_domain::preview::{
     ColorMatrix, GrainPolicy, MediaTime, OutputEvent, PictureFailure, PictureStage, SourceRef,
 };
@@ -68,6 +69,7 @@ pub struct ResultPictures {
     /// Present for a document, whose identity must match analysis.
     document_id: Option<(FileId, FileChangeStamp)>,
     verified_bytes: u64,
+    selection: LayerDecodeSelection,
     file: File,
     units: Vec<Unit>,
     /// Why the index stopped early.
@@ -165,6 +167,7 @@ impl ResultPictures {
             fingerprint,
             document_id,
             verified_bytes,
+            selection: LayerDecodeSelection::Default,
             file,
             units,
             damaged,
@@ -175,6 +178,11 @@ impl ResultPictures {
             session: None,
             buffer: Vec::new(),
         })
+    }
+
+    pub(super) fn with_layer_selection(mut self, selection: LayerDecodeSelection) -> Self {
+        self.selection = selection;
+        self
     }
 
     /// Releases the decoder and its input buffer. The index stays.
@@ -295,7 +303,12 @@ impl ResultPictures {
                 session.decoder
             } else {
                 let decoder = if document {
-                    stream::preview_decoder(PREVIEW_DECODE_THREADS, DecodeLimits::DEFAULT, grain)
+                    stream::preview_decoder_for_selection(
+                        PREVIEW_DECODE_THREADS,
+                        DecodeLimits::DEFAULT,
+                        grain,
+                        self.selection,
+                    )
                 } else {
                     stream::decoder(PREVIEW_DECODE_THREADS)
                 };
@@ -541,7 +554,8 @@ fn decode_failure(
         return unreadable(format!("the output does not decode at frame {at}: {error}"));
     }
     let code = match error {
-        DecodeError::Limit { .. }
+        DecodeError::InvalidOperatingPointSelection { .. }
+        | DecodeError::Limit { .. }
         | DecodeError::UnsupportedStructure { .. }
         | DecodeError::UnsupportedFeature { .. } => PictureFailure::Unsupported,
         _ => PictureFailure::Unreadable,

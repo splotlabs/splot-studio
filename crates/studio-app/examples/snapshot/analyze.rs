@@ -17,6 +17,7 @@
 //! from `STUDIO_PLAYBACK_FIXTURE` with the real preview engine. `analyze-sample`
 //! shows a decoded Y plane at 4× and an exact sample value.
 //! `analyze-export-setup` shows the export dialog for a real decoded frame.
+//! `analyze-layers` shows the layer inspector on an AVM content-interpretation fixture.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -294,6 +295,7 @@ pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
     );
     match name {
         "analyze-empty" | "analyze-playback" | "analyze-sample" | "analyze-export-setup" => {}
+        "analyze-layers" => layer_evidence(&mut scenario)?,
         "analyze-opening" => {
             // Asked for, and never answered here.
             let path = scenario.file("park walk.ivf", &ivf())?;
@@ -358,6 +360,18 @@ pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
         other => return Err(format!("unknown scenario {other:?}")),
     }
     Ok(Some(scenario))
+}
+
+fn layer_evidence(scenario: &mut Scenario) -> Result<(), String> {
+    let bytes = include_bytes!(
+        "../../../studio-engine/tests/inspect/fixtures/syn-output-ci-2frame-64x64.ivf"
+    );
+    let path = scenario.file("content interpretation.ivf", bytes)?;
+    scenario.input(Input::Open(vec![path]));
+    scenario.settle()?;
+    scenario.input(Input::GoTo("83".into()));
+    scenario.input(Input::EvidenceView(3));
+    scenario.settle()
 }
 
 fn linked_evidence(scenario: &mut Scenario, syntax: bool) -> Result<(), String> {

@@ -123,6 +123,7 @@ impl Preview {
     pub(super) fn choose_grain(&mut self, grain: GrainPolicy) {
         if self.document_id().is_some() && self.viewer.options.grain != grain {
             self.viewer.options.grain = grain;
+            self.reset_layer_decode_feedback();
             self.refresh_document_view();
         }
     }

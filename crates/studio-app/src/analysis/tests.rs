@@ -1174,6 +1174,7 @@ fn a_key_press_restarts_paging_that_failed() {
     assert!(selected(&analysis).is_some());
 }
 
+mod layers;
 mod lifecycle;
 
 #[test]
@@ -1537,6 +1538,7 @@ fn a_live_timeline_keeps_one_range_request_and_refreshes_after_completion() {
         document: 1,
         scan,
         page: Box::new(TimelinePage {
+            decode_selection: studio_domain::layers::LayerDecodeSelection::Default,
             view: TimelineView::Coded,
             first: 0,
             total: 1,
@@ -1588,15 +1590,16 @@ fn start_timeline(analysis: &mut Analysis) -> u64 {
 }
 
 fn timeline_finished() -> Event {
-    use studio_domain::identity::{IdentityCompletion, IdentitySummary};
+    use studio_domain::identity::{IDENTITY_SCHEMA, IdentityCompletion, IdentitySummary};
     use studio_domain::preview::GrainPolicy;
 
     let summary = IdentitySummary {
-        schema: 1,
+        schema: IDENTITY_SCHEMA,
         codec_revision: "codec".into(),
         spec_revision: "spec".into(),
         fingerprint: summary(40).fingerprint,
         grain: GrainPolicy::Skip,
+        selection: studio_domain::layers::LayerDecodeSelection::Default,
         digest: None,
         matches_structure: false,
         completion: IdentityCompletion::Complete,

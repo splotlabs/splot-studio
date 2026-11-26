@@ -12,10 +12,12 @@
 //! one frame, so a unit's index is its frame's display index.
 
 use splot_decode::{
-    BitDepth, DecodeLimitName, DecodeLimitThreshold, DecodeLimits, Decoder, DecoderSettings,
-    FrameDelay, Picture, PictureSamples, PlaneId, PlaneRef, ReconSample, ThreadCount,
+    BitDepth, DecodeError, DecodeLimitName, DecodeLimitThreshold, DecodeLimits, Decoder,
+    DecoderSettings, ExtendedLayerId, FrameDelay, OperatingPointSelection, Picture, PictureSamples,
+    PlaneId, PlaneRef, ReconSample, ThreadCount,
 };
 
+use studio_domain::layers::{LayerDecodeSelection, LayerScope};
 use studio_domain::preview::GrainPolicy;
 
 use crate::picture::{Frame, Plane, Samples};
@@ -34,12 +36,13 @@ pub(crate) const MAX_DOCUMENT_UNITS: usize = 1 << 20;
 pub(crate) fn document_decoder(
     threads: usize,
     grain: GrainPolicy,
+    selection: LayerDecodeSelection,
 ) -> splot_decode::Result<Decoder> {
     let limit = DecodeLimitThreshold::max(MAX_DOCUMENT_UNITS as u64);
     let limits = DecodeLimits::DEFAULT
         .with_max_frames_to_decode(limit)
         .with_max_output_frames(limit);
-    preview_decoder(threads, limits, grain)
+    preview_decoder_for_selection(threads, limits, grain, selection)
 }
 
 /// The most bytes of decoded frames a preview decoder may keep alive:
@@ -61,6 +64,41 @@ pub(crate) fn preview_decoder(
     grain: GrainPolicy,
 ) -> splot_decode::Result<Decoder> {
     Decoder::new(preview_decoder_settings(threads, limits, grain))
+}
+
+pub(crate) fn operating_point_selection(
+    selection: LayerDecodeSelection,
+) -> splot_decode::Result<OperatingPointSelection> {
+    Ok(match selection {
+        LayerDecodeSelection::Default => OperatingPointSelection::None,
+        LayerDecodeSelection::OperatingPoint { scope, set, point } => match scope {
+            LayerScope::Global => OperatingPointSelection::Global {
+                ops_id: set,
+                op_index: point,
+            },
+            LayerScope::Extended { id } => OperatingPointSelection::Local {
+                xlayer_id: ExtendedLayerId::try_new(id).ok_or(
+                    DecodeError::InvalidOperatingPointSelection {
+                        reason: "extended layer ID is out of range",
+                    },
+                )?,
+                ops_id: set,
+                op_index: point,
+            },
+        },
+    })
+}
+
+pub(crate) fn preview_decoder_for_selection(
+    threads: usize,
+    limits: DecodeLimits,
+    grain: GrainPolicy,
+    selection: LayerDecodeSelection,
+) -> splot_decode::Result<Decoder> {
+    Decoder::new(
+        preview_decoder_settings(threads, limits, grain)
+            .with_operating_point_selection(operating_point_selection(selection)?),
+    )
 }
 
 pub(crate) fn preview_decoder_settings(

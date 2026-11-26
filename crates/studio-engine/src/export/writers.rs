@@ -358,6 +358,7 @@ struct Header<'a> {
     range: ExportRange,
     layer: Option<ExportLayer>,
     grain: GrainPolicy,
+    selection: studio_domain::layers::LayerDecodeSelection,
     sample_format: ExportSampleFormat,
 }
 
@@ -369,6 +370,7 @@ impl<'a> Header<'a> {
             range: request.range,
             layer: request.layer,
             grain: request.grain,
+            selection: request.selection,
             sample_format: request.expected,
         }
     }

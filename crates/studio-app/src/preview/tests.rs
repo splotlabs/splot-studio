@@ -812,12 +812,69 @@ fn partial_updates_keep_the_decode_request_and_completion_verifies_the_selected_
     assert_eq!(*frame, PictureFrame::Index { index: 1 });
 }
 
+#[test]
+fn operating_point_feedback_matches_the_active_document_generation() {
+    use studio_domain::layers::LayerScope;
+
+    let initial = document_subject(7);
+    let (mut preview, opening) = shown(initial.clone());
+    let old_generation = only(&opening).request_id;
+    let mut selected = initial;
+    let Subject::Document { selection, .. } = &mut selected else {
+        unreachable!("a document subject");
+    };
+    let policy = LayerDecodeSelection::OperatingPoint {
+        scope: LayerScope::Extended { id: 0 },
+        set: 2,
+        point: 0,
+    };
+    *selection = policy;
+    let switch = preview.sync(stage(selected));
+    let [close, open] = switch.as_slice() else {
+        unreachable!("{switch:?}");
+    };
+    assert_eq!(
+        close.command,
+        Command::CloseDocumentPlayback { document: 7 }
+    );
+    none(preview.picture(output_picture(old_generation, 0, None)));
+    assert!(preview.take_layer_decode_feedback().is_none());
+
+    preview.picture(output_picture(open.request_id, 0, None));
+    assert_eq!(
+        preview.take_layer_decode_feedback(),
+        Some((7, policy, LayerDecodeStatus::Active))
+    );
+
+    let grain = preview.input(Input::Grain(GrainPolicy::Skip));
+    assert_eq!(
+        preview.take_layer_decode_feedback(),
+        Some((7, policy, LayerDecodeStatus::Pending))
+    );
+    none(preview.unavailable(open.request_id, PictureFailure::Unreadable, "old error"));
+    assert!(preview.take_layer_decode_feedback().is_none());
+    none(preview.unavailable(
+        only(&grain).request_id,
+        PictureFailure::Unsupported,
+        "Cannot decode this operating point.",
+    ));
+    assert_eq!(
+        preview.take_layer_decode_feedback(),
+        Some((
+            7,
+            policy,
+            LayerDecodeStatus::Rejected("Cannot decode this operating point.".into()),
+        ))
+    );
+}
+
 fn document_subject(document: u64) -> Subject {
     let source = source("clip.obu");
     Subject::Document {
         document,
         fingerprint: source.fingerprint,
         path: source.path,
+        selection: LayerDecodeSelection::Default,
         digest: Box::new(studio_domain::analysis::SourceDigest {
             sha256: "0".repeat(64),
             bytes: source.fingerprint.len,

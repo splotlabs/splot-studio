@@ -235,6 +235,8 @@ pub enum PictureTarget {
         fingerprint: SourceFingerprint,
         /// The bytes the inspection worker read from the start of the file.
         digest: Box<SourceDigest>,
+        /// The decoder policy for this document generation.
+        selection: crate::layers::LayerDecodeSelection,
     },
     /// A frame of a finished output file, decoded by the Splot decoder.
     Result {

@@ -34,6 +34,8 @@ use studio_app::state::{AppState, Intent};
 use studio_app::workspace::Workspace;
 use studio_app::{AnalysisState, AppWindow, ByteRegion};
 
+#[path = "analyze/layers.rs"]
+mod layers;
 #[path = "analyze/timeline.rs"]
 mod timeline;
 
@@ -625,6 +627,7 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
     linked_validation_evidence(&mut rig, &scratch, &clipboard);
     a_large_findings_view_pages_retained_rows(&mut rig, &scratch);
     a_byte_only_finding_keeps_both_offsets(&mut rig, &scratch);
+    layers::inspect(&mut rig, &scratch);
 
     eprintln!("Tab stops: navigator after {tabs}, byte view {byte_tabs} later");
     timeline::controls(&mut rig, &scratch);

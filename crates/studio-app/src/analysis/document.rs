@@ -209,6 +209,7 @@ pub struct Document {
     pub(super) history: Vec<Place>,
     pub(crate) evidence: Evidence,
     pub(super) timeline: Timeline,
+    pub(crate) layers: super::layers::LayerInspector,
     /// Report awaiting source fingerprint verification at open.
     pub(super) pending_batch: Option<Box<crate::batch::Report>>,
     pub(super) at: usize,
@@ -246,6 +247,7 @@ impl Document {
             history: Vec::new(),
             evidence: Evidence::default(),
             timeline: Timeline::default(),
+            layers: super::layers::LayerInspector::default(),
             pending_batch: None,
             at: 0,
             bytes: Bytes {
@@ -343,6 +345,12 @@ impl Document {
     #[must_use]
     pub const fn id(&self) -> u64 {
         self.id
+    }
+
+    /// The operating point requested for playback of this document.
+    #[must_use]
+    pub const fn layer_decode_selection(&self) -> studio_domain::layers::LayerDecodeSelection {
+        self.layers.selection
     }
 
     /// The file.

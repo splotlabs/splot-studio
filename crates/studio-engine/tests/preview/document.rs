@@ -98,6 +98,7 @@ fn target(path: &Path, document: u64) -> Fallible<PictureTarget> {
         document,
         path,
         fingerprint: summary.fingerprint,
+        selection: studio_domain::layers::LayerDecodeSelection::Default,
         digest: summary
             .digest
             .clone()
@@ -177,6 +178,64 @@ fn linear_and_random_document_outputs_match_avm() -> TestResult {
             );
         }
     }
+    preview.finish()
+}
+
+#[test]
+fn a_document_reopens_for_each_operating_point() -> TestResult {
+    use studio_domain::layers::{LayerDecodeSelection, LayerScope};
+
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("operating-points.obu");
+    fs::write(
+        &path,
+        include_bytes!("fixtures/syn-msdo-ops-random-access.obu"),
+    )?;
+    let mut target = target(&path, 1)?;
+    let mut preview = Preview::spawn()?;
+    let (header, _) = preview.frame(1, &target, 1)?;
+    assert_eq!(
+        header
+            .output
+            .ok_or("no default output identity")?
+            .extended_layer,
+        7
+    );
+
+    let PictureTarget::Document { selection, .. } = &mut target else {
+        unreachable!("a document target")
+    };
+    *selection = LayerDecodeSelection::OperatingPoint {
+        scope: LayerScope::Global,
+        set: 0,
+        point: 1,
+    };
+    // Reuse the same path, digest, document and ordinal. This now selects X3.
+    let (header, _) = preview.frame(2, &target, 1)?;
+    let output = header.output.ok_or("no selected output identity")?;
+    assert_eq!(output.extended_layer, 3);
+    assert_eq!(output.temporal_layer, 1);
+    for (generation, ordinal) in (3..).zip([5, 0, 5]) {
+        let (header, _) = preview.frame(generation, &target, ordinal)?;
+        assert_eq!(
+            header
+                .output
+                .ok_or("no replayed output identity")?
+                .extended_layer,
+            3
+        );
+    }
+    assert_eq!(preview.failure(9, &target, 6)?, PictureFailure::OutOfRange);
+
+    let PictureTarget::Document { selection, .. } = &mut target else {
+        unreachable!("a document target")
+    };
+    *selection = LayerDecodeSelection::OperatingPoint {
+        scope: LayerScope::Global,
+        set: 15,
+        point: 0,
+    };
+    assert_eq!(preview.failure(10, &target, 0)?, PictureFailure::Unreadable);
     preview.finish()
 }
 

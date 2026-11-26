@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::analysis::{Framing, SourceDigest};
 use crate::job::{ChromaLayout, Failure, Rational, SourceFingerprint, WirePath};
-use crate::preview::GrainPolicy;
+use crate::{layers::LayerDecodeSelection, preview::GrainPolicy};
 
 /// The complete source observed in Analyze.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,7 +25,7 @@ pub struct ExportSource {
     pub framing: Framing,
 }
 
-/// Selection in decoder display order, before layer filtering.
+/// Selection in decoder display order under the requested operating point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExportRange {
@@ -107,6 +107,9 @@ pub struct ExportRequest {
     pub range: ExportRange,
     /// The layer to export, or all layers when absent.
     pub layer: Option<ExportLayer>,
+    /// The decoder policy that gives the selected ordinals their meaning.
+    #[serde(default)]
+    pub selection: LayerDecodeSelection,
     /// The film grain policy.
     pub grain: GrainPolicy,
     /// An explicit rate for unknown timing. Known variable timing still cannot use Y4M.

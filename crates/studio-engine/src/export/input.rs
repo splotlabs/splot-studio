@@ -13,14 +13,14 @@ use splot_core::stream_reader::{ReaderError, TemporalUnitReader};
 use splot_core::types::ObuType;
 use splot_decode::{DataProps, DecodeError, Decoder, Picture, SendStatus};
 use studio_domain::analysis::Framing;
-use studio_domain::export::{ExportRequest, ExportSource, ExportStage};
+use studio_domain::export::{ExportSource, ExportStage};
 use studio_domain::job::{FailureCode, Rational};
 
 use super::check_cancelled;
 use crate::inspect::document::{Checked, HashReader};
 use crate::job::Stop;
 use crate::output::{ExportControl, FileId};
-use crate::stream::{self, MAX_DOCUMENT_UNITS, MAX_UNIT_BYTES, PREVIEW_DECODE_THREADS};
+use crate::stream::{MAX_DOCUMENT_UNITS, MAX_UNIT_BYTES};
 
 pub(super) struct Source<'a> {
     path: PathBuf,
@@ -78,7 +78,7 @@ impl<'a> Source<'a> {
     /// that point still enter the source digest. They do not enter the decoder.
     pub fn decode(
         &mut self,
-        request: &ExportRequest,
+        decoder: Decoder,
         control: &dyn ExportControl,
         mut on_output: impl FnMut(Output) -> Result<bool, Stop>,
     ) -> Result<u64, Stop> {
@@ -87,14 +87,12 @@ impl<'a> Source<'a> {
         let mut hashed = HashReader::new(Checked::new(file, &cancelled));
         let count = {
             let reader = BufReader::new(&mut hashed);
-            let decoder = stream::document_decoder(PREVIEW_DECODE_THREADS, request.grain)
-                .map_err(|e| decode_failed(&e))?;
             let mut decoding = Decoding {
                 reader: TemporalUnitReader::with_max_unit_bytes(reader, MAX_UNIT_BYTES),
                 decoder,
                 units: Vec::new(),
                 count: 0,
-                framing: request.source.framing,
+                framing: self.declared.framing,
             };
             decoding.read(control, &mut on_output)?;
             decoding.count
@@ -273,8 +271,9 @@ fn reader_failed(control: &dyn ExportControl, error: ReaderError) -> Stop {
     }
 }
 
-fn decode_failed(error: &DecodeError) -> Stop {
+pub(super) fn decode_failed(error: &DecodeError) -> Stop {
     let code = match error {
+        DecodeError::InvalidOperatingPointSelection { .. } => FailureCode::InvalidSettings,
         DecodeError::Limit { .. } => FailureCode::TooLarge,
         DecodeError::UnsupportedStructure { .. } | DecodeError::UnsupportedFeature { .. } => {
             FailureCode::UnsupportedSource

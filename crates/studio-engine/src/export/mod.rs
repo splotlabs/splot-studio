@@ -18,7 +18,7 @@ use self::timing::{Evidence, Timing};
 use self::writers::Writers;
 use crate::job::Stop;
 use crate::output::ExportControl;
-use crate::stream::MAX_DOCUMENT_UNITS;
+use crate::stream::{MAX_DOCUMENT_UNITS, PREVIEW_DECODE_THREADS, document_decoder};
 
 /// Prepares, writes, and verifies a batch before claiming publication.
 pub(crate) fn run(request: &ExportRequest, control: &dyn ExportControl) -> Result<u64, Stop> {
@@ -40,6 +40,8 @@ pub(crate) fn run(request: &ExportRequest, control: &dyn ExportControl) -> Resul
     };
 
     control.stage(ExportStage::Checking);
+    let decoder = document_decoder(PREVIEW_DECODE_THREADS, request.grain, request.selection)
+        .map_err(|e| input::decode_failed(&e))?;
     let mut source = Source::open(&request.source)?;
     let mut writers = Writers::prepare(request, &source.id, control)?;
     control.await_prepared()?;
@@ -48,7 +50,7 @@ pub(crate) fn run(request: &ExportRequest, control: &dyn ExportControl) -> Resul
     let mut progress = ExportProgress::default();
     let mut timing = Timing::default();
     let mut selected_count = 0;
-    let decoded = source.decode(request, control, |output| {
+    let output_count = source.decode(decoder, control, |output| {
         let ordinal = output.ordinal;
         let selected = ordinal >= first
             && request
@@ -73,7 +75,7 @@ pub(crate) fn run(request: &ExportRequest, control: &dyn ExportControl) -> Resul
         control.progress(progress);
         Ok(last == Some(ordinal))
     })?;
-    if last.is_some_and(|last| last >= decoded) {
+    if last.is_some_and(|last| last >= output_count) {
         return Err(unsupported(
             "The source ends before the last requested output.",
         ));

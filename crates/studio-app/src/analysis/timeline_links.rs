@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
 use studio_domain::analysis::{Element, LocateTarget, Row};
-use studio_domain::identity::IdentityCompletion;
+use studio_domain::identity::{IDENTITY_SCHEMA, IdentityCompletion};
+use studio_domain::layers::LayerDecodeSelection;
 use studio_domain::preview::GrainPolicy;
 use studio_domain::protocol::{Command, Event};
 use studio_domain::timeline::{TimelinePage, TimelineSelection, TimelineTarget, TimelineView};
@@ -37,7 +38,7 @@ impl Default for TimelineRange {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Request {
-    Build,
+    Build(LayerDecodeSelection),
     Cancel,
     Range { scan: u64, range: TimelineRange },
     Locate { scan: u64, target: TimelineTarget },
@@ -152,7 +153,7 @@ impl Timeline {
 
     pub(super) fn fail(&mut self, id: u64, request: Request, message: String) {
         match request {
-            Request::Build if self.scan == Some(id) => {
+            Request::Build(_) if self.scan == Some(id) => {
                 self.collecting = false;
                 self.scan = None;
             }
@@ -211,18 +212,41 @@ impl Analysis {
         }
     }
 
+    pub(super) fn invalidate_timeline_policy(&mut self, at: usize, out: &mut Vec<Effect>) {
+        let shown = self.documents[at].timeline.shown();
+        self.timeline_input(at, &Input::TimelineCancel, out);
+        self.cancel_timeline_location(at);
+        let doc = &mut self.documents[at];
+        doc.timeline = Timeline::default();
+        if shown {
+            doc.timeline.notice =
+                Some("The playback request changed. Build the timeline again.".into());
+        }
+        if self
+            .timeline_picture
+            .is_some_and(|(document, _)| document == doc.id)
+        {
+            self.timeline_picture = None;
+        }
+    }
+
     pub(super) fn timeline_input(&mut self, at: usize, input: &Input, out: &mut Vec<Effect>) {
         let doc = &mut self.documents[at];
         match *input {
             Input::TimelineBuild if !doc.timeline.collecting => {
                 let document = doc.id;
+                let selection = doc.layer_decode_selection();
                 doc.timeline = Timeline::default();
-                let id = self.send(document, Asked::Timeline(Request::Build), out, |document| {
-                    Command::AnalysisIdentityScan {
+                let id = self.send(
+                    document,
+                    Asked::Timeline(Request::Build(selection)),
+                    out,
+                    |document| Command::AnalysisIdentityScan {
                         document,
                         grain: GrainPolicy::Skip,
-                    }
-                });
+                        selection,
+                    },
+                );
                 let timeline = &mut self.documents[at].timeline;
                 timeline.scan = Some(id);
                 timeline.collecting = true;
@@ -361,10 +385,14 @@ impl Analysis {
         event: Event,
         out: &mut Vec<Effect>,
     ) {
+        let selection = self.documents[at].layer_decode_selection();
         let timeline = &mut self.documents[at].timeline;
         match (request, event) {
-            (Request::Build, Event::AnalysisIdentityScanned { summary, .. })
-                if timeline.scan == Some(id) =>
+            (Request::Build(requested), Event::AnalysisIdentityScanned { summary, .. })
+                if timeline.scan == Some(id)
+                    && requested == selection
+                    && summary.selection == requested
+                    && summary.schema == IDENTITY_SCHEMA =>
             {
                 timeline.collecting = false;
                 timeline.cancelling = false;
@@ -387,7 +415,10 @@ impl Analysis {
                 let refresh = std::mem::take(&mut timeline.refresh_after_finish);
                 if timeline.range != range || refresh {
                     self.request_timeline_range(at, out);
-                } else if page.view == range.view && page.first == range.first {
+                } else if page.view == range.view
+                    && page.first == range.first
+                    && page.decode_selection == selection
+                {
                     timeline.page = Some(page);
                     timeline.notice = None;
                 } else {

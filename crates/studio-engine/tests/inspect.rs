@@ -7,6 +7,8 @@
 #[path = "inspect/batch.rs"]
 mod batch;
 mod common;
+#[path = "inspect/layers.rs"]
+mod layers;
 
 use std::error::Error;
 use std::fs;
@@ -1085,6 +1087,7 @@ fn identity_pages_require_the_selected_scan_and_source() -> TestResult {
         inspect.ask(Command::AnalysisIdentityScan {
             document: 1,
             grain: GrainPolicy::Skip,
+            selection: studio_domain::layers::LayerDecodeSelection::Default,
         })?,
         Event::AnalysisIdentityScanned { document: 1, summary }
             if summary.completion == IdentityCompletion::Complete && summary.matches_structure
@@ -1151,6 +1154,7 @@ fn timeline_output_links_match_native_pictures_after_backward_seek() -> TestResu
     let scanned = inspect.ask(Command::AnalysisIdentityScan {
         document: 1,
         grain: GrainPolicy::Skip,
+        selection: studio_domain::layers::LayerDecodeSelection::Default,
     })?;
     assert!(
         matches!(scanned, Event::AnalysisIdentityScanned { summary, .. }
@@ -1203,6 +1207,7 @@ fn timeline_output_links_match_native_pictures_after_backward_seek() -> TestResu
         path: WirePath::from_path(&path),
         fingerprint: opened.fingerprint,
         digest: opened.digest.ok_or("Expected source digest.")?,
+        selection: studio_domain::layers::LayerDecodeSelection::Default,
     };
     let mut preview = Inspect::spawn_mode("preview")?;
     for (generation, index) in [(1, 1), (2, 0)] {

@@ -65,6 +65,7 @@ fn request(
         range: ExportRange::All,
         layer: None,
         grain: GrainPolicy::Skip,
+        selection: studio_domain::layers::LayerDecodeSelection::Default,
         frame_rate: None,
         expected: ExportSampleFormat { bit_depth, chroma },
         format,
@@ -204,6 +205,47 @@ fn run(export: ExportRequest) -> Answer<ExportOutcome> {
     };
     close(worker)?;
     Ok(outcome)
+}
+
+#[test]
+fn operating_point_export_uses_the_filtered_output_ordinal() -> TestResult {
+    use studio_domain::layers::{LayerDecodeSelection, LayerScope};
+
+    let dir = tempfile::tempdir()?;
+    let source = dir.path().join("operating-points.obu");
+    fs::write(
+        &source,
+        include_bytes!("../preview/fixtures/syn-msdo-ops-random-access.obu"),
+    )?;
+    let samples = dir.path().join("last.yuv");
+    let layout = dir.path().join("last.json");
+    let mut export = request(&source, 8, ChromaLayout::Yuv420, raw(&samples, &layout))?;
+    export.range = ExportRange::Inclusive { first: 5, last: 5 };
+    export.selection = LayerDecodeSelection::OperatingPoint {
+        scope: LayerScope::Global,
+        set: 0,
+        point: 1,
+    };
+    done(&run(export.clone())?, 1, 2);
+    assert_eq!(fs::metadata(&samples)?.len(), 6144);
+    assert_eq!(
+        sha(&fs::read(samples)?),
+        "4aaa603600b5c9c73dd0408845e59302b4e18974211eddb2ef3f203f459f1c44"
+    );
+    let layout: serde_json::Value = serde_json::from_reader(fs::File::open(layout)?)?;
+    assert_eq!(layout["selection"], serde_json::to_value(export.selection)?);
+
+    let missing_samples = dir.path().join("invalid.yuv");
+    let missing_layout = dir.path().join("invalid.json");
+    export.format = raw(&missing_samples, &missing_layout);
+    export.selection = LayerDecodeSelection::OperatingPoint {
+        scope: LayerScope::Extended { id: 31 },
+        set: 0,
+        point: 0,
+    };
+    refused(&run(export)?, FailureCode::InvalidSettings);
+    assert!(!missing_samples.exists() && !missing_layout.exists());
+    Ok(())
 }
 
 fn done(outcome: &ExportOutcome, frames: u64, files: usize) {

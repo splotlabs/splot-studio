@@ -3,8 +3,10 @@
 
 //! Playback of an independently opened Analyze document.
 
+use studio_domain::layers::{LayerDecodeSelection, LayerDecodeStatus, LayerScope};
 use studio_domain::preview::{
-    OutputEvent, PictureFrame, PictureHeader, PictureOrigin, PictureStage, PictureTarget,
+    OutputEvent, PictureFailure, PictureFrame, PictureHeader, PictureOrigin, PictureStage,
+    PictureTarget,
 };
 use studio_domain::protocol::Command;
 
@@ -15,6 +17,72 @@ impl Preview {
         match self.scene.stage {
             Some(Subject::Document { document, .. }) => Some(document),
             _ => None,
+        }
+    }
+
+    pub(crate) fn take_layer_decode_feedback(
+        &mut self,
+    ) -> Option<(u64, LayerDecodeSelection, LayerDecodeStatus)> {
+        self.layer_decode_feedback.take()
+    }
+
+    pub(super) fn accept_layer_decode(&mut self, shown: &super::Shown) {
+        let Some((target, output)) = shown.target.as_ref().zip(shown.picture.header.output) else {
+            return;
+        };
+        let PictureTarget::Document {
+            document,
+            selection: selection @ LayerDecodeSelection::OperatingPoint { scope, .. },
+            ..
+        } = target
+        else {
+            return;
+        };
+        if !self.on_side(target)
+            || matches!(scope, LayerScope::Extended { id } if *id != output.extended_layer)
+        {
+            return;
+        }
+        self.layer_decode_feedback = Some((*document, *selection, LayerDecodeStatus::Active));
+    }
+
+    pub(super) fn reject_layer_decode(
+        &mut self,
+        target: &PictureTarget,
+        code: PictureFailure,
+        message: &str,
+    ) {
+        let PictureTarget::Document {
+            document,
+            selection: selection @ LayerDecodeSelection::OperatingPoint { .. },
+            ..
+        } = target
+        else {
+            return;
+        };
+        if matches!(
+            code,
+            PictureFailure::Unreadable
+                | PictureFailure::Unsupported
+                | PictureFailure::SourceChanged
+        ) || (code == PictureFailure::OutOfRange && self.current_frame() == Some(0))
+        {
+            self.layer_decode_feedback = Some((
+                *document,
+                *selection,
+                LayerDecodeStatus::Rejected(message.to_owned()),
+            ));
+        }
+    }
+
+    pub(super) fn reset_layer_decode_feedback(&mut self) {
+        if let Some(Subject::Document {
+            document,
+            selection: selection @ LayerDecodeSelection::OperatingPoint { .. },
+            ..
+        }) = &self.scene.stage
+        {
+            self.layer_decode_feedback = Some((*document, *selection, LayerDecodeStatus::Pending));
         }
     }
 

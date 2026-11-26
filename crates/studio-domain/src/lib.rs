@@ -17,6 +17,7 @@ pub mod analysis;
 pub mod export;
 pub mod identity;
 pub mod job;
+pub mod layers;
 pub mod options;
 pub mod preview;
 pub mod protocol;

@@ -60,3 +60,16 @@ avmenc --ivf --limit=1 --threads=1 --cpu-used=4 --bit-depth=10 \
 
 The PQ input SHA-256 is
 `bcdb7385fc217cf2c87885ef32295a559980fe31f9df404e9fa82106c1cbe235`.
+
+`syn-msdo-ops-random-access.obu` is the independent AVM A1EC4594D9 fixture
+from the Splot conformance corpus. It carries extended layers 3 and 7 and
+declares global and local operating points. Global set 0, point 1 selects
+six 64 × 64 pictures from extended layer 3. To verify the last exported
+picture, hash the last 6,144 output bytes from:
+
+```sh
+avmdec --select-ops=0,1 --skip-film-grain --i420 --rawvideo -o - syn-msdo-ops-random-access.obu
+```
+
+The last picture's SHA-256 is
+`4aaa603600b5c9c73dd0408845e59302b4e18974211eddb2ef3f203f459f1c44`.

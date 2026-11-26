@@ -223,6 +223,9 @@ fn serve<'scope>(
             Command::AnalysisOpen { .. }
             | Command::AnalysisOpenProgressive { .. }
             | Command::AnalysisClearCache
+            | Command::AnalysisLayers { .. }
+            | Command::AnalysisCancelLayers { .. }
+            | Command::AnalysisLayerPage { .. }
             | Command::AnalysisIdentityScan { .. }
             | Command::AnalysisCancelIdentity { .. }
             | Command::AnalysisIdentityPage { .. }
