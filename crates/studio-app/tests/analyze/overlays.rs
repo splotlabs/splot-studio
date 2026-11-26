@@ -50,7 +50,7 @@ pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch) {
         let actions = actions.clone();
         move |action| actions.borrow_mut().push(action)
     });
-    let settle = |rig: &mut Rig, what| {
+    let settle = |rig: &mut Rig, what: &str| {
         for action in actions.take() {
             rig.session.block_overlay_input(action);
         }
@@ -139,7 +139,7 @@ pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch) {
     inspect_dense(rig, scratch, &settle);
 }
 
-fn zoom_and_pan(rig: &mut Rig, settle: impl Fn(&mut Rig, &str)) {
+fn zoom_and_pan(rig: &mut Rig, settle: &impl Fn(&mut Rig, &str)) {
     rig.session.preview_input(PreviewInput::Zoom(4));
     settle(rig, "zoomed transform geometry");
     rig.session
@@ -158,13 +158,14 @@ fn zoom_and_pan(rig: &mut Rig, settle: impl Fn(&mut Rig, &str)) {
     assert!(view(rig).get_outlines().iter().any(|item| item.x < 0));
 }
 
-fn inspect_chroma(rig: &mut Rig, scratch: &Scratch, settle: impl Fn(&mut Rig, &str)) {
+fn inspect_chroma(rig: &mut Rig, scratch: &Scratch, settle: &impl Fn(&mut Rig, &str)) {
     open(rig, scratch, "overlapping trees.ivf", CHROMA_TREE);
     view(rig).invoke_choose(1);
     settle(rig, "the luma tree");
     view(rig).invoke_pick(40, 40, 160, 160);
     settle(rig, "the luma block");
     assert!(view(rig).get_picked().contains("luma tree"));
+    assert!(view(rig).get_picked().contains("Superblock"));
     view(rig).invoke_choose_plane(2);
     settle(rig, "the chroma tree");
     view(rig).invoke_pick(40, 40, 160, 160);
@@ -173,7 +174,7 @@ fn inspect_chroma(rig: &mut Rig, scratch: &Scratch, settle: impl Fn(&mut Rig, &s
     assert!(view(rig).get_picked().contains("Coded luma (0, 0) 64×64"));
 }
 
-fn inspect_dense(rig: &mut Rig, scratch: &Scratch, settle: impl Fn(&mut Rig, &str)) {
+fn inspect_dense(rig: &mut Rig, scratch: &Scratch, settle: &impl Fn(&mut Rig, &str)) {
     use studio_domain::blocks::MAX_BLOCK_RECORDS;
 
     open(rig, scratch, "dense multi-tile blocks.ivf", DENSE);
@@ -198,6 +199,12 @@ fn inspect_dense(rig: &mut Rig, scratch: &Scratch, settle: impl Fn(&mut Rig, &st
         "Dense overlay. {outlined} outlines. Capture {capture_elapsed:?}. Median software redraw off {redraw_without_evidence:?}, on {redraw_with_evidence:?}."
     );
 
+    view(rig).invoke_pick(172, 24, 200, 100);
+    view(rig).invoke_choose_plane(2);
+    settle(rig, "the plane change cancelled the old point");
+    assert!(view(rig).get_rows().iter().all(|row| !row.selected));
+
+    view(rig).invoke_choose_plane(1);
     view(rig).invoke_pick(172, 24, 200, 100);
     settle(rig, "a point in the uncovered part of the dense map");
     assert!(view(rig).get_picked().contains("Tile 1"));

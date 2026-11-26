@@ -320,7 +320,7 @@ impl Analysis {
                 if self
                     .overlay
                     .pending
-                    .is_some_and(|(_, capture)| matches!(capture, Capture::Details(_)))
+                    .is_some_and(|(_, capture)| capture != Capture::View)
                 {
                     self.cancel_overlay(&mut out);
                 }
@@ -386,8 +386,12 @@ impl Analysis {
     ) {
         if let Some(&(record, key)) = self.overlay.records().get(index)
             && let Some(rect) = record.visible
+            && let Some(crop) = self
+                .overlay
+                .picture
+                .and_then(|picture| picture.viewport.region())
         {
-            self.select_overlay(key, (rect.x, rect.y), view, out);
+            self.select_overlay(key, (rect.x.max(crop.x), rect.y.max(crop.y)), view, out);
         }
     }
 

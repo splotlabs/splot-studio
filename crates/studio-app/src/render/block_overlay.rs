@@ -34,7 +34,7 @@ pub(super) fn render(view: &BlockOverlay<'_>, overlay: &Overlay) {
     view.set_status(status(overlay).into());
     view.set_legend(match overlay.mode {
         Mode::Off => "",
-        Mode::Partitions => "SB is a superblock. P is a partition. B is a coding block.",
+        Mode::Partitions => "SB is a superblock. P is a partition. B is a coding block. SB/B is an unsplit superblock.",
         Mode::Transforms => "Y, U and V identify the transform plane. Select a transform for its details.",
         Mode::Quantizer => "Q shows the decoder's effective qindex before plane adjustments. Select a small region to read its value.",
         Mode::Segment => "S shows the decoded segment ID.",
@@ -110,6 +110,9 @@ fn label(record: &BlockRecord) -> String {
     match &record.data {
         BlockData::Partition { split } if record.parent.is_none() => format!("Superblock {split}"),
         BlockData::Partition { split } => format!("Partition {split}"),
+        BlockData::Coding { .. } if record.parent.is_none() => {
+            "Superblock · Coding block".to_owned()
+        }
         BlockData::Coding { .. } => "Coding block".to_owned(),
         BlockData::Transform { transform } => {
             format!("{} transform", plane_label(transform.id.plane))
@@ -247,6 +250,9 @@ fn outline(
         }
         (BlockData::Partition { .. }, Mode::Partitions) => {
             (lavender, transparent, false, "P".into())
+        }
+        (BlockData::Coding { .. }, Mode::Partitions) if record.parent.is_none() => {
+            (amber, transparent, true, "SB/B".into())
         }
         (BlockData::Coding { .. }, Mode::Partitions) => (cyan, transparent, false, "B".into()),
         (BlockData::Transform { transform }, Mode::Transforms) => (
