@@ -1,0 +1,525 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+//! Byte ownership, reverse links and range summaries for the frame timeline.
+
+use std::io;
+
+use studio_domain::analysis::IvfHeaderFact;
+use studio_domain::timeline::{
+    ByteDistribution, MAX_TIMELINE_BUCKETS, TimelineBucket, TimelineClock, TimelineEntry,
+    TimelineFileBytes, TimelinePage, TimelineQuantizer, TimelineSelection, TimelineTarget,
+    TimelineTime, TimelineView,
+};
+
+use super::{
+    IdentityCompletion, IdentityIndex, Refusal, State, Table, invalid, source_changed, storage,
+};
+
+const MAX_TIMELINE_BYTES: u64 = 128 << 20;
+const BLOCK_ROWS: u64 = 32;
+const IVF_PTS: u64 = 1;
+const RANDOM_ACCESS: u64 = 2;
+const DISPLAY_COUNTED: u64 = 4;
+const CODED_COUNTED: u64 = 8;
+
+#[derive(Debug)]
+pub(super) struct TimelineIndex {
+    // Header offset, OBU bytes, packet PTS, flags.
+    obus: Table,
+    // Coded header offset, frame OBU bytes, first output ordinal + 1, random-access flag.
+    coded: Track<4>,
+    // Coded ordinal, display OBU bytes, packet PTS, interval numerator and denominator, PTS flag.
+    output: Track<6>,
+    obu_bytes: u64,
+    through: u64,
+    last_pts: Option<u64>,
+    decreasing: bool,
+}
+
+impl TimelineIndex {
+    pub(super) fn new() -> io::Result<Self> {
+        Ok(Self {
+            obus: Table::new()?,
+            coded: Track::new()?,
+            output: Track::new()?,
+            obu_bytes: 0,
+            through: 0,
+            last_pts: None,
+            decreasing: false,
+        })
+    }
+
+    pub(super) fn start_unit(&mut self, offset: u64) {
+        self.through = self.through.max(offset);
+    }
+
+    pub(super) fn obu(
+        &mut self,
+        offset: u64,
+        bytes: u64,
+        pts: Option<u64>,
+        random_access: bool,
+    ) -> io::Result<()> {
+        let flags = (if pts.is_some() { IVF_PTS } else { 0 })
+            | (if random_access { RANDOM_ACCESS } else { 0 });
+        self.budget(Table::<4>::BYTES)?;
+        self.obus.append([offset, bytes, pts.unwrap_or(0), flags])?;
+        self.obu_bytes += bytes;
+        self.through = offset + bytes;
+        Ok(())
+    }
+
+    pub(super) fn frame(&mut self, offset: u64) -> io::Result<()> {
+        let (_, obu) = self.claim(offset, CODED_COUNTED)?;
+        self.budget(Table::<4>::BYTES)?;
+        // The native observer visits coded frames in file order.
+        self.coded
+            .append([offset, obu[1], 0, obu[3] & RANDOM_ACCESS])
+    }
+
+    pub(super) fn continuation(&mut self, coded: u64, offset: u64) -> io::Result<()> {
+        let (_, obu) = self.claim(offset, CODED_COUNTED)?;
+        let ordinal = self.coded_ordinal(coded)?;
+        let mut record = self.coded.rows.at(ordinal)?;
+        record[1] += obu[1];
+        self.coded.update(ordinal, record)
+    }
+
+    pub(super) fn output(
+        &mut self,
+        coded: u64,
+        showing: u64,
+        interval: Option<(u64, u64)>,
+    ) -> io::Result<()> {
+        self.budget(Table::<6>::BYTES)?;
+        let (_, obu) = self.claim(showing, DISPLAY_COUNTED)?;
+        let ordinal = self.coded_ordinal(coded)?;
+        let mut coded = self.coded.rows.at(ordinal)?;
+        if coded[2] == 0 {
+            coded[2] = self.output.rows.count + 1;
+            self.coded.rows.write(ordinal, coded)?;
+        }
+        if obu[3] & IVF_PTS != 0 {
+            self.decreasing |= self.last_pts.is_some_and(|pts| obu[2] < pts);
+            self.last_pts = Some(obu[2]);
+        }
+        let (num, den) = interval.unwrap_or_default();
+        self.output
+            .append([ordinal, obu[1], obu[2], num, den, obu[3] & IVF_PTS])
+    }
+
+    fn claim(&mut self, offset: u64, flag: u64) -> io::Result<(u64, [u64; 4])> {
+        let row = self.obus.lower_bound(|obu| obu[0] < offset)?;
+        if row == self.obus.count {
+            return Err(missing());
+        }
+        let mut obu = self.obus.at(row)?;
+        if obu[0] != offset {
+            return Err(missing());
+        }
+        if obu[3] & flag != 0 {
+            obu[1] = 0;
+        } else {
+            obu[3] |= flag;
+            self.obus.write(row, obu)?;
+        }
+        Ok((row, obu))
+    }
+
+    fn coded_ordinal(&mut self, offset: u64) -> io::Result<u64> {
+        let row = self.coded.rows.lower_bound(|frame| frame[0] < offset)?;
+        if row == self.coded.rows.count || self.coded.rows.at(row)?[0] != offset {
+            return Err(missing());
+        }
+        Ok(row)
+    }
+
+    fn budget(&self, add: usize) -> io::Result<()> {
+        let bytes = (self.obus.count + self.coded.rows.count) * Table::<4>::BYTES as u64
+            + self.output.rows.count * Table::<6>::BYTES as u64;
+        if bytes + add as u64 > MAX_TIMELINE_BYTES {
+            return Err(io::Error::other(
+                "The frame timeline reached its disk limit.",
+            ));
+        }
+        Ok(())
+    }
+
+    fn bytes(
+        &mut self,
+        view: TimelineView,
+        first: u64,
+        end: u64,
+    ) -> io::Result<Option<ByteDistribution>> {
+        match view {
+            TimelineView::Coded => self.coded.bytes(first, end),
+            TimelineView::Output => self.output.bytes(first, end),
+        }
+    }
+
+    fn count(&self, view: TimelineView) -> u64 {
+        match view {
+            TimelineView::Coded => self.coded.rows.count,
+            TimelineView::Output => self.output.rows.count,
+        }
+    }
+
+    fn clock(&self, clock: Option<IvfClock>) -> TimelineClock {
+        if self.decreasing {
+            TimelineClock::Discontinuous
+        } else if clock.is_some() && self.last_pts.is_some() {
+            TimelineClock::Ivf
+        } else {
+            TimelineClock::Unavailable
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Track<const WORDS: usize> {
+    rows: Table<WORDS>,
+    // One summary per group bounds page work independently of its zoom level.
+    blocks: Vec<ByteDistribution>,
+}
+
+impl<const WORDS: usize> Track<WORDS> {
+    fn new() -> io::Result<Self> {
+        Ok(Self {
+            rows: Table::new()?,
+            blocks: Vec::new(),
+        })
+    }
+
+    fn append(&mut self, row: [u64; WORDS]) -> io::Result<()> {
+        let start_block = self.rows.count.is_multiple_of(BLOCK_ROWS);
+        self.rows.append(row)?;
+        let one = one(row[1]);
+        if let Some(block) = self.blocks.last_mut().filter(|_| !start_block) {
+            *block = combine(*block, one);
+        } else {
+            self.blocks.push(one);
+        }
+        Ok(())
+    }
+
+    fn update(&mut self, row: u64, record: [u64; WORDS]) -> io::Result<()> {
+        self.rows.write(row, record)?;
+        let block = row / BLOCK_ROWS;
+        let first = block * BLOCK_ROWS;
+        let end = self.rows.count.min(first + BLOCK_ROWS);
+        if let Some(summary) = self.scan(first, end)? {
+            let index = usize::try_from(block).map_err(io::Error::other)?;
+            self.blocks[index] = summary;
+        }
+        Ok(())
+    }
+
+    fn scan(&mut self, first: u64, end: u64) -> io::Result<Option<ByteDistribution>> {
+        self.rows.seek(first)?;
+        let mut summary = None;
+        for _ in first..end {
+            merge(&mut summary, one(self.rows.read()?[1]));
+        }
+        Ok(summary)
+    }
+
+    fn bytes(&mut self, first: u64, end: u64) -> io::Result<Option<ByteDistribution>> {
+        let block_start = first.div_ceil(BLOCK_ROWS);
+        let block_end = end / BLOCK_ROWS;
+        if block_start >= block_end {
+            return self.scan(first, end);
+        }
+        let mut summary = self.scan(first, block_start * BLOCK_ROWS)?;
+        let start = usize::try_from(block_start).map_err(io::Error::other)?;
+        let end_block = usize::try_from(block_end).map_err(io::Error::other)?;
+        for &block in &self.blocks[start..end_block] {
+            merge(&mut summary, block);
+        }
+        if let Some(tail) = self.scan(block_end * BLOCK_ROWS, end)? {
+            merge(&mut summary, tail);
+        }
+        Ok(summary)
+    }
+}
+
+fn one(bytes: u64) -> ByteDistribution {
+    ByteDistribution {
+        min: bytes,
+        max: bytes,
+        sum: bytes,
+    }
+}
+
+fn combine(a: ByteDistribution, b: ByteDistribution) -> ByteDistribution {
+    ByteDistribution {
+        min: a.min.min(b.min),
+        max: a.max.max(b.max),
+        sum: a.sum + b.sum,
+    }
+}
+
+fn merge(summary: &mut Option<ByteDistribution>, next: ByteDistribution) {
+    *summary = Some(summary.map_or(next, |previous| combine(previous, next)));
+}
+
+fn missing() -> io::Error {
+    io::Error::other("A decoder identity has no matching source record.")
+}
+
+#[derive(Clone, Copy)]
+struct IvfClock {
+    num: u64,
+    den: u64,
+}
+
+impl IvfClock {
+    fn new(header: Option<IvfHeaderFact>) -> Option<Self> {
+        let header = header?;
+        let num = u64::from(header.timebase_numerator);
+        let den = u64::from(header.timebase_denominator);
+        (num != 0 && den != 0).then_some(Self { num, den })
+    }
+
+    fn time(self, ticks: u64) -> TimelineTime {
+        TimelineTime {
+            num: u128::from(ticks) * u128::from(self.num),
+            den: self.den,
+        }
+    }
+
+    // ceil(target / timebase) without converting any clock to floating point.
+    fn target_tick(self, target: TimelineTime) -> Option<u64> {
+        let den = u128::from(target.den) * u128::from(self.num);
+        if den == 0 {
+            return None;
+        }
+        let whole = target.num / den;
+        let remainder = target.num % den;
+        let scale = u128::from(self.den);
+        let ticks = whole
+            .checked_mul(scale)?
+            .checked_add(remainder.checked_mul(scale)?.div_ceil(den))?;
+        u64::try_from(ticks).ok()
+    }
+
+    fn rate(self, bytes: u64, ticks: u64) -> Option<TimelineTime> {
+        let den = ticks.checked_mul(self.num)?;
+        let num = u128::from(bytes) * 8 * u128::from(self.den);
+        (den != 0).then_some(TimelineTime { num, den })
+    }
+}
+
+impl State {
+    fn complete(&self) -> bool {
+        self.completion == IdentityCompletion::Complete
+    }
+
+    fn entry(
+        &mut self,
+        view: TimelineView,
+        ordinal: u64,
+        clock: Option<IvfClock>,
+    ) -> io::Result<TimelineEntry> {
+        let is_output = view == TimelineView::Output;
+        let coded_ordinal = if is_output {
+            self.timeline.output.rows.at(ordinal)?[0]
+        } else {
+            ordinal
+        };
+        let [coded_offset, coded_bytes, first_output, access] =
+            self.timeline.coded.rows.at(coded_ordinal)?;
+        let [_, sequence_offset, ..] = self.coded.at(coded_ordinal)?;
+        let output_ordinal = if is_output {
+            Some(ordinal)
+        } else {
+            first_output.checked_sub(1)
+        };
+        let mut entry = TimelineEntry {
+            ordinal,
+            coded_offset,
+            showing_offset: None,
+            sequence_offset,
+            coded_ordinal,
+            output_ordinal,
+            bytes: coded_bytes,
+            time: None,
+            interval: None,
+            random_access: access != 0,
+            quantizer: TimelineQuantizer::Unavailable,
+        };
+        if let Some(output) = output_ordinal {
+            let [_, showing, ..] = self.output.at(output)?;
+            let [_, bytes, pts, num, den, flags] = self.timeline.output.rows.at(output)?;
+            entry.showing_offset = Some(showing);
+            entry.interval = (den != 0).then_some(TimelineTime {
+                num: u128::from(num),
+                den,
+            });
+            entry.time = clock
+                .filter(|_| flags & IVF_PTS != 0)
+                .map(|clock| clock.time(pts));
+            if is_output {
+                entry.bytes = bytes;
+            }
+        }
+        Ok(entry)
+    }
+
+    fn rate(
+        &mut self,
+        clock: IvfClock,
+        first: u64,
+        end: u64,
+        bytes: u64,
+    ) -> io::Result<Option<TimelineTime>> {
+        if end >= self.timeline.output.rows.count {
+            return Ok(None);
+        }
+        let start = self.timeline.output.rows.at(first)?[2];
+        let finish = self.timeline.output.rows.at(end)?[2];
+        // An equal timestamp means some simultaneous pictures lie outside the window.
+        if (first > 0 && self.timeline.output.rows.at(first - 1)?[2] == start)
+            || self.timeline.output.rows.at(end - 1)?[2] == finish
+        {
+            return Ok(None);
+        }
+        Ok(finish
+            .checked_sub(start)
+            .and_then(|ticks| clock.rate(bytes, ticks)))
+    }
+}
+
+impl IdentityIndex {
+    pub(in crate::inspect) fn timeline(
+        &self,
+        header: Option<IvfHeaderFact>,
+        view: TimelineView,
+        first: u64,
+        limit: u64,
+        buckets: u32,
+    ) -> Result<TimelinePage, Refusal> {
+        if limit == 0 || !(1..=MAX_TIMELINE_BUCKETS).contains(&buckets) {
+            return Err(invalid(
+                "The timeline range or bucket count is out of range.",
+            ));
+        }
+        let mut state = self.state();
+        if state.changed {
+            return Err(source_changed());
+        }
+        let total = state.timeline.count(view);
+        if first > total {
+            return Err(invalid("The first timeline row is past the end."));
+        }
+        let clock = IvfClock::new(header);
+        let clock_state = state.timeline.clock(clock);
+        let end = first.saturating_add(limit).min(total);
+        let count = end - first;
+        let width = count.div_ceil(u64::from(buckets)).max(1);
+        let mut groups = Vec::new();
+        let mut bytes = None;
+        let mut start = first;
+        while start < end {
+            let stop = start.saturating_add(width).min(end);
+            let distribution = state
+                .timeline
+                .bytes(view, start, stop)
+                .map_err(|e| storage(&e))?;
+            if let Some(distribution) = distribution {
+                merge(&mut bytes, distribution);
+            }
+            let entry = (stop - start == 1)
+                .then(|| state.entry(view, start, clock))
+                .transpose()
+                .map_err(|e| storage(&e))?;
+            groups.push(TimelineBucket {
+                first: start,
+                count: stop - start,
+                bytes: distribution,
+                entry,
+            });
+            start = stop;
+        }
+        let rate = match (clock, bytes) {
+            (Some(clock), Some(bytes))
+                if view == TimelineView::Output
+                    && clock_state == TimelineClock::Ivf
+                    && state.complete() =>
+            {
+                state
+                    .rate(clock, first, end, bytes.sum)
+                    .map_err(|e| storage(&e))?
+            }
+            _ => None,
+        };
+        let file = state.fingerprint.len;
+        let classified = state.timeline.through;
+        let obu = state.timeline.obu_bytes;
+        Ok(TimelinePage {
+            view,
+            first,
+            total,
+            complete: state.complete(),
+            verified: state.matches_structure,
+            clock: clock_state,
+            file_bytes: TimelineFileBytes {
+                file,
+                obu,
+                framing: classified - obu,
+                unclassified: file - classified,
+            },
+            bytes,
+            rate,
+            buckets: groups,
+        })
+    }
+
+    pub(in crate::inspect) fn timeline_locate(
+        &self,
+        header: Option<IvfHeaderFact>,
+        target: TimelineTarget,
+    ) -> Result<TimelineSelection, Refusal> {
+        let mut state = self.state();
+        if state.changed {
+            return Err(source_changed());
+        }
+        let clock = IvfClock::new(header);
+        let (view, index) = match target {
+            TimelineTarget::Output { index } => (TimelineView::Output, index),
+            TimelineTarget::Coded { index } => (TimelineView::Coded, index),
+            TimelineTarget::Time { time } => {
+                let clock = clock
+                    .filter(|_| {
+                        state.complete() && state.timeline.clock(clock) == TimelineClock::Ivf
+                    })
+                    .ok_or_else(|| {
+                        invalid(
+                            "Time search needs a complete IVF clock without timestamp decreases.",
+                        )
+                    })?;
+                let ticks = clock
+                    .target_tick(time)
+                    .ok_or_else(|| invalid("The requested time is outside the IVF clock."))?;
+                let index = state
+                    .timeline
+                    .output
+                    .rows
+                    .lower_bound(|row| row[2] < ticks)
+                    .map_err(|e| storage(&e))?;
+                (TimelineView::Output, index)
+            }
+        };
+        if index >= state.timeline.count(view) {
+            return Err(invalid("The requested timeline row is unavailable."));
+        }
+        let entry = state.entry(view, index, clock).map_err(|e| storage(&e))?;
+        Ok(TimelineSelection {
+            coded_ordinal: entry.coded_ordinal,
+            coded_offset: entry.coded_offset,
+            output_ordinal: entry.output_ordinal,
+            showing_offset: entry.showing_offset,
+            time: entry.time,
+        })
+    }
+}

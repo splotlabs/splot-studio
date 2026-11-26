@@ -3,14 +3,18 @@
 
 //! Bounded, process-owned tables for native decoder identities.
 
+mod timeline;
+
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use splot_core::annexb::AnnexBObuCursor;
-use splot_core::stream_reader::TemporalUnitReader;
+use splot_core::stream_reader::{TemporalUnit, TemporalUnitReader, is_random_access_point};
 use splot_core::types::ObuType;
-use splot_decode::{CodedFrameEvent, DataProps, DecodeLimits, Decoder, ObuLocation, SendStatus};
+use splot_decode::{
+    CodedFrameEvent, DataProps, DecodeLimits, Decoder, ObuLocation, Picture, SendStatus,
+};
 use studio_domain::analysis::{AnalysisFailure, SourceDigest};
 use studio_domain::identity::{
     DecodeLayers, IDENTITY_SCHEMA, IdentityCompletion, IdentityKind, IdentityPage, IdentityRow,
@@ -26,13 +30,15 @@ const RECORD_BYTES: usize = 32;
 const MAX_INDEX_BYTES: u64 = 128 << 20;
 type Record = [u64; 4];
 
+use timeline::TimelineIndex;
+
 #[derive(Debug)]
-struct Table {
+struct Table<const WORDS: usize = 4> {
     file: File,
     count: u64,
 }
 
-impl Table {
+impl<const WORDS: usize> Table<WORDS> {
     fn new() -> io::Result<Self> {
         Ok(Self {
             file: tempfile::tempfile()?,
@@ -40,30 +46,54 @@ impl Table {
         })
     }
 
-    fn append(&mut self, record: Record) -> io::Result<()> {
-        let mut bytes = [0; RECORD_BYTES];
-        for (chunk, value) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(record) {
-            *chunk = value.to_le_bytes();
-        }
-        self.seek(self.count)?;
-        self.file.write_all(&bytes)?;
+    const BYTES: usize = WORDS * 8;
+
+    fn append(&mut self, record: [u64; WORDS]) -> io::Result<()> {
+        self.write(self.count, record)?;
         self.count += 1;
         Ok(())
     }
 
+    fn write(&mut self, row: u64, record: [u64; WORDS]) -> io::Result<()> {
+        let mut bytes = [0; 64];
+        for (chunk, value) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(record) {
+            *chunk = value.to_le_bytes();
+        }
+        self.seek(row)?;
+        self.file.write_all(&bytes[..Self::BYTES])
+    }
+
     fn seek(&mut self, row: u64) -> io::Result<()> {
-        self.file.seek(SeekFrom::Start(row * RECORD_BYTES as u64))?;
+        self.file.seek(SeekFrom::Start(row * Self::BYTES as u64))?;
         Ok(())
     }
 
-    fn read(&mut self) -> io::Result<Record> {
-        let mut bytes = [0; RECORD_BYTES];
-        self.file.read_exact(&mut bytes)?;
-        let mut words = [0; 4];
+    fn read(&mut self) -> io::Result<[u64; WORDS]> {
+        let mut bytes = [0; 64];
+        self.file.read_exact(&mut bytes[..Self::BYTES])?;
+        let mut words = [0; WORDS];
         for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<8>().0) {
             *word = u64::from_le_bytes(*chunk);
         }
         Ok(words)
+    }
+
+    fn at(&mut self, row: u64) -> io::Result<[u64; WORDS]> {
+        self.seek(row)?;
+        self.read()
+    }
+
+    fn lower_bound(&mut self, mut before: impl FnMut([u64; WORDS]) -> bool) -> io::Result<u64> {
+        let (mut lo, mut hi) = (0, self.count);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if before(self.at(mid)?) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        Ok(lo)
     }
 }
 
@@ -73,6 +103,7 @@ struct State {
     coded: Table,
     continuation: Table,
     output: Table,
+    timeline: TimelineIndex,
     fingerprint: SourceFingerprint,
     grain: GrainPolicy,
     digest: Option<SourceDigest>,
@@ -109,6 +140,12 @@ impl State {
         }
     }
 
+    fn timeline_result(&mut self, result: io::Result<()>) {
+        if let Err(error) = result {
+            self.write_error = Some(format!("Cannot index the frame timeline. {error}"));
+        }
+    }
+
     fn append(&mut self, kind: IdentityKind, record: Record) {
         if self.write_error.is_some() {
             return;
@@ -135,6 +172,7 @@ impl IdentityIndex {
             coded: Table::new().map_err(|error| storage(&error))?,
             continuation: Table::new().map_err(|error| storage(&error))?,
             output: Table::new().map_err(|error| storage(&error))?,
+            timeline: TimelineIndex::new().map_err(|error| storage(&error))?,
             fingerprint,
             grain,
             digest: None,
@@ -279,19 +317,15 @@ impl IdentityIndex {
                         warning.rule_id()
                     ));
                 }
+                if let Some(header) = reader.ivf_header() {
+                    self.state()
+                        .timeline
+                        .start_unit(u64::from(header.header_len));
+                }
                 decoder.drain();
                 return self.receive(&mut decoder, cancelled);
             };
-            let mut cursor = AnnexBObuCursor::new(unit.bytes, unit.offset);
-            while !self.stopped(cancelled) {
-                let Some(obu) = cursor.next_obu().map_err(|error| error.to_string())? else {
-                    break;
-                };
-                if obu.header.obu_type == ObuType::TemporalDelimiter {
-                    self.state()
-                        .append(IdentityKind::Temporal, [obu.offset.get(), 0, 0, 0]);
-                }
-            }
+            self.index_unit(&unit, cancelled)?;
             if self.stopped(cancelled) {
                 return Ok(());
             }
@@ -309,6 +343,41 @@ impl IdentityIndex {
         Ok(())
     }
 
+    fn index_unit(
+        &self,
+        unit: &TemporalUnit<'_>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), String> {
+        let mut cursor = AnnexBObuCursor::new(unit.bytes, unit.offset);
+        let mut prefix = 0;
+        let mut access = false;
+        self.state().timeline.start_unit(unit.offset.get());
+        while !self.stopped(cancelled) {
+            let Some(obu) = cursor.next_obu().map_err(|error| error.to_string())? else {
+                break;
+            };
+            let offset = obu.offset.get();
+            let kind = obu.header.obu_type;
+            let mut state = self.state();
+            if kind == ObuType::TemporalDelimiter {
+                state.append(IdentityKind::Temporal, [offset, 0, 0, 0]);
+                access = is_random_access_point(&unit.bytes[prefix..]);
+            }
+            let marked = access
+                && matches!(
+                    kind,
+                    ObuType::ClosedLoopKey | ObuType::OpenLoopKey | ObuType::RasFrame
+                );
+            access &= !marked;
+            let bytes = u64::from(obu.size);
+            let result = state.timeline.obu(offset, bytes, unit.pts, marked);
+            state.timeline_result(result);
+            prefix = usize::try_from(offset - unit.offset.get() + bytes)
+                .map_err(|_| "The OBU exceeds the supported input size.")?;
+        }
+        Ok(())
+    }
+
     fn receive(&self, decoder: &mut Decoder, cancelled: &dyn Fn() -> bool) -> Result<(), String> {
         while !self.stopped(cancelled) {
             let Some(picture) = decoder
@@ -318,11 +387,14 @@ impl IdentityIndex {
                 break;
             };
             let location = picture.provenance();
-            self.state().append(
+            let coded = file_offset(location.coded);
+            let showing = file_offset(location.display);
+            let mut state = self.state();
+            state.append(
                 IdentityKind::Output,
                 [
-                    file_offset(location.coded),
-                    file_offset(location.display),
+                    coded,
+                    showing,
                     file_offset(location.sequence_header),
                     pack_layers(
                         picture.extended_layer_id().get(),
@@ -331,6 +403,12 @@ impl IdentityIndex {
                     ),
                 ],
             );
+            if state.write_error.is_none() {
+                let result = state
+                    .timeline
+                    .output(coded, showing, picture_interval(&picture));
+                state.timeline_result(result);
+            }
         }
         Ok(())
     }
@@ -367,8 +445,27 @@ impl IdentityIndex {
             ),
             _ => return,
         };
-        self.state().append(kind, record);
+        let mut state = self.state();
+        state.append(kind, record);
+        if state.write_error.is_none() {
+            let result = match kind {
+                IdentityKind::Coded => state.timeline.frame(record[0]),
+                IdentityKind::Continuation => state.timeline.continuation(record[0], record[1]),
+                _ => return,
+            };
+            state.timeline_result(result);
+        }
     }
+}
+
+fn picture_interval(picture: &Picture) -> Option<(u64, u64)> {
+    let info = picture.content_interpretation()?.timing_info?;
+    if !info.equal_picture_interval || info.time_scale == 0 {
+        return None;
+    }
+    let ticks = u64::from(info.num_ticks_per_picture_minus_1?) + 1;
+    let num = u64::from(info.num_units_in_display_tick).checked_mul(ticks)?;
+    (num != 0).then_some((num, u64::from(info.time_scale)))
 }
 
 fn file_offset(location: ObuLocation) -> u64 {

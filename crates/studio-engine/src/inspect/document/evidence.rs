@@ -10,6 +10,7 @@ use studio_domain::analysis::{AnalysisFailure, Element, Framing, MAX_PAGE_ELEMEN
 use studio_domain::identity::{IdentityKind, IdentityPage, IdentitySummary};
 use studio_domain::preview::GrainPolicy;
 use studio_domain::syntax::{SyntaxEvent, SyntaxSummary};
+use studio_domain::timeline::{TimelinePage, TimelineSelection, TimelineTarget, TimelineView};
 use studio_domain::validation::{
     Finding, ValidationEvidence, ValidationSettings, ValidationSummary,
 };
@@ -198,6 +199,36 @@ impl Document {
         self.check()?;
         self.verify_identity(&mut page.summary)?;
         Ok(page)
+    }
+
+    pub(in crate::inspect) fn timeline(
+        &self,
+        request: u64,
+        view: TimelineView,
+        first: u64,
+        limit: u64,
+        buckets: u32,
+    ) -> Result<TimelinePage, Refusal> {
+        let index = self.identity_index(request)?;
+        let page = index.timeline(self.summary.ivf_header, view, first, limit, buckets);
+        self.check()?;
+        let mut summary = index.summary();
+        self.verify_identity(&mut summary)?;
+        let mut page = page?;
+        page.verified = summary.matches_structure && page.complete;
+        Ok(page)
+    }
+
+    pub(in crate::inspect) fn timeline_locate(
+        &self,
+        request: u64,
+        target: TimelineTarget,
+    ) -> Result<TimelineSelection, Refusal> {
+        let index = self.identity_index(request)?;
+        let selection = index.timeline_locate(self.summary.ivf_header, target);
+        self.check()?;
+        self.verify_identity(&mut index.summary())?;
+        selection
     }
 
     fn verify_identity(&self, summary: &mut IdentitySummary) -> Result<(), Refusal> {

@@ -22,4 +22,5 @@ pub mod preview;
 pub mod protocol;
 pub mod settings;
 pub mod syntax;
+pub mod timeline;
 pub mod validation;

@@ -35,6 +35,7 @@ use crate::preview::{
 };
 use crate::settings::OutputKind;
 use crate::syntax::{SyntaxEvent, SyntaxSummary};
+use crate::timeline::{TimelinePage, TimelineSelection, TimelineTarget, TimelineView};
 use crate::validation::{
     BatchOutcome, Finding, ReportFormat, ValidationSettings, ValidationSummary,
 };
@@ -438,6 +439,30 @@ pub enum Command {
         /// The maximum number of rows, in `1..=MAX_IDENTITY_PAGE`.
         count: u32,
     },
+    /// Inspect process only. Query exact or grouped timeline rows.
+    AnalysisTimeline {
+        /// The document generation.
+        document: u64,
+        /// The active identity scan.
+        scan: u64,
+        /// The timeline order and byte scope.
+        view: TimelineView,
+        /// Index of the first requested row.
+        first: u64,
+        /// Number of requested rows. The response clamps the range to available rows.
+        limit: u64,
+        /// Maximum number of displayed buckets.
+        buckets: u32,
+    },
+    /// Inspect process only. Resolve exact timeline identities.
+    AnalysisTimelineLocate {
+        /// The document generation.
+        document: u64,
+        /// The active identity scan.
+        scan: u64,
+        /// The row or time to resolve.
+        target: TimelineTarget,
+    },
     /// Inspect process only. Checks validation options before starting a batch.
     BatchCheckSettings {
         /// The options to check.
@@ -785,6 +810,24 @@ pub enum Event {
         scan: u64,
         /// The requested records and their coverage.
         page: Box<IdentityPage>,
+    },
+    /// Answers [`Command::AnalysisTimeline`].
+    AnalysisTimeline {
+        /// The document generation.
+        document: u64,
+        /// The active identity scan.
+        scan: u64,
+        /// Timeline coverage and entries.
+        page: Box<TimelinePage>,
+    },
+    /// Answers [`Command::AnalysisTimelineLocate`].
+    AnalysisTimelineLocated {
+        /// The document generation.
+        document: u64,
+        /// The active identity scan.
+        scan: u64,
+        /// Linked identities and clock evidence.
+        selection: Box<TimelineSelection>,
     },
     /// Answers [`Command::BatchCheckSettings`] when the options are valid.
     BatchSettingsChecked,
