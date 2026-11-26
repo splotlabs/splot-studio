@@ -39,6 +39,9 @@ pub const MAX_UNIT_BYTES: usize = 64 << 20;
 /// about 24 MiB of index.
 pub const MAX_UNITS: usize = 1 << 20;
 
+/// Maximum read between cancellation checks while feeding a temporal unit.
+const READ_CHUNK_BYTES: usize = 1 << 20;
+
 /// One temporal unit in the file.
 #[derive(Debug, Clone, Copy)]
 struct Unit {
@@ -463,13 +466,15 @@ impl ResultPictures {
                 session.drained = true;
                 continue;
             };
+            context.check()?;
             self.buffer.resize(unit.len, 0);
             self.file
                 .seek(SeekFrom::Start(unit.offset))
-                .and_then(|_| self.file.read_exact(&mut self.buffer))
-                .map_err(|e| unreadable(format!("Cannot read the preview file. {e}")))?;
+                .map_err(|e| unreadable(format!("Cannot seek the preview file. {e}")))?;
+            read_unit(&mut self.file, &mut self.buffer, context)?;
             let token = session.next_send as u64;
             let props = DataProps::default().with_user_data(token);
+            context.check()?;
             match session
                 .decoder
                 .send_data(&self.buffer, props)
@@ -481,6 +486,16 @@ impl ResultPictures {
             }
         }
     }
+}
+
+fn read_unit(reader: &mut impl Read, buffer: &mut [u8], context: &Context<'_>) -> Outcome<()> {
+    for chunk in buffer.chunks_mut(READ_CHUNK_BYTES) {
+        context.check()?;
+        reader
+            .read_exact(chunk)
+            .map_err(|e| unreadable(format!("Cannot read the preview file. {e}")))?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -733,6 +748,44 @@ mod tests {
             }
         }
         (sink.finish().unwrap_or_default(), keys)
+    }
+
+    #[test]
+    fn a_superseded_request_stops_reading_a_temporal_unit() {
+        use super::super::{Request, Shared};
+
+        struct CancellingRead<'a> {
+            shared: &'a Shared,
+            reads: usize,
+        }
+
+        impl Read for CancellingRead<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.reads += 1;
+                self.shared.submit(2, Request::Stop);
+                buffer.fill(0);
+                Ok(buffer.len())
+            }
+        }
+
+        let shared = Shared::default();
+        let mut reader = CancellingRead {
+            shared: &shared,
+            reads: 0,
+        };
+        let context = Context {
+            shared: &shared,
+            serial: 0,
+            request_id: 1,
+            generation: 1,
+            last_progress: std::cell::Cell::default(),
+        };
+        let mut buffer = vec![0; READ_CHUNK_BYTES * 2];
+        assert!(matches!(
+            read_unit(&mut reader, &mut buffer, &context),
+            Err(Stopped::Superseded)
+        ));
+        assert_eq!(reader.reads, 1);
     }
 
     #[test]
