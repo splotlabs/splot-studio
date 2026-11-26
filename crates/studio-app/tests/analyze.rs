@@ -1000,6 +1000,26 @@ fn timeline_controls(rig: &mut Rig, scratch: &Scratch) {
         timeline_snapshot(rig, scheme, scale, file_name);
     }
 
+    rig.window.global::<TimelineUi>().set_show_table(true);
+    rig.tab_to(Key::Space, |input| {
+        matches!(
+            input,
+            Input::TimelineSelect(studio_domain::timeline::TimelineTarget::Coded { .. })
+        )
+    });
+    rig.inputs
+        .borrow_mut()
+        .retain(|input| matches!(input, Input::TimelineSelect(_)));
+    rig.idle("an exact row selected from the table");
+    assert!(rig.window.global::<TimelineUi>().get_selected());
+    timeline_snapshot(
+        rig,
+        ColorScheme::Light,
+        1.0,
+        "timeline-table-keyboard-light-1x.ppm",
+    );
+    rig.window.global::<TimelineUi>().set_show_table(false);
+
     rig.window.global::<TimelineUi>().invoke_zoom(1);
     rig.idle("the visible zoom range");
     assert_eq!(rig.window.global::<TimelineUi>().get_bars().row_count(), 2);

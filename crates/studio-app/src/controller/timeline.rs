@@ -92,3 +92,35 @@ fn write_report(path: &Path, contents: &[u8]) -> io::Result<()> {
     let cleanup = fs::remove_file(&stage);
     published.and(cleanup)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn report_save_refuses_to_replace_a_source() {
+        let folder =
+            std::env::temp_dir().join(format!("splot-timeline-save-{}", std::process::id()));
+        fs::create_dir(&folder).unwrap_or_else(|error| unreachable!("{error}"));
+        let source = folder.join("source.ivf");
+        fs::write(&source, b"source").unwrap_or_else(|error| unreachable!("{error}"));
+        let report = folder.join("report.txt");
+        let refusal = write_report(&source, b"statistics").err();
+        let actual_source = fs::read(&source);
+        let saved = write_report(&report, b"statistics");
+        let actual_report = fs::read(&report);
+        let kept_files = fs::read_dir(&folder).map(Iterator::count);
+        fs::remove_dir_all(folder).unwrap_or_else(|error| unreachable!("{error}"));
+        assert_eq!(
+            refusal.map(|error| error.kind()),
+            Some(io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(actual_source.ok().as_deref(), Some(b"source".as_slice()));
+        assert!(saved.is_ok());
+        assert_eq!(
+            actual_report.ok().as_deref(),
+            Some(b"statistics".as_slice())
+        );
+        assert_eq!(kept_files.ok(), Some(2));
+    }
+}

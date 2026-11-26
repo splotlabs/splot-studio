@@ -22,6 +22,7 @@ export struct TimelineBar {
 export global TimelineUi {
     in property <bool> available;
     in-out property <bool> expanded;
+    in-out property <bool> show-table;
     in property <bool> built;
     in property <bool> can-build;
     in property <bool> can-cancel;
@@ -146,7 +147,6 @@ component TimelineGraph inherits KeyboardFocus {
 
 export component TimelinePane inherits VerticalLayout {
     callback copy(string);
-    property <bool> show-table;
     spacing: Tokens.space-2;
 
     HorizontalLayout {
@@ -221,10 +221,10 @@ export component TimelinePane inherits VerticalLayout {
                     clicked => { TimelineUi.zoom(-1); }
                 }
                 LinkButton {
-                    text: root.show-table ? "Hide Table" : "Show Table";
+                    text: TimelineUi.show-table ? "Hide Table" : "Show Table";
                     accessible-expandable: true;
-                    accessible-expanded: root.show-table;
-                    clicked => { root.show-table = !root.show-table; }
+                    accessible-expanded: TimelineUi.show-table;
+                    clicked => { TimelineUi.show-table = !TimelineUi.show-table; }
                 }
             }
 
@@ -265,7 +265,7 @@ export component TimelinePane inherits VerticalLayout {
                 text: TimelineUi.summary;
             }
 
-            if root.show-table && TimelineUi.bars.length > 0: ScrollView {
+            if TimelineUi.show-table && TimelineUi.bars.length > 0: ScrollView {
                 min-height: 114px;
                 max-height: 114px;
                 accessible-role: list;
