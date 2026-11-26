@@ -6,7 +6,7 @@
 use slint::ComponentHandle;
 use studio_domain::blocks::{
     BlockCoverage, BlockData, BlockMotion, BlockPrediction, BlockRecord, BlockRect, BlockTree,
-    BlockVector, IntraPredictor,
+    BlockVector, IntraAngleDelta, IntraPredictor,
 };
 
 use super::{model, references::output_text};
@@ -71,7 +71,7 @@ pub(super) fn render_document(view: &Blocks<'_>, document: Option<&Document>) {
     let context = document.zip(evidence).and_then(|(doc, evidence)| {
         evidence.frame.map(|frame| {
             format!(
-                "Coded byte {}. Sequence byte {}. Layers X{}/M{}/T{}. Replay through byte {}. {} Q shows the block qindex before plane adjustments. Transform details, reconstruction stages and entropy evidence are unavailable.",
+                "Coded byte {}. Sequence byte {}. Layers X{}/M{}/T{}. Replay prefix totals {} bytes. {} Q shows the block qindex before plane adjustments. Transform details, reconstruction stages and entropy evidence are unavailable.",
                 frame.coded_offset,
                 frame.sequence_offset,
                 frame.layers.extended,
@@ -84,7 +84,15 @@ pub(super) fn render_document(view: &Blocks<'_>, document: Option<&Document>) {
     });
     view.set_context(context.unwrap_or_default().into());
     view.set_rows(model(evidence.map_or_default(|evidence| {
-        evidence.records.iter().map(row).collect()
+        let is_partition =
+            |record: &&BlockRecord| matches!(record.data, BlockData::Partition { .. });
+        evidence
+            .records
+            .iter()
+            .filter(|record| !is_partition(record))
+            .chain(evidence.records.iter().filter(is_partition))
+            .map(row)
+            .collect()
     })));
 }
 
@@ -166,12 +174,25 @@ fn intra_text(predictor: &IntraPredictor) -> String {
     match predictor {
         IntraPredictor::Mode {
             name,
-            reference_line: Some(line),
+            reference_line,
+            angle_delta,
             ..
-        } if *line > 0 => {
-            format!("{name}, line {line}")
+        } => {
+            let mut text = name.clone();
+            if let Some(line) = reference_line.filter(|line| *line > 0) {
+                text.push_str(&format!(", line {line}"));
+            }
+            let delta = match angle_delta {
+                Some(IntraAngleDelta::DecodedLuma(delta)) => format!("Y mode delta {delta}"),
+                Some(IntraAngleDelta::ChromaFromLuma(delta)) => format!("Y supplies delta {delta}"),
+                Some(IntraAngleDelta::ChromaDerived(delta)) => format!("Derived delta {delta}"),
+                Some(IntraAngleDelta::DpcmZero) => "DPCM delta 0".to_owned(),
+                None => return text,
+            };
+            text.push('\n');
+            text.push_str(&delta);
+            text
         }
-        IntraPredictor::Mode { name, .. } => name.clone(),
         IntraPredictor::Palette { colors } => format!("Palette ({colors} colors)"),
         IntraPredictor::Dip { mode, .. } => format!("DIP {mode}"),
         IntraPredictor::ChromaFromLuma { mode, .. } => format!("CfL {mode}"),

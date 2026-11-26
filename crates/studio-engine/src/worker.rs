@@ -200,11 +200,9 @@ fn serve<'scope>(
             Command::StartChecked { job: spec, live } => {
                 start(scope, outbox, id, spec, live, true, &mut job);
             }
-            Command::ConfirmPolicy => {
-                outbox.confirm(id);
-            }
+            Command::ConfirmPolicy => outbox.confirm(id),
             Command::ExportPrepare { export } => {
-                export::start(scope, outbox, id, *export, &mut job);
+                export::start(scope, outbox, id, *export, &mut job)
             }
             Command::ExportProceed => export::proceed(outbox, id),
             Command::ExportPublish => export::permit(outbox, id),

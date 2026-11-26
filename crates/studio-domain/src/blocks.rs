@@ -219,7 +219,10 @@ impl BlockEvidence {
                     && frame.coded_offset < self.replayed_through
             })
             && match (self.coverage, self.frame) {
-                (BlockCoverage::Complete | BlockCoverage::Truncated, None)
+                (
+                    BlockCoverage::Complete | BlockCoverage::Truncated | BlockCoverage::Unavailable,
+                    None,
+                )
                 | (BlockCoverage::FrameNotFound, Some(_)) => false,
                 (BlockCoverage::FrameNotFound | BlockCoverage::Unavailable, _) | (_, None) => {
                     self.records.is_empty()

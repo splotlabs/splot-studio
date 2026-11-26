@@ -72,8 +72,8 @@ pub enum IntraPredictor {
     Mode {
         /// The native mode name.
         name: String,
-        /// Signaled angle delta in steps of three degrees, if available.
-        angle_delta: Option<i8>,
+        /// Directional angle delta and its source, when available.
+        angle_delta: Option<IntraAngleDelta>,
         /// Luma prediction angle in the block plan, in degrees.
         angle_degrees: Option<u16>,
         /// Selected luma reference line.
@@ -104,6 +104,20 @@ pub enum IntraPredictor {
         /// Explicit U and V alpha parameters, if present.
         alpha: Option<[i8; 2]>,
     },
+}
+
+/// Source and value of an intra angle delta in steps of three degrees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", content = "delta", rename_all = "snake_case")]
+pub enum IntraAngleDelta {
+    /// Value from the decoded joint luma mode.
+    DecodedLuma(i8),
+    /// The chroma mode uses the luma angle delta.
+    ChromaFromLuma(i8),
+    /// The decoder derives the chroma angle delta.
+    ChromaDerived(i8),
+    /// DPCM uses a zero delta.
+    DpcmZero,
 }
 
 impl IntraPredictor {

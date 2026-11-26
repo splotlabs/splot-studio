@@ -1510,6 +1510,54 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok((3, 1, Request::Close))));
     }
 
+    #[test]
+    fn a_failed_cancel_reply_stops_block_capture() {
+        use std::io::{self, Write};
+        use std::sync::Arc;
+
+        struct ClosedPipe;
+
+        impl Write for ClosedPipe {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let shared = Shared {
+            out: Mutex::new(Out {
+                writer: ClosedPipe,
+                error: None,
+            }),
+            ledger: Mutex::new(Ledger::default()),
+            stopped: Arc::default(),
+        };
+        let operation = Pending::Blocks {
+            document: 1,
+            blocks: 2,
+        };
+        shared.ledger().queue(operation);
+        let (tx, _) = mpsc::sync_channel(1);
+        route(
+            &shared,
+            &tx,
+            3,
+            Command::AnalysisCancelBlocks {
+                document: 1,
+                blocks: 2,
+            },
+        );
+        assert!(shared.cancelled(operation));
+        assert!(shared.stopped());
+        assert!(matches!(
+            shared.out().error.as_ref(),
+            Some(super::ProtocolError::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe
+        ));
+    }
+
     /// An open the full queue refused is not recorded: its id can be sent
     /// again and it cannot be cancelled.
     #[test]

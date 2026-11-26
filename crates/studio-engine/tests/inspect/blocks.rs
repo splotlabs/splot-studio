@@ -6,8 +6,8 @@ use std::fs;
 use studio_domain::analysis::AnalysisFailure;
 use studio_domain::blocks::{
     BlockCoverage, BlockData, BlockEvidence, BlockEvidenceKind, BlockId, BlockMotion,
-    BlockPrediction, BlockQuery, BlockRect, BlockReference, BlockVector, IntraPredictor,
-    MAX_BLOCK_BYTES, MAX_BLOCK_RECORDS,
+    BlockPrediction, BlockQuery, BlockRect, BlockReference, BlockVector, IntraAngleDelta,
+    IntraPredictor, MAX_BLOCK_BYTES, MAX_BLOCK_RECORDS,
 };
 use studio_domain::layers::LayerDecodeSelection;
 use studio_domain::protocol::{Command, Event};
@@ -124,7 +124,7 @@ fn block_query_preserves_padded_edge_and_chroma_in_ten_bit_input() -> TestResult
             && record.visible == Some(BlockRect { x: 32, y: 64, width: 16, height: 3 })
             && matches!(&record.data, BlockData::Coding {
                 prediction: Some(BlockPrediction::Intra {
-                    luma: Some(IntraPredictor::Mode { name, reference_line: Some(1), angle_delta: Some(2), .. }),
+                    luma: Some(IntraPredictor::Mode { name, reference_line: Some(1), angle_delta: Some(IntraAngleDelta::DecodedLuma(2)), .. }),
                     ..
                 }),
                 qindex: 168,

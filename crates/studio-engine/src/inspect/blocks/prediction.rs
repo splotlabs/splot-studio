@@ -4,14 +4,14 @@
 use std::fmt::Debug;
 
 use splot_decode::block_evidence::{
-    BlockChromaFromLuma, BlockChromaPrediction, BlockCompoundBlend, BlockInterMode,
-    BlockLumaPrediction, BlockMotion as NativeMotion, BlockMotionPrecision, BlockMotionRefinement,
-    BlockPrediction as NativePrediction, BlockReference as NativeReference, CompoundMode,
-    InterMode, MotionVector,
+    BlockChromaAngleDelta, BlockChromaFromLuma, BlockChromaPrediction, BlockCompoundBlend,
+    BlockInterMode, BlockLumaPrediction, BlockMotion as NativeMotion, BlockMotionPrecision,
+    BlockMotionRefinement, BlockPrediction as NativePrediction, BlockReference as NativeReference,
+    CompoundMode, InterMode, MotionVector,
 };
 use studio_domain::blocks::{
     BlockBlend, BlockMotion, BlockPrediction, BlockReference, BlockRefinement, BlockVector,
-    IntraPredictor,
+    IntraAngleDelta, IntraPredictor,
 };
 
 use super::{Refusal, unsupported, wire_rect};
@@ -51,7 +51,13 @@ fn luma(prediction: BlockLumaPrediction) -> Option<IntraPredictor> {
             ..
         } => IntraPredictor::Mode {
             name: format!("{mode:?}"),
-            angle_delta: direction.map(|direction| direction.angle_delta),
+            angle_delta: direction.map(|direction| {
+                if dpcm.is_some() {
+                    IntraAngleDelta::DpcmZero
+                } else {
+                    IntraAngleDelta::DecodedLuma(direction.angle_delta)
+                }
+            }),
             angle_degrees: direction.map(|direction| direction.angle_degrees),
             reference_line: direction.map(|direction| direction.reference_line),
             above_reference_line: direction.map(|direction| direction.above_reference_line),
@@ -77,7 +83,7 @@ fn chroma(prediction: BlockChromaPrediction) -> Option<IntraPredictor> {
             ..
         } => IntraPredictor::Mode {
             name: format!("{mode:?}"),
-            angle_delta,
+            angle_delta: angle_delta.and_then(chroma_delta),
             angle_degrees: None,
             reference_line: None,
             above_reference_line: None,
@@ -100,6 +106,14 @@ fn chroma(prediction: BlockChromaPrediction) -> Option<IntraPredictor> {
                 alpha,
             }
         }
+        _ => return None,
+    })
+}
+
+fn chroma_delta(delta: BlockChromaAngleDelta) -> Option<IntraAngleDelta> {
+    Some(match delta {
+        BlockChromaAngleDelta::FromLuma(delta) => IntraAngleDelta::ChromaFromLuma(delta),
+        BlockChromaAngleDelta::Derived(delta) => IntraAngleDelta::ChromaDerived(delta),
         _ => return None,
     })
 }

@@ -34,11 +34,12 @@ pub(super) fn replay(
     query: BlockQuery,
     cancellation: Cancellation,
 ) -> Result<BlockEvidence, Refusal> {
-    let selection = operating_point_selection(query.selection).map_err(decode_failed)?;
+    let selection =
+        operating_point_selection(query.selection).map_err(|error| decode_failed(&error))?;
     let settings = preview_decoder_settings(1, DecodeLimits::DEFAULT, GrainPolicy::Skip)
         .with_operating_point_selection(selection);
     let region = query.region.map(native_rect).transpose()?;
-    let capture_cancellation = cancellation.clone();
+    let reader_cancellation = cancellation.clone();
     let request = BlockEvidenceRequest::new(
         move |location| absolute(location) == Some(query.coded_offset),
         region,
@@ -50,16 +51,22 @@ pub(super) fn replay(
         BlockEvidenceKind::Partitions => NativeKind::Partitions,
         BlockEvidenceKind::Coding => NativeKind::Blocks,
     })
-    .with_cancellation(move || capture_cancellation.is_set());
-    let (mut decoder, capture) =
-        Decoder::new_with_block_evidence(settings, request).map_err(decode_failed)?;
+    .with_cancellation(move || cancellation.is_set());
+    let (mut decoder, capture) = Decoder::new_with_block_evidence(settings, request)
+        .map_err(|error| decode_failed(&error))?;
     let mut progress = ReplayProgress {
         target: query.coded_offset,
         limit,
         partial,
         replayed_through: 0,
     };
-    let outcome = feed(&mut decoder, &capture, input, &cancellation, &mut progress);
+    let outcome = feed(
+        &mut decoder,
+        &capture,
+        input,
+        &reader_cancellation,
+        &mut progress,
+    );
     drop(decoder);
     let report = capture.take().ok_or_else(|| {
         Refusal::new(
@@ -105,7 +112,7 @@ pub(super) fn replay(
         .transpose()?;
     let records = report
         .records
-        .into_iter()
+        .iter()
         .map(record)
         .collect::<Result<Vec<_>, _>>()?;
     let evidence = BlockEvidence {
@@ -144,7 +151,7 @@ fn feed(
         let unit = match reader.next_temporal_unit() {
             Ok(unit) => unit,
             Err(_) if cancelled() => break,
-            Err(error) => return Err(read_failed(error)),
+            Err(error) => return Err(read_failed(&error)),
         };
         if cancelled() {
             break;
@@ -166,7 +173,7 @@ fn feed(
         }
         if decoder
             .send_data(unit.bytes, DataProps::default().with_user_data(base))
-            .map_err(decode_failed)?
+            .map_err(|error| decode_failed(&error))?
             != SendStatus::Accepted
         {
             return Err(unsupported("The decoder did not accept the replay unit."));
@@ -174,7 +181,10 @@ fn feed(
         progress.replayed_through = end;
         while !capture.is_finished()
             && !cancelled()
-            && decoder.wait_picture().map_err(decode_failed)?.is_some()
+            && decoder
+                .wait_picture()
+                .map_err(|error| decode_failed(&error))?
+                .is_some()
         {}
         if progress.target < end {
             break;
@@ -184,7 +194,10 @@ fn feed(
         decoder.drain();
         while !capture.is_finished()
             && !cancelled()
-            && decoder.get_picture().map_err(decode_failed)?.is_some()
+            && decoder
+                .get_picture()
+                .map_err(|error| decode_failed(&error))?
+                .is_some()
         {}
     }
     Ok(())
@@ -232,7 +245,7 @@ fn block_id(id: BlockEvidenceId) -> Result<BlockId, Refusal> {
     })
 }
 
-fn record(record: BlockEvidenceRecord) -> Result<BlockRecord, Refusal> {
+fn record(record: &BlockEvidenceRecord) -> Result<BlockRecord, Refusal> {
     let data = match record.data {
         BlockEvidenceData::Partition(split) => BlockData::Partition {
             split: format!("{split:?}"),
@@ -268,7 +281,7 @@ fn unsupported(message: impl Into<String>) -> Refusal {
     Refusal::new(AnalysisFailure::Unsupported, message)
 }
 
-fn read_failed(error: ReaderError) -> Refusal {
+fn read_failed(error: &ReaderError) -> Refusal {
     let code = match error {
         ReaderError::Io(_) => AnalysisFailure::Io,
         ReaderError::UnitTooLarge { .. } => AnalysisFailure::LimitReached,
@@ -277,7 +290,7 @@ fn read_failed(error: ReaderError) -> Refusal {
     Refusal::new(code, format!("Cannot read the replay unit. {error}"))
 }
 
-fn decode_failed(error: DecodeError) -> Refusal {
+fn decode_failed(error: &DecodeError) -> Refusal {
     let code = match error {
         DecodeError::Limit { .. } => AnalysisFailure::LimitReached,
         DecodeError::Pool { .. } | DecodeError::Input { .. } | DecodeError::State { .. } => {
@@ -315,7 +328,7 @@ mod tests {
     #[test]
     fn cancellation_during_read_stops_before_decoder_submission() -> Result<(), String> {
         let source =
-            include_bytes!("../../../tests/inspect/fixtures/syn-2tile-zone1-edge-128x64-q192.ivf");
+            include_bytes!("../../tests/inspect/fixtures/syn-2tile-zone1-edge-128x64-q192.ivf");
         let requested = Arc::new(AtomicBool::new(false));
         let input = Interrupt {
             source,
