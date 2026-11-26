@@ -449,7 +449,9 @@ impl Analysis {
                     return;
                 }
                 let offset = match target {
-                    TimelineTarget::Coded { .. } => selection.coded_offset,
+                    TimelineTarget::Coded { .. } | TimelineTarget::CodedOffset { .. } => {
+                        selection.coded_offset
+                    }
                     _ => selection.showing_offset.unwrap_or(selection.coded_offset),
                 };
                 timeline.next_selection = Some((*selection, offset));
@@ -470,6 +472,7 @@ impl Analysis {
     fn timeline_target_matches(target: TimelineTarget, selection: &TimelineSelection) -> bool {
         match target {
             TimelineTarget::Coded { index } => selection.coded_ordinal == index,
+            TimelineTarget::CodedOffset { offset } => selection.coded_offset == offset,
             TimelineTarget::Output { index } => selection.output_ordinal == Some(index),
             TimelineTarget::Time { .. } => {
                 selection.time.is_some() && selection.output_ordinal.is_some()

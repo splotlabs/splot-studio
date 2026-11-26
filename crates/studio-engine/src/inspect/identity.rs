@@ -808,6 +808,20 @@ mod tests {
             (selected.coded_ordinal, selected.coded_offset, selected.time),
             (2, 90, None)
         );
+        let by_offset = index
+            .timeline_locate(header, TimelineTarget::CodedOffset { offset: 90 })
+            .map_err(refusal)?;
+        assert_eq!(by_offset, selected);
+        let hidden = index
+            .timeline_locate(header, TimelineTarget::CodedOffset { offset: 85 })
+            .map_err(refusal)?;
+        assert_eq!(hidden.coded_ordinal, 1);
+        assert_eq!(hidden.output_ordinal, None);
+        assert!(
+            index
+                .timeline_locate(header, TimelineTarget::CodedOffset { offset: 86 })
+                .is_err()
+        );
         assert!(
             index
                 .timeline_locate(

@@ -313,7 +313,10 @@ fn unpack_quantizer(packed: u64) -> TimelineQuantizer {
 }
 
 fn missing() -> io::Error {
-    io::Error::other("A decoder identity has no matching source record.")
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        "A decoder identity has no matching source record.",
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -542,6 +545,16 @@ impl IdentityIndex {
         let (view, index) = match target {
             TimelineTarget::Output { index } => (TimelineView::Output, index),
             TimelineTarget::Coded { index } => (TimelineView::Coded, index),
+            TimelineTarget::CodedOffset { offset } => {
+                let index = state.timeline.coded_ordinal(offset).map_err(|error| {
+                    if error.kind() == io::ErrorKind::NotFound {
+                        invalid("No indexed coded frame starts at this offset.")
+                    } else {
+                        storage(&error)
+                    }
+                })?;
+                (TimelineView::Coded, index)
+            }
             TimelineTarget::Time { time } => {
                 let clock = clock
                     .filter(|_| {
