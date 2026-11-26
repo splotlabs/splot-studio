@@ -512,7 +512,7 @@ struct Scan {
 fn work<W: Write>(queue: &Receiver<Queued>, shared: &Shared<W>) {
     let mut documents: Vec<(u64, Document)> = Vec::new();
     let mut batch = batch::Archive::default();
-    let mut scans = VecDeque::new();
+    let mut scans = VecDeque::<Scan>::new();
     let mut burst = 0;
     loop {
         let request = if scans.is_empty() {
