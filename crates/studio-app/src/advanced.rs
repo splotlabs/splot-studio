@@ -147,6 +147,10 @@ pub(crate) fn reset(
         Reset::Field(key) => {
             next.values.remove(key);
         }
+        Reset::Group("Unavailable") => {
+            next.values
+                .retain(|key, _| catalog.iter().any(|d| d.key == *key));
+        }
         Reset::Group(group) => {
             for descriptor in catalog.iter().filter(|d| catalog::group(d) == group) {
                 next.values.remove(&descriptor.key);
