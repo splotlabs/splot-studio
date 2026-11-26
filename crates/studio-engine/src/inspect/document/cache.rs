@@ -4,8 +4,17 @@
 //! Complete structural indexes in the app-owned data directory.
 //! Source identity requires a full content digest. The cache stores no decoded evidence.
 
-use std::fs::{self, File, FileTimes, Metadata, OpenOptions, TryLockError};
+#[cfg(unix)]
+use std::ffi::OsStr;
+#[cfg(any(not(unix), test))]
+use std::fs;
+#[cfg(not(unix))]
+use std::fs::Metadata;
+#[cfg(any(not(unix), test))]
+use std::fs::OpenOptions;
+use std::fs::{File, FileTimes, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,7 +24,11 @@ use studio_domain::analysis::{
 };
 
 use crate::artifact::hex;
+#[cfg(not(unix))]
 use crate::output::FileId;
+
+#[cfg(unix)]
+mod directory;
 
 const DIRECTORY: &str = "analysis-index";
 const ENTRY_PREFIX: &str = "index-";
@@ -35,6 +48,9 @@ const SHA_BYTES: usize = 32;
 #[derive(Debug)]
 pub(super) struct Cache {
     root: PathBuf,
+    #[cfg(unix)]
+    directory: directory::Directory,
+    #[cfg(not(unix))]
     root_id: FileId,
     compatibility: [u8; SHA_BYTES],
     max_bytes: u64,
@@ -48,7 +64,7 @@ struct Entry {
 }
 
 pub(super) struct EntryReader {
-    file: Option<File>,
+    file: Option<FileLease>,
     payload_end: u64,
     left: u64,
     hash: Sha256,
@@ -60,7 +76,50 @@ pub(super) struct EntryReader {
 pub(super) enum VerifiedEntry {
     Reading,
     Invalid,
-    Complete(File, Box<DocumentSummary>, u64),
+    Complete(FileLease, Box<DocumentSummary>, u64),
+}
+
+/// Holds a lease until its owner releases the file, even if a fork inherited its handle.
+#[derive(Debug)]
+pub(super) struct FileLease {
+    file: File,
+    leased: bool,
+}
+
+impl FileLease {
+    pub(super) const fn unleased(file: File) -> Self {
+        Self {
+            file,
+            leased: false,
+        }
+    }
+
+    const fn leased(file: File) -> Self {
+        Self { file, leased: true }
+    }
+}
+
+impl Deref for FileLease {
+    type Target = File;
+
+    fn deref(&self) -> &Self::Target {
+        &self.file
+    }
+}
+
+impl DerefMut for FileLease {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.file
+    }
+}
+
+impl Drop for FileLease {
+    fn drop(&mut self) {
+        // A child may still have a copy of this descriptor before exec.
+        if self.leased {
+            let _ = self.file.unlock();
+        }
+    }
 }
 
 impl Cache {
@@ -77,22 +136,22 @@ impl Cache {
     /// Use the app data directory selected at startup.
     pub(super) fn new(app_data: &Path) -> io::Result<Self> {
         let root = app_data.canonicalize()?.join(DIRECTORY);
-        let builder = fs::DirBuilder::new();
         #[cfg(unix)]
-        let builder = {
-            use std::os::unix::fs::DirBuilderExt;
-            let mut builder = builder;
-            builder.mode(0o700);
-            builder
+        let directory = directory::Directory::create(&root)?;
+        #[cfg(not(unix))]
+        let root_id = {
+            match fs::create_dir(&root) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+            directory_id(&root)?
         };
-        match builder.create(&root) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
-        }
-        let root_id = directory_id(&root)?;
         Ok(Self {
             root,
+            #[cfg(unix)]
+            directory,
+            #[cfg(not(unix))]
             root_id,
             compatibility: compatibility(
                 SCHEMA,
@@ -126,17 +185,15 @@ impl Cache {
     ) -> io::Result<Option<EntryReader>> {
         let _lock = self.lock()?;
         let path = self.path(framing, &digest)?;
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e),
+        let Some(file) = self.open_regular(&path)? else {
+            return Ok(None);
         };
-        if !owned_regular(&metadata) || metadata.len() > self.max_bytes {
+        if file.metadata()?.len() > self.max_bytes {
             return Ok(None);
         }
-        let mut file = File::open(&path)?;
         self.check_file(&path, &file)?;
         file.try_lock_shared().map_err(io::Error::from)?;
+        let mut file = FileLease::leased(file);
         let Some(payload_end) = file.metadata()?.len().checked_sub(SHA_BYTES as u64) else {
             return Ok(None);
         };
@@ -167,7 +224,7 @@ impl Cache {
         framing: Framing,
         digest: &SourceDigest,
         cancelled: &dyn Fn() -> bool,
-    ) -> io::Result<Option<(File, DocumentSummary, u64)>> {
+    ) -> io::Result<Option<(FileLease, DocumentSummary, u64)>> {
         let Some(mut entry) = self.open_entry(framing, digest.clone())? else {
             return Ok(None);
         };
@@ -214,13 +271,7 @@ impl Cache {
         self.evict_for(&path, required, staging_bytes)?;
 
         self.check_root()?;
-        let mut temp = tempfile::Builder::new()
-            .prefix(STAGING_PREFIX)
-            .rand_bytes(RANDOM_LEN)
-            .tempfile_in(&self.root)?;
-        // The default temporary-file cleanup uses its original pathname. Check
-        // identity first so a replaced cache directory does not redirect cleanup.
-        temp.disable_cleanup(true);
+        let mut temp = self.stage()?;
         let write_entry = |temp: &mut tempfile::NamedTempFile| {
             let mut writer = CheckedWriter {
                 file: temp.as_file_mut(),
@@ -241,17 +292,56 @@ impl Cache {
             temp.write_all(&checksum)?;
             temp.as_file().sync_all()?;
             check_cancel(cancelled)?;
+            self.check_root()?;
             self.check_file(temp.path(), temp.as_file())
         };
         if let Err(error) = write_entry(&mut temp) {
             let _ = self.remove_file(temp.path(), temp.as_file());
             return Err(error);
         }
-        if let Err(error) = temp.persist_noclobber(path) {
-            let _ = self.remove_file(error.file.path(), error.file.as_file());
-            return Err(error.error);
+        self.publish(temp, &path)
+    }
+
+    fn stage(&self) -> io::Result<tempfile::NamedTempFile> {
+        let mut builder = tempfile::Builder::new();
+        builder
+            .prefix(STAGING_PREFIX)
+            .rand_bytes(RANDOM_LEN)
+            .disable_cleanup(true);
+        #[cfg(unix)]
+        {
+            builder.make_in(&self.root, |path| {
+                self.directory.create_file(entry_name_of(path)?)
+            })
         }
-        Ok(())
+        #[cfg(not(unix))]
+        {
+            builder.tempfile_in(&self.root)
+        }
+    }
+
+    fn publish(&self, temp: tempfile::NamedTempFile, path: &Path) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            let outcome = self.directory.publish(
+                entry_name_of(temp.path())?,
+                entry_name_of(path)?,
+                temp.as_file(),
+            );
+            if outcome.is_err() {
+                let _ = self.remove_file(temp.path(), temp.as_file());
+            }
+            drop(temp);
+            outcome
+        }
+        #[cfg(not(unix))]
+        {
+            if let Err(error) = temp.persist_noclobber(path) {
+                let _ = self.remove_file(error.file.path(), error.file.as_file());
+                return Err(error.error);
+            }
+            Ok(())
+        }
     }
 
     fn evict_for(&self, path: &Path, required: u64, staging_bytes: u64) -> io::Result<()> {
@@ -312,6 +402,12 @@ impl Cache {
         Ok(())
     }
 
+    #[cfg(unix)]
+    fn check_root(&self) -> io::Result<()> {
+        self.directory.check_current(&self.root)
+    }
+
+    #[cfg(not(unix))]
     fn check_root(&self) -> io::Result<()> {
         if directory_id(&self.root)? != self.root_id {
             return Err(invalid("The cache directory changed."));
@@ -319,6 +415,12 @@ impl Cache {
         Ok(())
     }
 
+    #[cfg(unix)]
+    fn check_file(&self, path: &Path, file: &File) -> io::Result<()> {
+        self.directory.check_file(entry_name_of(path)?, file)
+    }
+
+    #[cfg(not(unix))]
     fn check_file(&self, path: &Path, file: &File) -> io::Result<()> {
         self.check_root()?;
         if !owned_regular(&fs::symlink_metadata(path)?)
@@ -329,24 +431,44 @@ impl Cache {
         self.check_root()
     }
 
-    fn exclusive_entry(&self, path: &Path) -> io::Result<Option<File>> {
-        self.check_root()?;
-        if !owned_regular(&fs::symlink_metadata(path)?) {
-            return Err(invalid("The cache file changed."));
+    #[cfg(unix)]
+    fn open_regular(&self, path: &Path) -> io::Result<Option<File>> {
+        self.directory.regular(entry_name_of(path)?)
+    }
+
+    #[cfg(not(unix))]
+    fn open_regular(&self, path: &Path) -> io::Result<Option<File>> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if owned_regular(&metadata) => File::open(path).map(Some),
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
         }
-        let mut file = File::open(path)?;
+    }
+
+    fn exclusive_entry(&self, path: &Path) -> io::Result<Option<FileLease>> {
+        let Some(file) = self.open_regular(path)? else {
+            return Err(invalid("The cache file changed."));
+        };
         self.check_file(path, &file)?;
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => return Ok(None),
             Err(TryLockError::Error(error)) => return Err(error),
         }
+        let mut file = FileLease::leased(file);
         if !has_magic(&mut file)? {
             return Err(invalid("The cache file changed."));
         }
         Ok(Some(file))
     }
 
+    #[cfg(unix)]
+    fn remove_file(&self, path: &Path, file: &File) -> io::Result<()> {
+        self.directory.remove(entry_name_of(path)?, file)
+    }
+
+    #[cfg(not(unix))]
     fn remove_file(&self, path: &Path, file: &File) -> io::Result<()> {
         self.check_file(path, file)?;
         fs::remove_file(path)
@@ -373,49 +495,68 @@ impl Cache {
             .join(format!("{ENTRY_PREFIX}{:016x}-{key}", digest.bytes)))
     }
 
-    fn lock(&self) -> io::Result<File> {
+    fn lock(&self) -> io::Result<FileLease> {
         self.check_root()?;
         let path = self.root.join("cache.lock");
+        #[cfg(unix)]
+        let file = self.directory.lock_file(entry_name_of(&path)?)?;
+        #[cfg(not(unix))]
+        let file = self.open_lock(&path)?;
+        file.try_lock().map_err(io::Error::from)?;
+        Ok(FileLease::leased(file))
+    }
+
+    #[cfg(not(unix))]
+    fn open_lock(&self, path: &Path) -> io::Result<File> {
         let file = match OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
-            .open(&path)
+            .open(path)
         {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                if !owned_regular(&fs::symlink_metadata(&path)?) {
+                if !owned_regular(&fs::symlink_metadata(path)?) {
                     return Err(invalid("The cache lock is not a regular file."));
                 }
-                OpenOptions::new().read(true).write(true).open(&path)?
+                OpenOptions::new().read(true).write(true).open(path)?
             }
             Err(e) => return Err(e),
         };
-        self.check_file(&path, &file)?;
-        file.try_lock().map_err(io::Error::from)?;
+        self.check_file(path, &file)?;
         Ok(file)
+    }
+
+    #[cfg(unix)]
+    fn names(&self) -> io::Result<impl Iterator<Item = io::Result<std::ffi::OsString>>> {
+        self.directory.list()
+    }
+
+    #[cfg(not(unix))]
+    fn names(&self) -> io::Result<impl Iterator<Item = io::Result<std::ffi::OsString>>> {
+        Ok(fs::read_dir(&self.root)?.map(|entry| entry.map(|item| item.file_name())))
     }
 
     fn entries(&self) -> io::Result<Vec<Entry>> {
         self.check_root()?;
         let mut entries = Vec::new();
-        for item in fs::read_dir(&self.root)? {
-            let item = item?;
-            if !item.file_name().to_str().is_some_and(entry_name) {
+        for name in self.names()? {
+            let name = name?;
+            if !name.to_str().is_some_and(entry_name) {
                 continue;
             }
-            let metadata = fs::symlink_metadata(item.path())?;
-            if owned_regular(&metadata) {
-                let path = item.path();
-                let mut file = File::open(&path)?;
-                self.check_file(&path, &file)?;
-                entries.push(Entry {
-                    path,
-                    bytes: metadata.len(),
-                    modified: metadata.modified().unwrap_or(UNIX_EPOCH),
-                    owned: has_magic(&mut file)?,
-                });
-            }
+            let path = self.root.join(name);
+            let Some(mut file) = self.open_regular(&path)? else {
+                continue;
+            };
+            self.check_file(&path, &file)?;
+            let metadata = file.metadata()?;
+            entries.push(Entry {
+                path,
+                bytes: metadata.len(),
+                modified: metadata.modified().unwrap_or(UNIX_EPOCH),
+                owned: has_magic(&mut file)?,
+            });
         }
         Ok(entries)
     }
@@ -423,29 +564,31 @@ impl Cache {
     fn remove_staging(&self) -> io::Result<u64> {
         self.check_root()?;
         let mut remaining = 0_u64;
-        for item in fs::read_dir(&self.root)? {
-            let item = item?;
-            let name = item.file_name();
-            let matches = name
+        for name in self.names()? {
+            let name = name?;
+            if !name
                 .to_str()
                 .and_then(|name| name.strip_prefix(STAGING_PREFIX))
                 .is_some_and(|tail| {
                     tail.len() == RANDOM_LEN && tail.bytes().all(|b| b.is_ascii_alphanumeric())
-                });
-            if matches && owned_regular(&fs::symlink_metadata(item.path())?) {
-                // A killed process may leave a short header, including an empty file.
-                let mut prefix = Vec::new();
-                let path = item.path();
-                let mut file = File::open(&path)?;
-                self.check_file(&path, &file)?;
-                (&mut file)
-                    .take(MAGIC.len() as u64)
-                    .read_to_end(&mut prefix)?;
-                if MAGIC.starts_with(&prefix) {
-                    self.remove_file(&path, &file)?;
-                } else {
-                    remaining = remaining.saturating_add(file.metadata()?.len());
-                }
+                })
+            {
+                continue;
+            }
+            let path = self.root.join(name);
+            let Some(mut file) = self.open_regular(&path)? else {
+                continue;
+            };
+            self.check_file(&path, &file)?;
+            // A killed process may leave a short header, including an empty file.
+            let mut prefix = Vec::new();
+            (&mut file)
+                .take(MAGIC.len() as u64)
+                .read_to_end(&mut prefix)?;
+            if MAGIC.starts_with(&prefix) {
+                self.remove_file(&path, &file)?;
+            } else {
+                remaining = remaining.saturating_add(file.metadata()?.len());
             }
         }
         Ok(remaining)
@@ -460,7 +603,7 @@ impl EntryReader {
             .as_mut()
             .ok_or_else(|| invalid("The cache entry was already read."))?;
         let amount = self.left.min(VERIFY_BYTES);
-        let mut content = (&mut *file).take(amount);
+        let mut content = (&mut **file).take(amount);
         let mut bytes = [0; 16 * 1024];
         let mut read = 0;
         loop {
@@ -576,19 +719,17 @@ fn has_magic(file: &mut File) -> io::Result<bool> {
     }
 }
 
+#[cfg(unix)]
+fn entry_name_of(path: &Path) -> io::Result<&OsStr> {
+    path.file_name()
+        .ok_or_else(|| invalid("The cache entry has no name."))
+}
+
+#[cfg(not(unix))]
 fn directory_id(root: &Path) -> io::Result<FileId> {
     let metadata = fs::symlink_metadata(root)?;
     if !metadata.is_dir() || is_link(&metadata) {
         return Err(invalid("The app cache path is not a local directory."));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o022 != 0 {
-            return Err(invalid(
-                "The cache directory permits writes from other users.",
-            ));
-        }
     }
     let id = FileId::of_path(root)?;
     let after = fs::symlink_metadata(root)?;
@@ -598,10 +739,12 @@ fn directory_id(root: &Path) -> io::Result<FileId> {
     Ok(id)
 }
 
+#[cfg(not(unix))]
 fn owned_regular(metadata: &Metadata) -> bool {
     metadata.is_file() && !is_link(metadata)
 }
 
+#[cfg(not(unix))]
 fn is_link(metadata: &Metadata) -> bool {
     #[cfg(windows)]
     {
@@ -696,7 +839,7 @@ mod tests {
         let mut file = file;
         let bytes = end - file.stream_position()?;
         let mut index = Vec::new();
-        file.take(bytes).read_to_end(&mut index)?;
+        (&mut *file).take(bytes).read_to_end(&mut index)?;
         assert_eq!(index, DATA);
         let replacement = SourceDigest {
             sha256: hex(&Sha256::digest(b"other")),
@@ -898,11 +1041,42 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn replaced_root_does_not_redirect_publication_or_cleanup() -> io::Result<()> {
+    fn cache_unlocks_even_if_a_child_has_the_file_description() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let cache = Cache::new(dir.path())?;
+        let lock = cache.lock()?;
+        let inherited_lock = lock.try_clone()?;
+        drop(lock);
+        // The duplicate models a child that has not executed its new process.
+        let next = cache.lock()?;
+        drop(next);
+        drop(inherited_lock);
+
         let summary = summary(b"media");
-        let old_root = dir.path().join("old-index");
+        store(&cache, &summary)?;
+        let digest = present(summary.digest.as_deref())?;
+        let (lease, _, _) = present(cache.load(summary.framing, digest, &|| false)?)?;
+        let inherited_lease = lease.try_clone()?;
+        drop(lease);
+        cache.clear()?;
+        drop(inherited_lease);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replaced_root_does_not_redirect_publication_or_cleanup() -> io::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir()?;
+
+        let app_data = dir.path().join("app");
+        let archived_app_data = dir.path().join("old-app");
+        let outside = dir.path().join("outside");
+        fs::create_dir(&app_data)?;
+        fs::create_dir_all(outside.join(DIRECTORY))?;
+        let cache = Cache::new(&app_data)?;
+        let summary = summary(b"media");
         let mut replacement_stage = None;
         let result = cache.store(
             &summary,
@@ -916,9 +1090,9 @@ mod tests {
                         .starts_with(STAGING_PREFIX)
                         .then_some(name)
                 }))?;
-                fs::rename(&cache.root, &old_root)?;
-                fs::create_dir(&cache.root)?;
-                let path = cache.root.join(name);
+                fs::rename(&app_data, &archived_app_data)?;
+                symlink(&outside, &app_data)?;
+                let path = outside.join(DIRECTORY).join(name);
                 fs::write(&path, b"replacement media")?;
                 replacement_stage = Some(path);
                 Ok(())
@@ -928,7 +1102,7 @@ mod tests {
         assert!(result.is_err());
         assert!(cache.clear().is_err());
         assert_eq!(fs::read(present(replacement_stage)?)?, b"replacement media");
-        assert_eq!(fs::read_dir(&old_root)?.count(), 2);
+        assert_eq!(fs::read_dir(archived_app_data.join(DIRECTORY))?.count(), 1);
         Ok(())
     }
 
@@ -954,7 +1128,12 @@ mod tests {
         assert!(store(&cache, &summary).is_err());
         cache.clear()?;
         assert!(entry.is_symlink());
-        assert_eq!(fs::read(media)?, b"media");
+        assert_eq!(fs::read(&media)?, b"media");
+        let lock = cache.root.join("cache.lock");
+        fs::remove_file(&lock)?;
+        symlink(&media, &lock)?;
+        assert!(cache.clear().is_err());
+        assert_eq!(fs::read(&media)?, b"media");
         Ok(())
     }
 }

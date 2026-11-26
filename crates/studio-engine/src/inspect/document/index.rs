@@ -4,7 +4,6 @@
 //! Disk-backed framing facts with one write page and one read page in memory.
 
 use std::cell::RefCell;
-use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
 
@@ -12,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use studio_domain::analysis::{AnalysisFailure, LocateTarget, Row, RowFilter};
 
+use super::cache::FileLease;
 use super::{
     DocumentSummary, Framing, Item, IvfHeader, IvfHeaderFact, LayerCount, ObuType, ObuTypeCount,
     Refusal, ScanOutcome, SourceDigest, SourceFingerprint,
@@ -151,7 +151,7 @@ impl Page {
 
 #[derive(Debug)]
 pub(super) struct Index {
-    file: Arc<Mutex<File>>,
+    file: Arc<Mutex<FileLease>>,
     base: u64,
     pages: Vec<Page>,
     tail: Vec<Entry>,
@@ -166,7 +166,9 @@ pub(super) struct Index {
 impl Index {
     pub(super) fn new() -> Result<Self, Refusal> {
         Ok(Self {
-            file: Arc::new(Mutex::new(tempfile::tempfile().map_err(io_error)?)),
+            file: Arc::new(Mutex::new(FileLease::unleased(
+                tempfile::tempfile().map_err(io_error)?,
+            ))),
             base: 0,
             pages: Vec::new(),
             tail: Vec::with_capacity(PAGE_ROWS),
@@ -193,7 +195,7 @@ impl Index {
     }
 
     pub(super) fn open_cache(
-        mut file: File,
+        mut file: FileLease,
         summary: &DocumentSummary,
         payload_end: u64,
     ) -> io::Result<Self> {
@@ -551,7 +553,7 @@ impl Index {
 const MAX_DIRECTORY_BYTES: usize = 32 << 20;
 
 pub(super) struct IndexExport {
-    file: Arc<Mutex<File>>,
+    file: Arc<Mutex<FileLease>>,
     base: u64,
     bytes: u64,
     directory: Vec<u8>,
