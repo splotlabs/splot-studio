@@ -509,7 +509,41 @@ fn serve<W: Write>(
     }
 }
 
+fn cancellation_target(command: &Command) -> Option<Pending> {
+    Some(match *command {
+        Command::AnalysisCancel { document } => Pending::Open(document),
+        Command::AnalysisCancelValidation {
+            document,
+            validation,
+        } => Pending::Validation {
+            document,
+            validation,
+        },
+        Command::AnalysisCancelLayers {
+            document,
+            inspection,
+        } => Pending::Layers {
+            document,
+            inspection,
+        },
+        Command::AnalysisCancelIdentity { document, scan } => Pending::Identity { document, scan },
+        Command::AnalysisCancelReferences {
+            document,
+            reference,
+        } => Pending::References {
+            document,
+            reference,
+        },
+        Command::BatchCancel { validation } => Pending::BatchValidation(validation),
+        _ => return None,
+    })
+}
+
 fn route<W: Write>(shared: &Shared<W>, requests: &SyncSender<Queued>, id: u64, command: Command) {
+    if let Some(operation) = cancellation_target(&command) {
+        shared.cancel(id, operation);
+        return;
+    }
     match command {
         Command::Hello { .. } => shared.send(id, analysis_hello()),
         Command::AnalysisClearCache => {
@@ -519,21 +553,6 @@ fn route<W: Write>(shared: &Shared<W>, requests: &SyncSender<Queued>, id: u64, c
                     refusal(ErrorCode::Busy, "The inspection queue is full."),
                 );
             }
-        }
-        Command::AnalysisCancel { document } => {
-            shared.cancel(id, Pending::Open(document));
-        }
-        Command::AnalysisCancelValidation {
-            document,
-            validation,
-        } => {
-            shared.cancel(
-                id,
-                Pending::Validation {
-                    document,
-                    validation,
-                },
-            );
         }
         Command::AnalysisClose { document } => {
             let mut ledger = shared.ledger();
@@ -586,24 +605,6 @@ fn route<W: Write>(shared: &Shared<W>, requests: &SyncSender<Queued>, id: u64, c
                 EvidenceRequest::Layers { element, selection },
             );
         }
-        Command::AnalysisCancelLayers {
-            document,
-            inspection,
-        } => {
-            shared.cancel(
-                id,
-                Pending::Layers {
-                    document,
-                    inspection,
-                },
-            );
-        }
-        Command::AnalysisCancelIdentity { document, scan } => {
-            shared.cancel(id, Pending::Identity { document, scan });
-        }
-        Command::BatchCancel { validation } => {
-            shared.cancel(id, Pending::BatchValidation(validation));
-        }
         Command::AnalysisReferences { document, query } => {
             queue_evidence(
                 shared,
@@ -611,18 +612,6 @@ fn route<W: Write>(shared: &Shared<W>, requests: &SyncSender<Queued>, id: u64, c
                 id,
                 document,
                 EvidenceRequest::References(query),
-            );
-        }
-        Command::AnalysisCancelReferences {
-            document,
-            reference,
-        } => {
-            shared.cancel(
-                id,
-                Pending::References {
-                    document,
-                    reference,
-                },
             );
         }
         command => queue_query(shared, requests, id, &command),
