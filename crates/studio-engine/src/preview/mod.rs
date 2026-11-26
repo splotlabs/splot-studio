@@ -629,15 +629,18 @@ impl Context<'_> {
 
     /// Queues an event behind any picture already offered.
     fn event(&self, event: Event) {
+        let playback_end = matches!(event, Event::PlaybackEnded { .. });
+        let current = || playback_end || !self.superseded();
         let mut state = self.shared.lock();
-        while state.queue.len() >= REPLY_BACKLOG - 1 && !state.closed && !state.broken {
+        while state.queue.len() >= REPLY_BACKLOG - 1 && !state.closed && !state.broken && current()
+        {
             state = self
                 .shared
                 .changed
                 .wait(state)
                 .unwrap_or_else(PoisonError::into_inner);
         }
-        if !state.closed && !state.broken {
+        if !state.closed && !state.broken && current() {
             state.progress = None;
             state.flush_picture();
             state.push(Envelope::new(self.request_id, event));
@@ -1357,6 +1360,43 @@ fn out_of_range(index: u64, count: Option<u64>) -> Stopped {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn superseded_samples_are_not_queued() {
+        let shared = Shared::default();
+        let context = Context {
+            shared: &shared,
+            serial: 0,
+            request_id: 1,
+            generation: 1,
+            last_progress: Cell::default(),
+        };
+        shared.submit(2, Request::Stop);
+        context.event(Event::PictureSample {
+            generation: 1,
+            ordinal: 0,
+            grain: GrainPolicy::Skip,
+            point: SamplePoint {
+                plane: SamplePlane::Y,
+                x: 0,
+                y: 0,
+            },
+            value: 17,
+        });
+        assert!(shared.lock().queue.is_empty());
+
+        context.event(Event::PlaybackEnded {
+            generation: 1,
+            frame: None,
+        });
+        assert!(matches!(
+            shared.lock().queue.front(),
+            Some(Item::Event(Envelope {
+                body: Event::PlaybackEnded { .. },
+                ..
+            }))
+        ));
+    }
 
     #[test]
     fn a_reversed_pts_does_not_delay_later_pictures() {
