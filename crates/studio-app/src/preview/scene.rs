@@ -102,7 +102,7 @@ impl Subject {
     }
 
     /// What frame stepping and playback show.
-    pub(super) fn target(&self) -> Option<PictureTarget> {
+    pub(crate) fn target(&self) -> Option<PictureTarget> {
         match self {
             Self::Source { source, .. } => Some(PictureTarget::Source {
                 source: source.clone(),

@@ -82,6 +82,10 @@ impl Timeline {
         self.scan
     }
 
+    pub(super) fn scan_for(&self, policy: LayerDecodeSelection) -> Option<u64> {
+        self.scan.filter(|_| self.decode_selection == Some(policy))
+    }
+
     pub(crate) fn has_verified_index(&self, policy: LayerDecodeSelection) -> bool {
         self.scan.is_some()
             && self.decode_selection == Some(policy)

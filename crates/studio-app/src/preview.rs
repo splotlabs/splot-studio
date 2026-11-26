@@ -40,12 +40,14 @@ use crate::queue::ItemId;
 
 mod cache;
 mod document;
+mod reference;
 mod scene;
 #[cfg(test)]
 mod tests;
 mod viewer;
 
 use cache::Cache;
+use reference::ReferencePreview;
 pub use scene::{Scene, Subject, scene};
 pub(crate) use viewer::HistoryView;
 use viewer::Viewer;
@@ -228,13 +230,20 @@ struct Key {
     size: PictureBox,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    Stage,
+    Thumbnail,
+    Reference,
+}
+
 /// The request in flight.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Sent {
     Picture {
         generation: u64,
         key: Key,
-        thumb: bool,
+        purpose: Purpose,
     },
     Play {
         generation: u64,
@@ -333,6 +342,7 @@ pub struct Preview {
     broken: Option<String>,
     cache: Cache,
     thumb_failures: Vec<Key>,
+    reference: Option<ReferencePreview>,
     dirty: Dirty,
 }
 
@@ -379,6 +389,7 @@ impl Preview {
             broken: None,
             cache: Cache::default(),
             thumb_failures: Vec::new(),
+            reference: None,
             dirty: Dirty::default(),
         }
     }
@@ -605,7 +616,7 @@ impl Preview {
             Some(Sent::Picture {
                 generation: sent,
                 key,
-                thumb,
+                purpose,
             }) if sent == generation => {
                 self.deaths = 0;
                 self.inflight = None;
@@ -615,10 +626,14 @@ impl Preview {
                     view: picture.header.view,
                     ..key
                 };
+                if purpose == Purpose::Reference {
+                    self.show_reference(&key, picture);
+                    return self.pump();
+                }
                 if referenced(&self.scene, &key.target) {
                     self.cache.put(key.clone(), picture.clone());
                 }
-                if thumb {
+                if purpose == Purpose::Thumbnail {
                     self.dirty.thumbs = true;
                 } else if sent == self.stage_generation && self.on_side(&key.target) {
                     if let Some(count) = picture.header.frame_count {
@@ -683,11 +698,13 @@ impl Preview {
             Some(Sent::Picture {
                 generation: sent,
                 key,
-                thumb,
+                purpose,
             }) if sent == generation => {
                 self.deaths = 0;
                 self.inflight = None;
-                if thumb {
+                if purpose == Purpose::Reference {
+                    self.reference_failed(code, message);
+                } else if purpose == Purpose::Thumbnail {
                     self.thumb_failures.push(key);
                 } else if sent == self.stage_generation && self.on_side(&key.target) {
                     self.reject_layer_decode(&key.target, code, message);
@@ -813,7 +830,13 @@ impl Preview {
     /// The preview process is gone. Unless it speaks another protocol or
     /// died too often, the next request starts a new one.
     pub fn process_ended(&mut self, why: &str, incompatible: bool) -> Vec<Effect> {
-        self.inflight = None;
+        let reference = matches!(
+            self.inflight.take(),
+            Some(Sent::Picture {
+                purpose: Purpose::Reference,
+                ..
+            })
+        );
         if self.playing {
             self.playing = false;
             self.dirty.view = true;
@@ -824,6 +847,10 @@ impl Preview {
         self.deaths += 1;
         if self.deaths > MAX_DEATHS {
             return self.give_up(text::stopped(why));
+        }
+        if reference {
+            self.set_reference_error(text::stopped(why));
+            return self.pump();
         }
         if self.document_id().is_some() {
             self.fail_document(text::stopped(why));
@@ -838,6 +865,7 @@ impl Preview {
         if self.document_id().is_some() {
             self.fail_document(why.clone());
         }
+        self.set_reference_error(why.clone());
         self.broken = Some(why);
         self.dirty.view = true;
         Vec::new()
@@ -1170,7 +1198,7 @@ impl Preview {
                     && let Some(Sent::Picture {
                         generation,
                         key: pending,
-                        ..
+                        purpose: Purpose::Stage,
                     }) = &self.inflight
                     && *pending != key
                 {
@@ -1195,16 +1223,16 @@ impl Preview {
                         match &self.inflight {
                             Some(Sent::Picture {
                                 key: k,
-                                thumb: false,
+                                purpose: Purpose::Stage,
                                 ..
                             }) if *k == key => {}
                             None | Some(Sent::Play { .. }) => {
-                                self.send_picture(key, false, &mut out);
+                                self.send_picture(key, Purpose::Stage, &mut out);
                             }
                             Some(Sent::Picture { .. })
                                 if matches!(key.target, PictureTarget::Document { .. }) =>
                             {
-                                self.send_picture(key, false, &mut out);
+                                self.send_picture(key, Purpose::Stage, &mut out);
                             }
                             Some(Sent::Picture { .. }) => {}
                         }
@@ -1216,10 +1244,12 @@ impl Preview {
         if !self.playing {
             self.stop_playback(&mut out);
         }
-        if self.inflight.is_none()
-            && let Some(key) = self.next_thumb()
-        {
-            self.send_picture(key, true, &mut out);
+        if self.inflight.is_none() {
+            if let Some(key) = self.next_reference() {
+                self.send_picture(key, Purpose::Reference, &mut out);
+            } else if let Some(key) = self.next_thumb() {
+                self.send_picture(key, Purpose::Thumbnail, &mut out);
+            }
         }
         out
     }
@@ -1254,9 +1284,9 @@ impl Preview {
         generation
     }
 
-    fn send_picture(&mut self, key: Key, thumb: bool, out: &mut Vec<Effect>) {
+    fn send_picture(&mut self, key: Key, purpose: Purpose, out: &mut Vec<Effect>) {
         let generation = self.take_generation();
-        if !thumb {
+        if purpose == Purpose::Stage {
             self.stage_generation = generation;
             if matches!(key.target, PictureTarget::Document { .. }) {
                 self.start_document_request();
@@ -1276,7 +1306,7 @@ impl Preview {
         self.inflight = Some(Sent::Picture {
             generation,
             key,
-            thumb,
+            purpose,
         });
     }
 

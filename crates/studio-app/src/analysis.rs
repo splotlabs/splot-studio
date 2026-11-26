@@ -267,6 +267,7 @@ enum Asked {
     Layers(layers::Request),
     CancelLayers,
     References(studio_domain::references::ReferenceQuery),
+    ReferencePreview(references::ReferencePreviewQuery),
     Cancel,
     Close,
     Page { generation: u64, first: u64 },
@@ -1078,6 +1079,12 @@ impl Analysis {
                     );
                 }
             }
+            (
+                Asked::ReferencePreview(query),
+                Event::AnalysisTimelineLocated {
+                    scan, selection, ..
+                },
+            ) => self.accept_reference_preview(at, request_id, query, scan, *selection),
             (_, Event::AnalysisFailed { code, message, .. }) => {
                 self.failed(at, request_id, asked, Some(code), message);
                 self.retry_timeline_after_failure(at, asked, out);
@@ -1354,6 +1361,16 @@ impl Analysis {
                     fail_or_notice(doc, code, &message);
                 } else {
                     doc.references.fail(request_id, code, &message);
+                }
+            }
+            Asked::ReferencePreview(_) => {
+                if matches!(
+                    code,
+                    Some(AnalysisFailure::SourceChanged | AnalysisFailure::UnknownDocument)
+                ) {
+                    fail_or_notice(doc, code, &message);
+                } else {
+                    self.fail_reference_preview(at, request_id, message);
                 }
             }
             Asked::Cancel | Asked::Close | Asked::CancelLayers => {}
