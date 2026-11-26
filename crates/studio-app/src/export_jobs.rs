@@ -77,6 +77,8 @@ pub struct ExportJob {
     pub(crate) published: Vec<ExportArtifact>,
     #[serde(default)]
     pub(crate) publication_possible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verified_frames: Option<u64>,
     #[serde(default)]
     pub(crate) cleanup: Vec<String>,
     #[serde(skip)]
@@ -108,6 +110,7 @@ impl ExportJob {
             temporary: Vec::new(),
             published: Vec::new(),
             publication_possible: false,
+            verified_frames: None,
             cleanup: Vec::new(),
             progress: None,
         }
@@ -122,10 +125,7 @@ impl ExportJob {
             ExportOutcome::Failed { failure }
         } else {
             ExportOutcome::Partial {
-                frames: self
-                    .progress
-                    .as_ref()
-                    .map_or(0, |progress| progress.exported),
+                frames: self.verified_frames.unwrap_or_default(),
                 files: self.published.clone(),
                 failure,
             }
@@ -201,6 +201,7 @@ impl ExportJob {
             Phase::Cancelling => Ok(false),
             Phase::Running(ExportStage::Verifying) if self.frames_match(frames) => {
                 // Remove kill eligibility before the worker can claim publication.
+                self.verified_frames = Some(frames);
                 self.phase = Phase::Running(ExportStage::Publishing);
                 Ok(true)
             }
@@ -233,14 +234,14 @@ impl ExportJob {
             && self.published.iter().all(|file| reported.contains(file));
         let complete = match &outcome {
             ExportOutcome::Completed { frames, .. } => {
-                self.frames_match(*frames)
+                self.verified_frames == Some(*frames)
                     && reported.len() == self.request.format.destinations().count()
                     && reported
                         .iter()
                         .all(|file| file.durability == ExportDurability::Confirmed)
             }
             ExportOutcome::Partial { frames, .. } => {
-                !reported.is_empty() && self.frames_match(*frames)
+                !reported.is_empty() && self.verified_frames == Some(*frames)
             }
             ExportOutcome::Failed { .. } | ExportOutcome::Cancelled => true,
         };
@@ -350,6 +351,13 @@ fn identified_output(file: &ExportTemp, path: &Path) -> Option<fs::Metadata> {
     let parent_identity = file.parent_identity.as_ref()?;
     identity.created?;
     parent_identity.created?;
+    #[cfg(windows)]
+    if ![identity, parent_identity]
+        .iter()
+        .all(|id| studio_domain::export::ExportTempIdentity::is_known_windows_index(id.inode))
+    {
+        return None;
+    }
     let metadata = fs::symlink_metadata(path).ok()?;
     if !metadata.is_file() {
         return None;
@@ -386,11 +394,16 @@ fn temp_identity(
 ) -> Option<studio_domain::export::ExportTempIdentity> {
     let handle = winapi_util::Handle::from_path_any(path).ok()?;
     let info = winapi_util::file::information(&handle).ok()?;
+    let inode = info.file_index();
+    if !studio_domain::export::ExportTempIdentity::is_known_windows_index(inode) {
+        return None;
+    }
+    info.creation_time()?;
     let metadata = handle.as_file().metadata().ok()?;
     Some(studio_domain::export::ExportTempIdentity {
         device: info.volume_serial_number(),
-        inode: info.file_index(),
-        created: info.creation_time().and_then(|_| metadata.created().ok()),
+        inode,
+        created: Some(metadata.created().ok()?),
     })
 }
 
@@ -611,6 +624,11 @@ mod tests {
             bytes: 100,
             durability: ExportDurability::Confirmed,
         };
+        let mut request = job.request.clone();
+        request.range = ExportRange::All;
+        let mut job = ExportJob::queued(2, request);
+        job.phase = Phase::Running(ExportStage::Verifying);
+        assert_eq!(job.authorize_publication(1), Ok(true));
         job.published.push(file.clone());
         job.finish(ExportOutcome::Completed {
             frames: 2,

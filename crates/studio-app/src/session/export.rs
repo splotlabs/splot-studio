@@ -417,11 +417,7 @@ impl Session {
             Event::Error {
                 code: ErrorCode::WrongState,
                 ..
-            } if matches!(
-                job.phase,
-                Phase::Cancelling | Phase::Running(ExportStage::Publishing)
-            ) =>
-            {
+            } if job.phase == Phase::Cancelling => {
                 return Outcome::nothing();
             }
             Event::Error { message, .. } => self.fail_export(
