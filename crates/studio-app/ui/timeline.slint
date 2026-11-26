@@ -274,6 +274,7 @@ export component TimelinePane inherits VerticalLayout {
 
                 VerticalLayout {
                     width: parent.content-width;
+                    padding: Tokens.space-2;
                     spacing: Tokens.space-1;
                     for bucket[index] in TimelineUi.bars: HorizontalLayout {
                         spacing: Tokens.space-2;
