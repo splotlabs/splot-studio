@@ -247,9 +247,7 @@ fn conversion(item: &Item, state: State) -> String {
 
 fn read(doc: &crate::analysis::Document, state: State) -> String {
     match (state, doc.phase()) {
-        (State::Queued, _) => {
-            "Waits for the read before it; the engine reads one file at a time.".to_owned()
-        }
+        (State::Queued, _) => "Waiting to scan this file.".to_owned(),
         (State::Running, _) => doc
             .summary()
             .map_or_else(|| "Reading the OBU envelopes.".to_owned(), found),

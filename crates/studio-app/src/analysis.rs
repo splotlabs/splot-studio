@@ -675,7 +675,8 @@ impl Analysis {
             | Input::Resolve
             | Input::Relink { .. }
             | Input::TogglePlayback
-            | Input::PlaybackByte { .. } => {}
+            | Input::PlaybackByte { .. }
+            | Input::ClearCache => {}
         }
     }
 
