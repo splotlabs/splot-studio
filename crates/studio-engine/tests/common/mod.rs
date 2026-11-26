@@ -17,6 +17,7 @@ use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
 use studio_domain::job::{JobSpec, SourceFingerprint, WirePath};
+use studio_domain::options::OptionRequest;
 use studio_domain::protocol::Event;
 use studio_domain::settings::{Crf, EncoderSettings, OutputKind, SpeedPreset};
 
@@ -268,11 +269,14 @@ pub fn fingerprint(path: &Path) -> SourceFingerprint {
     )
 }
 
-pub fn settings(output: OutputKind) -> EncoderSettings {
-    EncoderSettings {
-        output,
-        preset: SpeedPreset::new(10).unwrap_or_else(|_| unreachable!()),
-        crf: Crf::new(40).unwrap_or_else(|_| unreachable!()),
+pub fn settings(output: OutputKind) -> OptionRequest {
+    OptionRequest {
+        base: EncoderSettings {
+            output,
+            preset: SpeedPreset::new(10).unwrap_or_else(|_| unreachable!()),
+            crf: Crf::new(40).unwrap_or_else(|_| unreachable!()),
+        },
+        values: Default::default(),
     }
 }
 
@@ -285,6 +289,8 @@ pub fn spec(source: &Path, destination: &Path, output: OutputKind) -> JobSpec {
         omissions_acknowledged: false,
         destination: WirePath::from_path(destination),
         settings: settings(output),
+        identity: None,
+        pass_artifact: None,
     }
 }
 
