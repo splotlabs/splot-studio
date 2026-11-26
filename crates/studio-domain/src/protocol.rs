@@ -179,6 +179,16 @@ pub enum Command {
         /// after one [`Event::PictureUnavailable`] with generation `0`.
         live: Option<PictureBox>,
     },
+    /// Starts a job that waits for confirmation of its complete policy before writing.
+    StartChecked {
+        /// The job.
+        job: JobSpec,
+        /// Optional live picture size, as in [`Self::Start`].
+        live: Option<PictureBox>,
+    },
+    /// Confirms the complete policy from [`Event::JobPolicy`] on the same request ID.
+    /// The worker resumes the job without a separate acknowledgement.
+    ConfirmPolicy,
     /// Asks the running job to stop. [`Event::CancelRequested`] acknowledges
     /// the request; only [`Event::Cancelled`] means the job has stopped.
     /// Closing the worker's input has the same effect.

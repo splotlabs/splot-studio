@@ -138,6 +138,8 @@ fn serve(input: &mut impl Read, shared: &Shared) -> Result<(), ProtocolError> {
             | Command::ResolveOptions { .. }
             | Command::Probe { .. }
             | Command::Start { .. }
+            | Command::StartChecked { .. }
+            | Command::ConfirmPolicy
             | Command::Cancel
             | Command::AnalysisOpen { .. }
             | Command::AnalysisCancel { .. }

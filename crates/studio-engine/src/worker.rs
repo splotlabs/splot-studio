@@ -195,7 +195,13 @@ fn serve<'scope>(
                 outbox.reply(id, probe(&source, video_stream));
             }
             Command::Start { job: spec, live } => {
-                start(scope, outbox, id, spec, live, &mut job);
+                start(scope, outbox, id, spec, live, false, &mut job);
+            }
+            Command::StartChecked { job: spec, live } => {
+                start(scope, outbox, id, spec, live, true, &mut job);
+            }
+            Command::ConfirmPolicy => {
+                outbox.confirm(id);
             }
             Command::Cancel => {
                 if !outbox.cancel(id) {
@@ -356,6 +362,7 @@ fn start<'scope>(
     id: u64,
     spec: JobSpec,
     live: Option<PictureBox>,
+    checked: bool,
     job: &mut Option<ScopedJoinHandle<'scope, ()>>,
 ) {
     if job.is_some() {
@@ -378,7 +385,7 @@ fn start<'scope>(
         );
         return;
     }
-    match spawn_job(scope, outbox, id, spec, live) {
+    match spawn_job(scope, outbox, id, spec, live, checked) {
         Ok(handle) => *job = Some(handle),
         Err(error) => outbox.job_end(
             id,
@@ -396,8 +403,9 @@ fn spawn_job<'scope>(
     id: u64,
     spec: JobSpec,
     live: Option<PictureBox>,
+    checked: bool,
 ) -> std::io::Result<ScopedJoinHandle<'scope, ()>> {
-    outbox.begin_job(id);
+    outbox.begin_job(id, checked);
     if let Some(size) = live {
         start_live(scope, outbox, id, size);
     }
@@ -513,6 +521,7 @@ struct State {
     /// The newest live picture, not yet written. Replaced, never queued.
     picture: Option<(PictureHeader, Vec<u8>)>,
     job: JobState,
+    policy: PolicyCheck,
     /// The `request_id` of the job's `Start`.
     job_id: u64,
     /// The job's temporary file, while it exists.
@@ -533,6 +542,15 @@ enum JobState {
     None,
     Running,
     Ended,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum PolicyCheck {
+    #[default]
+    Disabled,
+    Reporting,
+    Waiting,
+    Confirmed,
 }
 
 impl Outbox {
@@ -582,16 +600,48 @@ impl Outbox {
         self.changed.notify_all();
     }
 
-    fn begin_job(&self, request_id: u64) {
+    fn begin_job(&self, request_id: u64, checked: bool) {
         let mut state = self.lock();
         state.job = JobState::Running;
         state.job_id = request_id;
+        if checked {
+            state.policy = PolicyCheck::Reporting;
+        }
+    }
+
+    fn confirm(&self, request_id: u64) {
+        let mut state = self.lock();
+        if state.job != JobState::Running
+            || state.job_id != request_id
+            || state.policy != PolicyCheck::Waiting
+            || self.cancel.load(Ordering::Relaxed)
+        {
+            drop(state);
+            self.reply(
+                request_id,
+                refusal(ErrorCode::WrongState, "Wait for the complete job policy."),
+            );
+            return;
+        }
+        state.policy = PolicyCheck::Confirmed;
+        drop(state);
+        self.changed.notify_all();
     }
 
     /// Queues a stage event after any pending progress, so order holds.
     fn job_event(&self, request_id: u64, event: Event) {
         let mut state = self.lock();
         if state.job == JobState::Running {
+            if state.policy == PolicyCheck::Reporting
+                && let Event::JobPolicy {
+                    first,
+                    total,
+                    values,
+                } = &event
+                && *first as usize + values.len() == *total as usize
+            {
+                state.policy = PolicyCheck::Waiting;
+            }
             state.flush_progress();
             state.push(Envelope::new(request_id, event));
         }
@@ -668,6 +718,7 @@ impl Outbox {
         if let Some(token) = &state.encoder {
             token.cancel();
         }
+        self.changed.notify_all();
     }
 
     /// Requests cancellation and acknowledges it, unless no job is running.
@@ -760,11 +811,25 @@ impl Control for Outbox {
         &self.cancel
     }
 
+    fn await_policy_confirmation(&self) -> bool {
+        let mut state = self.lock();
+        while state.job == JobState::Running
+            && !self.cancel.load(Ordering::Relaxed)
+            && matches!(state.policy, PolicyCheck::Reporting | PolicyCheck::Waiting)
+        {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        state.job == JobState::Running && !self.cancel.load(Ordering::Relaxed)
+    }
+
     /// Creates the file under the lock, so an abandoning reader always
     /// knows of it, and never after the job was abandoned.
     fn hold_temp(&self, create: &mut dyn FnMut() -> Option<PathBuf>) {
         let mut state = self.lock();
-        if state.job == JobState::Running {
+        if state.job == JobState::Running && !self.cancel.load(Ordering::Relaxed) {
             state.temp = create();
         }
     }
@@ -941,7 +1006,7 @@ mod tests {
         let mut sink = Gate(gate, Vec::new());
         thread::scope(|scope| {
             let writer = scope.spawn(|| outbox.write_all(&mut sink));
-            outbox.begin_job(1);
+            outbox.begin_job(1, false);
             outbox.job_event(
                 1,
                 Event::Stage {
@@ -990,7 +1055,7 @@ mod tests {
                 ..Default::default()
             },
         };
-        outbox.begin_job(1);
+        outbox.begin_job(1, false);
         outbox.progress(1, progress(1));
         outbox.job_event(1, partial.clone());
         outbox.progress(1, progress(2));
@@ -1015,7 +1080,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let temp = dir.path().join("out.ivf.partial");
         let outbox = Outbox::default();
-        outbox.begin_job(1);
+        outbox.begin_job(1, false);
         outbox.hold_temp(&mut || {
             fs::write(&temp, b"x").ok()?;
             Some(temp.clone())
@@ -1046,7 +1111,7 @@ mod tests {
         assert_eq!(bodies, [Event::CancelRequested, Event::Cancelled]);
 
         let outbox = Outbox::default();
-        outbox.begin_job(1);
+        outbox.begin_job(1, false);
         assert!(outbox.cancel(2));
         thread::scope(|scope| {
             scope.spawn(|| {

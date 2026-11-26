@@ -275,6 +275,8 @@ fn serve<W: Write>(
             | Command::ResolveOptions { .. }
             | Command::Probe { .. }
             | Command::Start { .. }
+            | Command::StartChecked { .. }
+            | Command::ConfirmPolicy
             | Command::Cancel
             | Command::Picture { .. }
             | Command::Play { .. }

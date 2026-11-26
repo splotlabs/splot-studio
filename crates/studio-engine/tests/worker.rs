@@ -592,6 +592,113 @@ fn probe_answers_facts_or_failure() -> TestResult {
     Ok(())
 }
 
+fn complete_policy(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::JobPolicy { first, total, values }
+            if *first as usize + values.len() == *total as usize
+    )
+}
+
+#[test]
+fn checked_job_requires_confirmation_on_its_own_request() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let src = dir.path().join("in.y4m");
+    let dst = dir.path().join("out.ivf");
+    Clip::new(64, 48, "420", 1).write(&src)?;
+    let mut worker = Live::spawn()?;
+    worker.send(
+        7,
+        Command::StartChecked {
+            job: spec(&src, &dst, OutputKind::Ivf),
+            live: None,
+        },
+    )?;
+    let got = worker.read_until(|event| complete_policy(event) || terminal(event))?;
+    assert!(got.last().is_some_and(|event| complete_policy(&event.body)));
+    assert!(
+        got.iter()
+            .all(|event| !matches!(event.body, Event::Working { .. }))
+    );
+
+    worker.send(8, Command::ConfirmPolicy)?;
+    assert!(matches!(
+        worker.next()?,
+        Envelope {
+            request_id: 8,
+            body: Event::Error {
+                code: ErrorCode::WrongState,
+                ..
+            },
+            ..
+        }
+    ));
+    assert_eq!(
+        leftovers(dir.path(), &[&src]),
+        [] as [std::path::PathBuf; 0]
+    );
+
+    worker.send(7, Command::ConfirmPolicy)?;
+    let got = worker.read_until(terminal)?;
+    assert!(
+        got.iter()
+            .any(|event| matches!(event.body, Event::Working { .. }))
+    );
+    assert!(
+        got.last()
+            .is_some_and(|event| matches!(event.body, Event::Completed { .. }))
+    );
+    assert!(dst.is_file());
+    drop(worker.stdin.take());
+    assert!(worker.child.wait()?.success());
+    Ok(())
+}
+
+#[test]
+fn waiting_for_policy_confirmation_can_stop_without_output() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let src = dir.path().join("in.y4m");
+    let dst = dir.path().join("out.ivf");
+    Clip::new(64, 48, "420", 1).write(&src)?;
+    for close_input in [false, true] {
+        let mut worker = Live::spawn()?;
+        worker.send(
+            7,
+            Command::StartChecked {
+                job: spec(&src, &dst, OutputKind::Ivf),
+                live: None,
+            },
+        )?;
+        let got = worker.read_until(|event| complete_policy(event) || terminal(event))?;
+        assert!(got.last().is_some_and(|event| complete_policy(&event.body)));
+        if close_input {
+            drop(worker.stdin.take());
+        } else {
+            worker.send(8, Command::Cancel)?;
+        }
+        let got = worker.read_until(terminal)?;
+        assert!(
+            got.last()
+                .is_some_and(|event| matches!(event.body, Event::Cancelled))
+        );
+        assert!(
+            got.iter()
+                .all(|event| !matches!(event.body, Event::Working { .. }))
+        );
+        assert_eq!(
+            leftovers(dir.path(), &[&src]),
+            [] as [std::path::PathBuf; 0]
+        );
+        if !close_input {
+            worker.send(9, hello())?;
+            assert!(matches!(worker.next()?.body, Event::Hello { .. }));
+            drop(worker.stdin.take());
+        }
+        assert!(worker.child.wait()?.success());
+    }
+    Ok(())
+}
+
 /// A whole job over the protocol, and a second `Start` refused meanwhile.
 /// Input stays open until the terminal event: closing it would cancel.
 #[test]

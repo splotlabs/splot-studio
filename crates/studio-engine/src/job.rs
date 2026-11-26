@@ -83,6 +83,12 @@ pub trait Control: Sync {
         drop(token);
     }
 
+    /// Waits for the client to confirm the policy, when necessary.
+    /// Returns false if the job stops before confirmation.
+    fn await_policy_confirmation(&self) -> bool {
+        true
+    }
+
     /// Runs `create`, which makes the job's temporary file and returns its
     /// path, so the file can be removed if the job is abandoned.
     fn hold_temp(&self, create: &mut dyn FnMut() -> Option<PathBuf>) {
@@ -184,10 +190,7 @@ fn execute(
     stop_if(cancel)?;
     let mut encoder = Encoder::new(config.clone()).map_err(encoder_error)?;
     control.hold_encoder(encoder.cancel_token());
-    for event in policy {
-        stop_if(cancel)?;
-        report(event);
-    }
+    report_policy(policy, control, report)?;
     control.stream_started(live::Stream {
         basis: picture::basis(
             source.matrix,
@@ -210,6 +213,7 @@ fn execute(
         prepared = Some(made);
         path
     });
+    stop_if(cancel)?;
     let temp =
         prepared.unwrap_or_else(|| Err(output::output("the temporary file was not created")))?;
     report(Event::Working {
@@ -247,6 +251,22 @@ fn execute(
         checks,
         disclosures: source.facts.disclosures,
     })
+}
+
+fn report_policy(
+    policy: Vec<Event>,
+    control: &dyn Control,
+    report: &mut (dyn FnMut(Event) + Send),
+) -> Result<(), Stop> {
+    for event in policy {
+        stop_if(control.cancel_flag())?;
+        report(event);
+    }
+    if control.await_policy_confirmation() {
+        Ok(())
+    } else {
+        Err(Stop::Cancelled)
+    }
 }
 
 fn prepare_job(job: &JobSpec, source: &Source) -> Result<(Config, Vec<Event>), Stop> {
