@@ -276,6 +276,34 @@ fn check_nested_error_focus(rig: &Rig) {
     });
 }
 
+fn check_invalid_submission(rig: &Rig, source: &Path) {
+    let window = rig.window();
+    edit(window, "value", "abc");
+    window.invoke_advanced_search("tile groups".into());
+    window.set_advanced_open(false);
+    platform::update_timers_and_animations();
+    window.invoke_encode_requested();
+    rig.until("the invalid field to reopen", || {
+        window.get_advanced_open()
+            && window.get_advanced_selected() == "keyint"
+            && window.get_advanced_focus_field() == "value"
+    });
+    assert!(keys(window).iter().any(|option| option == "keyint"));
+    assert!(!window.get_advanced_error().is_empty());
+    assert!(
+        window
+            .get_advanced_fields()
+            .iter()
+            .any(|field| field.id == "value" && field.text == "abc")
+    );
+    assert!(window.get_can_encode());
+    assert!(!source.with_extension("ivf").exists());
+    edit(window, "value", "3");
+    rig.until("the corrected keyframe interval", || {
+        window.get_advanced_error().is_empty()
+    });
+}
+
 fn source_fixture(dir: &Path) -> PathBuf {
     let source = dir.join("advanced.y4m");
     fs::write(&source, y4m()).unwrap_or_else(|e| unreachable!("{e}"));
@@ -336,30 +364,7 @@ fn advanced_edits_and_submits_the_displayed_policy() {
             && window.get_advanced_status().is_empty()
     });
     assert!(window.get_can_encode());
-    edit(window, "value", "abc");
-    window.invoke_advanced_search("tile groups".into());
-    window.set_advanced_open(false);
-    platform::update_timers_and_animations();
-    window.invoke_encode_requested();
-    rig.until("the invalid field to reopen", || {
-        window.get_advanced_open()
-            && window.get_advanced_selected() == "keyint"
-            && window.get_advanced_focus_field() == "value"
-    });
-    assert!(keys(window).iter().any(|option| option == "keyint"));
-    assert!(!window.get_advanced_error().is_empty());
-    assert!(
-        window
-            .get_advanced_fields()
-            .iter()
-            .any(|field| field.id == "value" && field.text == "abc")
-    );
-    assert!(window.get_can_encode());
-    assert!(!source.with_extension("ivf").exists());
-    edit(window, "value", "3");
-    rig.until("the corrected keyframe interval", || {
-        window.get_advanced_error().is_empty()
-    });
+    check_invalid_submission(&rig, &source);
     window.invoke_encode_requested();
     let completed = rig.saved("the encode to finish", |journal| {
         journal.items.first().is_some_and(|item| {
