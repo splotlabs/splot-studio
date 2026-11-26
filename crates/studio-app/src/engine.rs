@@ -26,6 +26,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use slint::{Rgb8Pixel, SharedPixelBuffer};
+use studio_domain::options::{EffectiveOption, FieldError, OptionDescriptor};
 use studio_domain::preview::PictureHeader;
 use studio_domain::protocol::{
     BuildIdentity, Capabilities, Command, Envelope, Event, PROTOCOL_VERSION, ProtocolError,
@@ -154,6 +155,19 @@ pub enum Delivery {
     Ended(Ending),
     /// The journal writer finished saving a submitted batch.
     JournalSaved(Result<(), String>),
+    /// The background Advanced client finished fetching options.
+    Advanced(AdvancedReply),
+}
+
+/// The catalog and validation result for one Advanced generation.
+#[derive(Debug)]
+pub struct AdvancedReply {
+    /// Whether this result is for proposed settings.
+    pub preview: bool,
+    /// Descriptors when the app requested a new catalog.
+    pub catalog: Option<Vec<OptionDescriptor>>,
+    /// The complete policy, empty when there is no source, or its error.
+    pub policy: Result<Vec<EffectiveOption>, FieldError>,
 }
 
 /// How a worker's event stream ended.
@@ -436,7 +450,9 @@ impl EngineStatus {
                 Event::Error { message, .. } => Self::Failed(message),
                 other => Self::Failed(format!("answered Hello with {other:?}")),
             },
-            Delivery::JournalSaved(_) => Self::Failed("The engine did not answer Hello.".into()),
+            Delivery::Advanced(_) | Delivery::JournalSaved(_) => {
+                Self::Failed("The engine did not answer Hello.".into())
+            }
             Delivery::Pictures(_) => Self::Failed("answered Hello with a picture".to_owned()),
             Delivery::Ended(Ending {
                 error: Some(ProtocolError::IncompatibleVersion { theirs }),
