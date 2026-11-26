@@ -100,6 +100,7 @@ pub struct Source {
     /// for the encoder to write.
     pub content: ContentDescription,
     path: PathBuf,
+    identity_file: File,
     frames: Frames,
     /// The index of the frame [`Self::read_frame`] returns next.
     position: u64,
@@ -108,7 +109,7 @@ pub struct Source {
 }
 
 /// The source of a probed media file, before decoding starts.
-fn media_source(probed: Probed, id: FileId, path: &Path) -> Source {
+fn media_source(probed: Probed, id: FileId, path: &Path, identity_file: File) -> Source {
     Source {
         header: probed.header,
         facts: probed.facts.clone(),
@@ -116,6 +117,7 @@ fn media_source(probed: Probed, id: FileId, path: &Path) -> Source {
         matrix: probed.matrix,
         content: probed.content,
         path: path.to_path_buf(),
+        identity_file,
         frames: Frames::Media {
             probed: Box::new(probed),
             decoding: None,
@@ -133,7 +135,6 @@ struct Y4mSeek {
     line: Vec<u8>,
     /// Bytes of one plain frame record, when every record is plain.
     record: Option<u64>,
-    file: File,
 }
 
 #[derive(Debug)]
@@ -187,7 +188,7 @@ pub fn open(path: &Path, selection: Selection) -> Result<Source, Stop> {
     }
     // A second handle for reopening at any frame (it shares the cursor,
     // which every reopening sets).
-    let seek_file = file
+    let identity_file = file
         .try_clone()
         .map_err(|e| invalid(format!("cannot read the source: {e}")))?;
     let mut buffered = BufReader::new(Input::File(file));
@@ -198,7 +199,7 @@ pub fn open(path: &Path, selection: Selection) -> Result<Source, Stop> {
     if !starts_y4m {
         let tool = media::tool()?;
         let probed = media::probe::probe(tool, path, fingerprint, selection.video_stream)?;
-        return Ok(media_source(probed, id, path));
+        return Ok(media_source(probed, id, path, identity_file));
     }
     if selection.video_stream.is_some_and(|stream| stream != 0) {
         return Err(unsupported("a Y4M file has one video stream, stream 0"));
@@ -243,7 +244,6 @@ pub fn open(path: &Path, selection: Selection) -> Result<Source, Stop> {
     let seek = Y4mSeek {
         line: line.clone(),
         record: frame_count.map(|_| PLAIN_FRAME_HEADER.len() as u64 + frame_bytes),
-        file: seek_file,
     };
     let reader = Y4mReader::new(Cursor::new(line).chain(buffered)).map_err(header_error)?;
     Ok(Source {
@@ -253,6 +253,7 @@ pub fn open(path: &Path, selection: Selection) -> Result<Source, Stop> {
         matrix: None,
         content,
         path: path.to_path_buf(),
+        identity_file,
         frames: Frames::Y4m(reader),
         position: 0,
         seek: Some(seek),
@@ -346,8 +347,8 @@ impl Source {
                 None if index >= self.position => return self.skip_to(index),
                 None => (0, 0),
             };
-            let mut file = seek
-                .file
+            let mut file = self
+                .identity_file
                 .try_clone()
                 .map_err(|e| invalid(format!("cannot read the source: {e}")))?;
             file.seek(SeekFrom::Start(seek.line.len() as u64 + offset))
@@ -460,6 +461,45 @@ impl Source {
         still_the_same(&self.path, &self.id, self.facts.fingerprint)
     }
 
+    /// Hash the file already opened. Restore the shared cursor before the
+    /// Y4M reader uses the file again.
+    pub(crate) fn pass_identity(
+        &self,
+        cancel: &AtomicBool,
+    ) -> Result<crate::artifact::SourceIdentity, Stop> {
+        self.unchanged()?;
+        let mut file = &self.identity_file;
+        let position = file.stream_position().map_err(hash_io)?;
+        file.seek(SeekFrom::Start(0)).map_err(hash_io)?;
+        let digest = crate::artifact::hash_source(&mut file, cancel);
+        file.seek(SeekFrom::Start(position)).map_err(hash_io)?;
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(Stop::Cancelled);
+        }
+        let sha256 = digest.map_err(hash_io)?;
+        self.unchanged()?;
+        let adapter = match &self.frames {
+            Frames::Y4m(_) => None,
+            Frames::Media { probed, .. } => {
+                let tool = media::tool()?;
+                Some(
+                    serde_json::to_string(&(
+                        &tool.identity,
+                        &probed.pix_fmt,
+                        probed.repack,
+                        probed.time_base,
+                    ))
+                    .map_err(hash_io)?,
+                )
+            }
+        };
+        Ok(crate::artifact::SourceIdentity {
+            sha256,
+            facts: self.facts.clone(),
+            adapter,
+        })
+    }
+
     /// The next frame's planes, or `None` after the last one. For the media
     /// route the end is accepted only when the decoder exited cleanly after
     /// exactly the scanned number of frames and the file is unchanged.
@@ -556,6 +596,10 @@ impl Decoding {
             Err(problem) => Err(decoder.fail(problem)),
         }
     }
+}
+
+fn hash_io(error: impl std::fmt::Display) -> Stop {
+    invalid(format!("Cannot identify the first-pass source. {error}"))
 }
 
 /// The tools open the file by name; it must still be the one probed.

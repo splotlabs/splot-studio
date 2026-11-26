@@ -41,7 +41,7 @@ use std::thread::{self, Scope, ScopedJoinHandle};
 use std::time::{Duration, Instant};
 
 use splot_encode::CancelToken;
-use studio_domain::job::{Failure, FailureCode, JobSpec, SourceFacts};
+use studio_domain::job::{Failure, FailureCode, JobPurpose, JobSpec, SourceFacts};
 use studio_domain::options::OptionRequest;
 use studio_domain::preview::{
     MAX_PICTURE_HEIGHT, MAX_PICTURE_WIDTH, PictureBox, PictureFailure, PictureHeader,
@@ -406,7 +406,9 @@ fn spawn_job<'scope>(
     checked: bool,
 ) -> std::io::Result<ScopedJoinHandle<'scope, ()>> {
     outbox.begin_job(id, checked);
-    if let Some(size) = live {
+    if spec.purpose == JobPurpose::Encode
+        && let Some(size) = live
+    {
         start_live(scope, outbox, id, size);
     }
     thread::Builder::new()
