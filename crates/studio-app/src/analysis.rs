@@ -543,23 +543,7 @@ impl Analysis {
                 }
             }
             Input::Close => self.close(&mut out),
-            Input::Reopen => {
-                let at = self.shown;
-                if self.can_read_again() {
-                    // The engine still holds the part that was read.
-                    self.restore_from_live(at);
-                    let document = self.documents[at].id;
-                    self.pending.retain(|_, (d, _)| *d != document);
-                    let validation = self.documents[at].evidence.running;
-                    self.release(document, validation, &mut out);
-                    self.read(at, &mut out);
-                } else if matches!(
-                    self.documents.get(at).map(Document::phase),
-                    Some(Phase::Failed { .. })
-                ) {
-                    self.read(at, &mut out);
-                }
-            }
+            Input::Reopen => self.reopen(&mut out),
             Input::Cancel => self.cancel(self.shown, &mut out),
             Input::CancelDocument(index) => {
                 if let Ok(at) = usize::try_from(index) {
@@ -621,6 +605,24 @@ impl Analysis {
         }
         self.ensure_layers(&mut out);
         out
+    }
+
+    fn reopen(&mut self, out: &mut Vec<Effect>) {
+        let at = self.shown;
+        if self.can_read_again() {
+            // The engine still holds the part that was read.
+            self.restore_from_live(at);
+            let document = self.documents[at].id;
+            self.pending.retain(|_, (d, _)| *d != document);
+            let validation = self.documents[at].evidence.running;
+            self.release(document, validation, out);
+            self.read(at, out);
+        } else if matches!(
+            self.documents.get(at).map(Document::phase),
+            Some(Phase::Failed { .. })
+        ) {
+            self.read(at, out);
+        }
     }
 
     /// The shown document's index, when it is open.
@@ -992,6 +994,19 @@ impl Analysis {
             return out;
         };
         self.dirty = true;
+        self.event_for_document(at, request_id, asked, event, &mut out);
+        self.ensure_layers(&mut out);
+        out
+    }
+
+    fn event_for_document(
+        &mut self,
+        at: usize,
+        request_id: u64,
+        asked: Asked,
+        event: Event,
+        out: &mut Vec<Effect>,
+    ) {
         match (asked, event) {
             (Asked::Open, Event::AnalysisOpenProgress { summary, .. }) => {
                 let doc = &mut self.documents[at];
@@ -1001,12 +1016,12 @@ impl Analysis {
                         .is_none_or(|view| same_file(view.fingerprint, summary.fingerprint))
                 {
                     doc.update_partial(summary);
-                    self.fill(at, &mut out);
-                    self.fetch_bytes(at, &mut out);
+                    self.fill(at, out);
+                    self.fetch_bytes(at, out);
                 }
             }
             (Asked::Open, Event::AnalysisOpened { summary, .. }) => {
-                self.opened(at, summary, &mut out);
+                self.opened(at, summary, out);
             }
             (
                 Asked::Page { generation, first },
@@ -1018,7 +1033,7 @@ impl Analysis {
                 },
             ) => {
                 let asked = (generation, first);
-                self.paged(at, asked, answered, total, rows, &mut out);
+                self.paged(at, asked, answered, total, rows, out);
             }
             (
                 Asked::Locate {
@@ -1027,7 +1042,7 @@ impl Analysis {
                 },
                 Event::AnalysisLocated { row, found, .. },
             ) => {
-                self.located(at, request_id, generation, purpose, row, *found, &mut out);
+                self.located(at, request_id, generation, purpose, row, *found, out);
             }
             (Asked::Bytes { offset, len }, Event::AnalysisBytes { bytes, .. }) => {
                 let doc = &mut self.documents[at];
@@ -1035,11 +1050,7 @@ impl Analysis {
                     doc.bytes.asked = None;
                 }
                 if bytes.len() != len as usize {
-                    self.broken(
-                        at,
-                        "a byte range of another length than asked for",
-                        &mut out,
-                    );
+                    self.broken(at, "a byte range of another length than asked for", out);
                 } else if doc.bytes.offset == offset {
                     doc.bytes.data = Some(bytes);
                 }
@@ -1052,35 +1063,33 @@ impl Analysis {
                     references.fail(
                         request_id,
                         None,
-                        "The result had a different frame or selection.".into(),
+                        "The result had a different frame or selection.",
                     );
                 }
             }
             (_, Event::AnalysisFailed { code, message, .. }) => {
                 self.failed(at, request_id, asked, Some(code), message);
-                self.retry_timeline_after_failure(at, asked, &mut out);
+                self.retry_timeline_after_failure(at, asked, out);
             }
             // A refused cancel: the open was answered first, and decides.
             (Asked::Cancel, Event::Error { .. }) => {}
             (_, Event::Error { message, .. }) => {
                 self.failed(at, request_id, asked, None, message);
-                self.retry_timeline_after_failure(at, asked, &mut out);
+                self.retry_timeline_after_failure(at, asked, out);
             }
             (Asked::Timeline(request), event) => {
-                self.timeline_event(at, request_id, request, event, &mut out);
+                self.timeline_event(at, request_id, request, event, out);
             }
             (Asked::Layers(request), event) => {
-                self.layer_event(at, request_id, request, event, &mut out);
+                self.layer_event(at, request_id, request, event, out);
             }
             (Asked::Evidence(request), event) => {
-                self.evidence_event(at, request_id, request, event, &mut out);
+                self.evidence_event(at, request_id, request, event, out);
             }
             // An answer of the wrong kind breaks the protocol.
             (Asked::Cancel | Asked::Close | Asked::CancelLayers, _) => {}
-            _ => self.broken(at, "an answer of the wrong kind", &mut out),
+            _ => self.broken(at, "an answer of the wrong kind", out),
         }
-        self.ensure_layers(&mut out);
-        out
     }
 
     fn cache_clear_event(&mut self, event: Event) {
@@ -1333,7 +1342,7 @@ impl Analysis {
                 ) {
                     fail_or_notice(doc, code, &message);
                 } else {
-                    doc.references.fail(request_id, code, message);
+                    doc.references.fail(request_id, code, &message);
                 }
             }
             Asked::Cancel | Asked::Close | Asked::CancelLayers => {}

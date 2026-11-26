@@ -48,7 +48,7 @@ impl References {
         }
     }
 
-    pub(super) fn fail(&mut self, request: u64, code: Option<AnalysisFailure>, message: String) {
+    pub(super) fn fail(&mut self, request: u64, code: Option<AnalysisFailure>, message: &str) {
         if self.pending == Some(request) {
             self.pending = None;
             self.notice = Some(match code {

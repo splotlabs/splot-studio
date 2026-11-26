@@ -1688,7 +1688,7 @@ fn reference_inspection_rejects_cancelled_and_mismatched_answers() {
     assert!(stop.iter().any(|effect| matches!(
         effect.command, Command::AnalysisCancelReferences { reference, .. } if reference == request
     )));
-    assert!(analysis.event(request, reply(original)).is_empty());
+    assert_eq!(analysis.event(request, reply(original)), Vec::new());
     assert!(doc(&analysis).references.evidence().is_none());
 
     let (request, _, _) = query(&mut analysis);
