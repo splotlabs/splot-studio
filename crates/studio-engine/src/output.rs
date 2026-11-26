@@ -289,7 +289,11 @@ pub(crate) fn publish_recorded(
     temp: NamedTempFile,
     destination: &Path,
 ) -> Result<Publication, Stop> {
-    publish_with_sync(temp, destination, sync_parent)
+    #[cfg(unix)]
+    let sync = sync_parent;
+    #[cfg(not(unix))]
+    let sync = |_: &Path| Ok(());
+    publish_with_sync(temp, destination, sync)
 }
 
 fn publish_with_sync(
@@ -317,20 +321,13 @@ fn publish_with_sync(
     Ok(Publication { bytes, sync })
 }
 
+#[cfg(unix)]
 fn sync_parent(destination: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        let parent = destination
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        File::open(parent)?.sync_all()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = destination;
-        Ok(())
-    }
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    File::open(parent)?.sync_all()
 }
 
 /// Writes packets in one output format and counts the bytes.
