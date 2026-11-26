@@ -57,11 +57,13 @@ impl Table {
     }
 
     fn read(&mut self) -> io::Result<Record> {
+        let mut bytes = [0; RECORD_BYTES];
+        self.file.read_exact(&mut bytes)?;
         let mut words = [0; 4];
-        for word in &mut words {
-            let mut bytes = [0; 8];
-            self.file.read_exact(&mut bytes)?;
-            *word = u64::from_le_bytes(bytes);
+        for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(8)) {
+            let mut value = [0; 8];
+            value.copy_from_slice(chunk);
+            *word = u64::from_le_bytes(value);
         }
         Ok(words)
     }
@@ -529,6 +531,21 @@ mod tests {
                 ..
             })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn an_index_at_its_disk_limit_does_not_append() -> TestResult {
+        let source = tempfile::tempfile()?;
+        let fingerprint = SourceFingerprint::of(&source.metadata()?);
+        let index = IdentityIndex::new(GrainPolicy::Skip, fingerprint).map_err(refusal)?;
+        let mut state = index.state();
+        state.coded.count = MAX_INDEX_BYTES / RECORD_BYTES as u64 - 1;
+        state.append(IdentityKind::Temporal, [1, 0, 0, 0]);
+        state.append(IdentityKind::Output, [2, 2, 1, 0]);
+        assert_eq!(state.temporal.file.metadata()?.len(), RECORD_BYTES as u64);
+        assert_eq!(state.output.file.metadata()?.len(), 0);
+        assert!(state.write_error.is_some());
         Ok(())
     }
 
