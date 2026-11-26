@@ -360,7 +360,7 @@ pub struct PictureHeader {
     /// The display surface and film grain policy in use.
     pub options: PictureOptions,
     /// Geometry and color information for a document output.
-    pub document_info: Option<DocumentPictureInfo>,
+    pub document_info: Option<Box<DocumentPictureInfo>>,
     /// The zero-based display index of the frame.
     pub frame: u64,
     /// The frame's presentation time; `None` when the stream has no timing.

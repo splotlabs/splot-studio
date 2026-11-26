@@ -1310,7 +1310,7 @@ fn render(
                     "The decoder returned invalid geometry.",
                 )
             })?;
-            (picture.time, Some(picture.output), Some(info))
+            (picture.time, Some(picture.output), Some(Box::new(info)))
         }
         _ => (open.time(index), None, None),
     };
