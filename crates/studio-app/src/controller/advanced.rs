@@ -187,7 +187,7 @@ impl Controller {
             session.advanced_policy()
         };
         let error = (!locked).then(|| session.advanced_error()).flatten();
-        editor.select_error(catalog, error);
+        editor.select_error(catalog, request, error);
         let Editor {
             selected,
             pending_focus,
@@ -203,7 +203,7 @@ impl Controller {
             .iter()
             .find(|((key, _), _)| *key == editor.selected)
             .map(|(_, error)| error.message.clone())
-            .or_else(|| error.map(|error| error.message.clone()));
+            .or_else(|| error.map(|error| format!("{}. {}", error.field, error.message)));
         window.set_advanced_error(error_text.unwrap_or_default().into());
         window.set_advanced_status(
             if self.advanced_settle.running() || session.advanced_pending() {
@@ -281,10 +281,13 @@ impl Controller {
                 "all" => Reset::All,
                 "selected" => Reset::Field(&selected_key),
                 "group" => {
-                    let Some(descriptor) = selected(catalog, &selected_key) else {
+                    if let Some(descriptor) = selected(catalog, &selected_key) {
+                        Reset::Group(advanced::catalog::group(descriptor))
+                    } else if state.option_request().values.contains_key(&selected_key) {
+                        Reset::Group("Unavailable")
+                    } else {
                         return;
-                    };
-                    Reset::Group(advanced::catalog::group(descriptor))
+                    }
                 }
                 _ => return,
             };
@@ -416,17 +419,28 @@ impl Editor {
             && (self.pending_focus.is_some()
                 || self.invalid.keys().any(|(key, _)| *key == self.selected)
                 || engine_error)
-            && let Some(descriptor) = selected(catalog, &self.selected)
         {
-            rows.insert(
-                0,
-                AdvancedOptionRow {
-                    key: descriptor.key.as_str().into(),
-                    label: advanced::catalog::title(descriptor).into(),
-                    group: advanced::catalog::group(descriptor).into(),
-                    modified: request.values.contains_key(&descriptor.key),
-                },
-            );
+            if let Some(descriptor) = selected(catalog, &self.selected) {
+                rows.insert(
+                    0,
+                    AdvancedOptionRow {
+                        key: descriptor.key.as_str().into(),
+                        label: advanced::catalog::title(descriptor).into(),
+                        group: advanced::catalog::group(descriptor).into(),
+                        modified: request.values.contains_key(&descriptor.key),
+                    },
+                );
+            } else if request.values.contains_key(&self.selected) {
+                rows.insert(
+                    0,
+                    AdvancedOptionRow {
+                        key: self.selected.as_str().into(),
+                        label: self.selected.as_str().into(),
+                        group: "Unavailable".into(),
+                        modified: true,
+                    },
+                );
+            }
         }
         if !engine_error
             && self.pending_focus.is_none()
@@ -452,8 +466,22 @@ impl Editor {
         let detail =
             selected(catalog, &self.selected).map(|d| advanced::inspect(d, request, policy));
         window.set_advanced_selected(self.selected.as_str().into());
-        let (label, help, effective, origin, screen, fields) =
-            detail.map_or_else(Default::default, |detail| {
+        let (label, help, effective, origin, screen, fields) = detail.map_or_else(
+            || {
+                if request.values.contains_key(&self.selected) {
+                    return (
+                        self.selected.clone(),
+                        "This encoder cannot use this saved option. Reset the option to remove it."
+                            .into(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        Vec::new(),
+                    );
+                }
+                Default::default()
+            },
+            |detail| {
                 let fields = detail
                     .fields
                     .into_iter()
@@ -478,7 +506,8 @@ impl Editor {
                     detail.screen,
                     fields,
                 )
-            });
+            },
+        );
         window.set_advanced_label(label.into());
         window.set_advanced_help(help.into());
         window.set_advanced_effective(effective.into());
@@ -516,7 +545,12 @@ impl Editor {
         window.set_advanced_preset_preview(text.into());
     }
 
-    fn select_error(&mut self, catalog: &[OptionDescriptor], error: Option<&FieldError>) {
+    fn select_error(
+        &mut self,
+        catalog: &[OptionDescriptor],
+        request: &OptionRequest,
+        error: Option<&FieldError>,
+    ) {
         if self.engine_error.as_ref() == error {
             return;
         }
@@ -524,6 +558,11 @@ impl Editor {
         let Some(error) = error else {
             return;
         };
+        if request.values.contains_key(&error.field) && selected(catalog, &error.field).is_none() {
+            self.pending_focus
+                .get_or_insert_with(|| (error.field.clone(), "@reset".into()));
+            return;
+        }
         let descriptor = catalog
             .iter()
             .filter(|d| {
@@ -550,7 +589,13 @@ impl Editor {
 
     fn focus_field(&mut self) -> Option<String> {
         let (key, field) = self.pending_focus.as_ref()?;
-        if *key != self.fields_key || self.fields.is_empty() {
+        if *key != self.fields_key {
+            return None;
+        }
+        if field == "@reset" {
+            return self.pending_focus.take().map(|(_, field)| field);
+        }
+        if self.fields.is_empty() {
             return None;
         }
         let field = self

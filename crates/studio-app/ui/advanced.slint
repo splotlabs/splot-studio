@@ -395,6 +395,10 @@ export component AdvancedEditor inherits VerticalLayout {
                         spacing: Tokens.space-2;
                         alignment: start;
                         LinkButton {
+                            property <int> focus-trigger: root.focus-field == "@reset" ? root.focus-request : 0;
+                            changed focus-trigger => {
+                                if self.focus-trigger > 0 && self.enabled { self.focus(); }
+                            }
                             text: "Reset option";
                             quiet: true;
                             description: "Remove this option's explicit override";
