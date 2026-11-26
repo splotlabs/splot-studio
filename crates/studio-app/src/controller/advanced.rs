@@ -458,7 +458,6 @@ impl Editor {
                     .fields
                     .into_iter()
                     .map(|row| FieldRow {
-                        id: row.id.into(),
                         label: row.label.into(),
                         kind: row.kind.into(),
                         text: self
@@ -466,6 +465,7 @@ impl Editor {
                             .get(&(self.selected.clone(), row.id.clone()))
                             .map_or(row.text.as_str(), |invalid| invalid.text.as_str())
                             .into(),
+                        id: row.id.into(),
                         choices: model(row.choices.into_iter().map(SharedString::from).collect()),
                         help: row.help.into(),
                     })
