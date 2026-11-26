@@ -96,8 +96,8 @@ impl<const WORDS: usize> Table<WORDS> {
             let count = rows.min(end - at);
             let bytes = usize::try_from(count).map_err(io::Error::other)? * Self::BYTES;
             self.file.read_exact(&mut block[..bytes])?;
-            for record in block[..bytes].chunks_exact(Self::BYTES) {
-                consume(at, Self::decode(record));
+            for offset in (0..bytes).step_by(Self::BYTES) {
+                consume(at, Self::decode(&block[offset..offset + Self::BYTES]));
                 at += 1;
             }
         }
