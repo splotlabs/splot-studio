@@ -215,6 +215,16 @@ pub struct ExportTempIdentity {
     pub created: Option<SystemTime>,
 }
 
+impl ExportTempIdentity {
+    /// Whether the Windows filesystem reported a usable 64-bit file index.
+    ///
+    /// MS-FSCC § 2.1.9 reserves zero and all ones for unavailable IDs.
+    #[must_use]
+    pub const fn is_known_windows_index(index: u64) -> bool {
+        index != 0 && index != u64::MAX
+    }
+}
+
 /// An exclusively created temporary file and its intended destination.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportTemp {
@@ -305,4 +315,17 @@ pub enum ExportOutcome {
     },
     /// The export stopped before publication.
     Cancelled,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExportTempIdentity;
+
+    #[test]
+    fn windows_indices_reject_both_unavailable_values() {
+        assert!(!ExportTempIdentity::is_known_windows_index(0));
+        assert!(!ExportTempIdentity::is_known_windows_index(u64::MAX));
+        assert!(ExportTempIdentity::is_known_windows_index(1));
+        assert!(ExportTempIdentity::is_known_windows_index(u64::MAX - 1));
+    }
 }

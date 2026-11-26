@@ -158,11 +158,22 @@ impl ExportRun {
                 "Select different paths for the samples and layout.",
             ));
         }
+        if source.export_identity(None).is_none() {
+            return Err(Stop::failed(
+                FailureCode::UnsupportedSource,
+                "The filesystem did not return a stable identity for the source file.",
+            ));
+        }
         let parent = destination
             .parent()
             .ok_or_else(|| invalid("The destination has no parent folder."))?;
         let parent_id = FileId::of_path(parent)
             .map_err(|e| output::output(format!("Cannot identify the destination folder. {e}")))?;
+        if parent_id.export_identity(None).is_none() {
+            return Err(output::output(
+                "The filesystem did not return a stable identity for the destination folder.",
+            ));
+        }
         let Some(plan) = self
             .destinations
             .iter_mut()
@@ -179,9 +190,12 @@ impl ExportRun {
             output::output(format!("Cannot retain the temporary file identity. {e}"))
         })?;
         let created = open.metadata().and_then(|meta| meta.created()).ok();
-        if file.export_identity(created).is_some() {
-            temp.disable_cleanup(true);
+        if file.export_identity(created).is_none() {
+            return Err(output::output(
+                "The filesystem did not return a stable identity for the temporary file.",
+            ));
         }
+        temp.disable_cleanup(true);
         plan.temp = Some(Prepared {
             partial: temp.path().to_path_buf(),
             file,

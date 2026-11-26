@@ -63,18 +63,23 @@ pub(crate) trait ExportControl {
 
 /// Which file a path names.
 ///
-/// Unix compares device and inode. Windows compares volume and file index.
-/// These identities also detect a hard link to the opened source.
+/// Unix compares device and inode. Windows uses the volume and file index
+/// when available. A canonical path is sufficient for legacy path checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileId(
-    #[cfg(any(unix, windows))] (u64, u64),
-    #[cfg(not(any(unix, windows)))] PathBuf,
-);
+pub struct FileId(FileIdentity);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FileIdentity {
+    #[cfg(any(unix, windows))]
+    Native { device: u64, inode: u64 },
+    #[cfg(not(unix))]
+    Canonical(PathBuf),
+}
 
 impl FileId {
     /// File identity that remains usable across a new process on this platform.
     #[cfg_attr(
-        any(unix, windows),
+        unix,
         expect(
             clippy::unnecessary_wraps,
             reason = "other platforms can lack a stable identity"
@@ -84,42 +89,43 @@ impl FileId {
         &self,
         created: Option<SystemTime>,
     ) -> Option<ExportTempIdentity> {
-        #[cfg(any(unix, windows))]
-        {
-            let (device, inode) = self.0;
-            Some(ExportTempIdentity {
-                device,
-                inode,
+        match &self.0 {
+            #[cfg(any(unix, windows))]
+            FileIdentity::Native { device, inode } => Some(ExportTempIdentity {
+                device: *device,
+                inode: *inode,
                 created: created.filter(|time| *time >= UNIX_EPOCH),
-            })
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = created;
-            None
+            }),
+            #[cfg(not(unix))]
+            FileIdentity::Canonical(_) => None,
         }
     }
 
     /// The identity of the already opened `file` at `path`.
     ///
     /// # Errors
-    /// Any error from reading its identity.
+    /// Any error from reading its identity or resolving the fallback path.
     #[allow(unused_variables)] // each platform reads one of the two arguments
     pub fn of_file(file: &File, path: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
-            let metadata = file.metadata()?;
-            Ok(Self((metadata.dev(), metadata.ino())))
+            Ok(Self::from_metadata(&file.metadata()?))
         }
         #[cfg(windows)]
         {
-            let info = winapi_util::file::information(file)?;
-            Ok(Self((info.volume_serial_number(), info.file_index())))
+            if let Ok(info) = winapi_util::file::information(file)
+                && ExportTempIdentity::is_known_windows_index(info.file_index())
+            {
+                return Ok(Self(FileIdentity::Native {
+                    device: info.volume_serial_number(),
+                    inode: info.file_index(),
+                }));
+            }
+            Self::canonical(path)
         }
         #[cfg(not(any(unix, windows)))]
         {
-            Ok(Self(fs::canonicalize(path)?))
+            Self::canonical(path)
         }
     }
 
@@ -130,19 +136,33 @@ impl FileId {
     pub fn of_path(path: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
-            let metadata = fs::metadata(path)?;
-            Ok(Self((metadata.dev(), metadata.ino())))
+            Ok(Self::from_metadata(&fs::metadata(path)?))
         }
         #[cfg(windows)]
         {
-            let handle = winapi_util::Handle::from_path_any(path)?;
-            Self::of_file(handle.as_file(), path)
+            match winapi_util::Handle::from_path_any(path) {
+                Ok(handle) => Self::of_file(handle.as_file(), path),
+                Err(_) => Self::canonical(path),
+            }
         }
         #[cfg(not(any(unix, windows)))]
         {
-            Ok(Self(fs::canonicalize(path)?))
+            Self::canonical(path)
         }
+    }
+
+    #[cfg(unix)]
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self(FileIdentity::Native {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn canonical(path: &Path) -> io::Result<Self> {
+        Ok(Self(FileIdentity::Canonical(fs::canonicalize(path)?)))
     }
 }
 
