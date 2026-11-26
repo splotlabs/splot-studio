@@ -4,7 +4,7 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use slint::{ComponentHandle, SharedString, TimerMode};
+use slint::{SharedString, TimerMode};
 use studio_domain::job::SourceFacts;
 use studio_domain::options::{EffectiveOption, FieldError, OptionDescriptor, OptionRequest};
 use studio_domain::protocol::OptionsIdentity;
