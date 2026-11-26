@@ -936,48 +936,7 @@ impl Analysis {
                 }
             }
             (Asked::Open, Event::AnalysisOpened { summary, .. }) => {
-                let doc = &mut self.documents[at];
-                if !doc.in_engine() {
-                    return out;
-                }
-                let partial = doc.partial.take().is_some();
-                let batch = doc.pending_batch.take();
-                if let Origin::Result(result) = &doc.origin
-                    && summary.fingerprint.len != result.bytes
-                {
-                    doc.caution = Some(format!(
-                        "This file is {} bytes now; the conversion wrote {} bytes. It may have \
-                         changed since.",
-                        summary.fingerprint.len, result.bytes
-                    ));
-                }
-                match doc.restore.take() {
-                    Some(restore) if !same_file(restore.fingerprint, summary.fingerprint) => {
-                        // Never trust the path alone: the view waits. The
-                        // engine gives the read back, so nothing of it
-                        // outlives the change, an engine stop included.
-                        doc.restore = Some(restore);
-                        doc.phase = Phase::Changed {
-                            now: summary.fingerprint,
-                        };
-                        self.send(document, Asked::Close, &mut out, |document| {
-                            Command::AnalysisClose { document }
-                        });
-                    }
-                    restore => {
-                        doc.phase = Phase::Open(Box::new(summary));
-                        doc.refresh_total |= partial;
-                        if let Some(restore) = restore {
-                            self.apply(at, restore, &mut out);
-                        }
-                        self.fill(at, &mut out);
-                        self.fetch_bytes(at, &mut out);
-                        self.ensure_syntax(at, &mut out);
-                        if let Some(report) = batch {
-                            self.attach_batch(at, *report);
-                        }
-                    }
-                }
+                self.opened(at, summary, &mut out);
             }
             (
                 Asked::Page { generation, first },
@@ -1031,6 +990,53 @@ impl Analysis {
             _ => self.broken(at, "an answer of the wrong kind", &mut out),
         }
         out
+    }
+
+    /// Apply the final summary and restore the view for this source.
+    fn opened(&mut self, at: usize, summary: DocumentSummary, out: &mut Vec<Effect>) {
+        let doc = &mut self.documents[at];
+        if !doc.in_engine() {
+            return;
+        }
+        let document = doc.id;
+        let partial = doc.partial.take().is_some();
+        let batch = doc.pending_batch.take();
+        if let Origin::Result(result) = &doc.origin
+            && summary.fingerprint.len != result.bytes
+        {
+            doc.caution = Some(format!(
+                "This file is {} bytes now; the conversion wrote {} bytes. It may have \
+                 changed since.",
+                summary.fingerprint.len, result.bytes
+            ));
+        }
+        match doc.restore.take() {
+            Some(restore) if !same_file(restore.fingerprint, summary.fingerprint) => {
+                // Never trust the path alone: the view waits. The
+                // engine gives the read back, so nothing of it
+                // outlives the change, an engine stop included.
+                doc.restore = Some(restore);
+                doc.phase = Phase::Changed {
+                    now: summary.fingerprint,
+                };
+                self.send(document, Asked::Close, out, |document| {
+                    Command::AnalysisClose { document }
+                });
+            }
+            restore => {
+                doc.phase = Phase::Open(Box::new(summary));
+                doc.refresh_total |= partial;
+                if let Some(restore) = restore {
+                    self.apply(at, restore, out);
+                }
+                self.fill(at, out);
+                self.fetch_bytes(at, out);
+                self.ensure_syntax(at, out);
+                if let Some(report) = batch {
+                    self.attach_batch(at, *report);
+                }
+            }
+        }
     }
 
     /// A page answered the request for `(generation, first)`.

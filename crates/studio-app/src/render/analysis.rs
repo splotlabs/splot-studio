@@ -102,6 +102,10 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
     global.set_can_back(doc.can_go_back());
     global.set_can_forward(doc.can_go_forward());
 
+    render_inspector(&global, doc, summary);
+}
+
+fn render_inspector(global: &Global<'_>, doc: &Document, summary: &DocumentSummary) {
     let (title, properties) = text::properties(summary, doc.origin(), doc.path(), doc.selected());
     global.set_inspector_title(title.into());
     let properties = properties.into_iter().map(property).collect();
@@ -119,9 +123,9 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
             .map_or_else(String::new, |s| extent(&s.row.element).0.to_string())
             .into(),
     );
-    super::evidence::render(&global, &doc.evidence, doc.selection_pending());
+    super::evidence::render(global, &doc.evidence, doc.selection_pending());
     render_bytes(
-        &global,
+        global,
         doc.bytes(),
         summary.fingerprint.len,
         selected,

@@ -237,11 +237,10 @@ fn clearing_the_cache_with_no_documents_keeps_the_engine_until_the_reply() {
     let effects = analysis.input(Input::ClearCache);
     assert_eq!(commands(&effects), [&Command::AnalysisClearCache]);
     assert!(analysis.needs_engine());
-    assert!(analysis.input(Input::ClearCache).is_empty());
-    assert!(
-        analysis
-            .event(effects[0].request_id, Event::AnalysisCacheCleared)
-            .is_empty()
+    assert_eq!(analysis.input(Input::ClearCache), []);
+    assert_eq!(
+        analysis.event(effects[0].request_id, Event::AnalysisCacheCleared),
+        []
     );
     assert!(!analysis.needs_engine());
     assert_eq!(analysis.notice(), Some("Studio cleared the index cache."));
