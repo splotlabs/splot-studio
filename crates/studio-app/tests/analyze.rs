@@ -962,6 +962,7 @@ fn reference_table_follows_the_native_bridge(rig: &mut Rig, scratch: &Scratch) {
         .analysis_input(Input::TimelineSelect(TimelineTarget::CodedOffset {
             offset: 85,
         }));
+    rig.idle("Bridge coded frame");
     rig.global().invoke_layer_filter(1);
     rig.idle("filtered Bridge coded frame");
     filter_to_bridge_type(rig);
