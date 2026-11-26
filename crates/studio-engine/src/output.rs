@@ -18,11 +18,46 @@ use std::rc::Rc;
 
 use splot_encode::ivf::IvfWriter;
 use splot_encode::{Config, Packet};
+use studio_domain::export::{ExportArtifactKind, ExportProgress, ExportStage};
 use studio_domain::job::FailureCode;
 use studio_domain::settings::OutputKind;
 use tempfile::NamedTempFile;
 
 use crate::job::Stop;
+
+/// Synchronous worker services for the decoded export job.
+pub(crate) trait ExportControl {
+    /// Whether the worker accepted a cancellation.
+    fn cancelled(&self) -> bool;
+
+    /// Creates an exclusive temporary file and registers it with the worker.
+    fn create_temp(
+        &self,
+        kind: ExportArtifactKind,
+        destination: &Path,
+        source: &FileId,
+    ) -> Result<NamedTempFile, Stop>;
+
+    /// Waits for the app to save the temporary paths. Call before writing output.
+    fn await_prepared(&self) -> Result<(), Stop>;
+
+    /// Reports the current phase. The publication claim reports `Publishing`.
+    fn stage(&self, stage: ExportStage);
+
+    /// Reports counts. The worker may replace a progress event that is still pending.
+    fn progress(&self, progress: ExportProgress);
+
+    /// Claims publication for the full batch. Flush, sync and verify the files first.
+    fn claim_publish(&self, frames: u64) -> Result<(), Stop>;
+
+    /// Publishes one verified file. Records its path even if a directory sync fails.
+    fn publish(
+        &self,
+        kind: ExportArtifactKind,
+        temp: NamedTempFile,
+        destination: &Path,
+    ) -> Result<(), Stop>;
+}
 
 /// Which file a path names.
 ///
@@ -148,24 +183,64 @@ fn check_absent(destination: &Path) -> Result<(), Stop> {
 /// [`FailureCode::DestinationExists`] when the destination appeared, or
 /// [`FailureCode::Output`]. The temporary file is removed in both cases.
 pub fn publish(temp: NamedTempFile, destination: &Path) -> Result<u64, Stop> {
-    let file = temp.persist_noclobber(destination).map_err(|e| {
+    let publication = publish_recorded(temp, destination)?;
+    publication.sync?;
+    Ok(publication.bytes)
+}
+
+/// The file exists at its final path. A sync error does not remove it.
+pub(crate) struct Publication {
+    pub(crate) bytes: u64,
+    pub(crate) sync: Result<(), Stop>,
+}
+
+/// Publishes without replacing another file. Keeps sync errors separate from rename errors.
+pub(crate) fn publish_recorded(
+    temp: NamedTempFile,
+    destination: &Path,
+) -> Result<Publication, Stop> {
+    publish_with_sync(temp, destination, sync_parent)
+}
+
+fn publish_with_sync(
+    temp: NamedTempFile,
+    destination: &Path,
+    sync: impl FnOnce(&Path) -> io::Result<()>,
+) -> Result<Publication, Stop> {
+    let bytes = temp
+        .as_file()
+        .metadata()
+        .map_err(|e| output(format!("Cannot read the temporary file size. {e}")))?
+        .len();
+    let _file = temp.persist_noclobber(destination).map_err(|e| {
         if e.error.kind() == io::ErrorKind::AlreadyExists {
             exists()
         } else {
             output(format!("cannot publish the output: {}", e.error))
         }
     })?;
-    // Make the new name durable too. Directories cannot be opened for this
-    // outside Unix; there the rename's own durability applies.
+    let sync = sync(destination).map_err(|e| {
+        output(format!(
+            "The file was published, but its folder sync failed. {e}"
+        ))
+    });
+    Ok(Publication { bytes, sync })
+}
+
+fn sync_parent(destination: &Path) -> io::Result<()> {
     #[cfg(unix)]
-    if let Some(dir) = destination.parent().filter(|d| !d.as_os_str().is_empty()) {
-        File::open(dir)
-            .and_then(|dir| dir.sync_all())
-            .map_err(|e| output(format!("published, but cannot sync its directory: {e}")))?;
+    {
+        let parent = destination
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        File::open(parent)?.sync_all()
     }
-    file.metadata()
-        .map(|metadata| metadata.len())
-        .map_err(|e| output(format!("published, but cannot read its size: {e}")))
+    #[cfg(not(unix))]
+    {
+        let _ = destination;
+        Ok(())
+    }
 }
 
 /// Writes packets in one output format and counts the bytes.
