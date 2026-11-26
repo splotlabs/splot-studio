@@ -1664,3 +1664,104 @@ fn jobs_list_each_conversion_with_its_own_state() {
     app.state.interrupt_for_shutdown();
     assert_eq!(list(&app)[2], (abs("/m/c.y4m"), State::Interrupted));
 }
+
+#[test]
+fn related_replay_checks_the_current_engine_and_keeps_the_original_record() {
+    use studio_domain::protocol::OptionsIdentity;
+
+    let mut app = App::new();
+    let identity = |revision: &str| OptionsIdentity {
+        schema: 1,
+        codec_revision: revision.into(),
+    };
+    app.apply(Intent::EngineAnswered(Ok(Capabilities {
+        options: Some(identity("original")),
+        ..capabilities(true)
+    })));
+    app.add(&["/m/replay.y4m"], ready);
+    app.apply(Intent::OptionEdited {
+        key: "keyint".into(),
+        value: Some(OptionValue::Integer(3)),
+    });
+    let (id, original) = only_start(&app.apply(Intent::ConvertRequested).effects);
+    let policy = |value| EffectiveOption {
+        key: "keyint".into(),
+        requested: Some(OptionValue::Integer(3)),
+        value: OptionValue::Integer(value),
+        origin: OptionValue::Choice("explicit".into()),
+        screen: None,
+        screen_origin: None,
+    };
+    app.apply(Intent::JobPolicy {
+        id,
+        values: vec![policy(3)],
+    });
+    app.complete(id);
+    let original_item = app.state.items()[0].clone();
+
+    app.apply(Intent::EngineAnswered(Ok(Capabilities {
+        options: Some(identity("current")),
+        ..capabilities(true)
+    })));
+    app.apply(Intent::OptionEdited {
+        key: "keyint".into(),
+        value: Some(OptionValue::Integer(7)),
+    });
+    let prepare = |app: &mut App, action| {
+        let effects = app
+            .apply(Intent::PrepareRelated {
+                item: original_item.id(),
+                action,
+            })
+            .effects;
+        match effects.as_slice() {
+            [Effect::PrepareRelated { request, job }] => (*request, (**job).clone()),
+            _ => unreachable!("A related preparation should start one check."),
+        }
+    };
+    let (request, job) = prepare(&mut app, RelatedAction::Reencode);
+    assert_eq!(job.settings, original.settings);
+    assert_eq!(job.identity, Some(identity("current")));
+    let mut changed = facts(None);
+    changed.fingerprint.len += 1;
+    app.apply(Intent::RelatedPrepared {
+        request,
+        result: Ok((Box::new(changed), vec![policy(4)])),
+    });
+    assert!(matches!(
+        app.state.related(),
+        Some(RelatedPreview::Failed(_))
+    ));
+    assert_eq!(app.state.items(), std::slice::from_ref(&original_item));
+    app.apply(Intent::RelatedDeclined);
+
+    let (request, _) = prepare(&mut app, RelatedAction::CloneSettings);
+    app.apply(Intent::RelatedPrepared {
+        request,
+        result: Ok((Box::new(facts(None)), vec![policy(4)])),
+    });
+    assert!(
+        matches!(app.state.related(), Some(RelatedPreview::Ready { detail, .. }) if
+        detail.contains("encoder revision") && detail.contains("3 → 4"))
+    );
+    assert_eq!(
+        app.state.option_request().values.get("keyint"),
+        Some(&OptionValue::Integer(7))
+    );
+    app.apply(Intent::RelatedApproved);
+    assert_eq!(app.state.option_request(), &original.settings);
+    assert_eq!(app.state.items(), std::slice::from_ref(&original_item));
+
+    let (request, _) = prepare(&mut app, RelatedAction::Reencode);
+    app.apply(Intent::RelatedPrepared {
+        request,
+        result: Ok((Box::new(facts(None)), vec![policy(4)])),
+    });
+    assert_eq!(app.state.items().len(), 1);
+    let (_, replay) = only_start(&app.apply(Intent::RelatedApproved).effects);
+    assert_eq!(replay.settings, original.settings);
+    assert_ne!(replay.destination, original.destination);
+    assert_eq!(app.state.items()[0], original_item);
+    let attempt = app.state.items()[1].attempt();
+    assert_eq!(attempt.map(|a| a.policy.as_slice()), Some(&[policy(4)][..]));
+}

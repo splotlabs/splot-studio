@@ -75,7 +75,7 @@ impl AppState {
         }
     }
 
-    fn begin_run(&mut self) {
+    pub(super) fn begin_run(&mut self) {
         self.run = Some(Run {
             settings: self.settings.clone(),
             attempted: Vec::new(),

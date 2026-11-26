@@ -21,7 +21,10 @@
 
 mod files;
 mod options;
+mod related;
 mod run;
+
+pub use related::{RelatedAction, RelatedPreview, RelatedResolution};
 #[cfg(test)]
 mod tests;
 
@@ -137,6 +140,24 @@ pub enum Intent {
     OmissionsConfirmed,
     /// The user dismissed the confirmation.
     OmissionsDeclined,
+    /// Prepare a job action with fresh source and policy checks.
+    PrepareRelated {
+        /// The source or completed job.
+        item: ItemId,
+        /// The requested operation.
+        action: RelatedAction,
+    },
+    /// A fresh source and option check answered.
+    RelatedPrepared {
+        /// The preparation request.
+        request: u64,
+        /// The fresh source and policy or the compatibility error.
+        result: RelatedResolution,
+    },
+    /// Approve the checked proposal.
+    RelatedApproved,
+    /// Close the related job proposal.
+    RelatedDeclined,
     /// Stop the converting file; the run pauses.
     CancelRequested,
     /// Something happened to a job.
@@ -191,6 +212,13 @@ pub enum Effect {
         item: ItemId,
         /// The request.
         request: ProbeRequest,
+    },
+    /// Validate a proposed action before adding an item to the queue.
+    PrepareRelated {
+        /// The preparation request.
+        request: u64,
+        /// The job proposed for validation.
+        job: Box<JobSpec>,
     },
     /// Start `job` with a new worker.
     Start {
@@ -386,6 +414,7 @@ pub struct AppState {
     /// the primary action reads Continue.
     paused: bool,
     confirmation: Option<Confirmation>,
+    related: Option<related::Related>,
     /// The probe in flight: its request and item.
     probing: Option<(u64, ItemId)>,
     dialog: Option<Dialog>,
@@ -425,6 +454,7 @@ impl AppState {
             run: None,
             paused: false,
             confirmation: None,
+            related: None,
             probing: None,
             dialog: None,
             restored: None,
@@ -566,7 +596,14 @@ impl AppState {
                 }
             }
             Intent::EngineAnswered(answer) => self.engine = Some(answer),
-            Intent::ConvertRequested => self.convert(disk),
+            Intent::ConvertRequested if self.related.is_none() => self.convert(disk),
+            Intent::ConvertRequested => {}
+            Intent::PrepareRelated { item, action } => {
+                update.effects.extend(self.prepare_related(item, action));
+            }
+            Intent::RelatedPrepared { request, result } => self.related_prepared(request, result),
+            Intent::RelatedApproved => self.approve_related(disk),
+            Intent::RelatedDeclined => self.related = None,
             Intent::OmissionsConfirmed => self.confirm(),
             Intent::OmissionsDeclined => self.decline(),
             Intent::CancelRequested => self.cancel(now, update),
@@ -741,6 +778,9 @@ impl AppState {
         let item = self
             .selected()
             .filter(|i| i.state == ItemState::Completed)?;
+        if item.attempt()?.job.purpose != studio_domain::job::JobPurpose::Encode {
+            return None;
+        }
         match item.ending() {
             Some(crate::queue::Ending::Completed(report)) => Some(ResultOf {
                 item: item.id,

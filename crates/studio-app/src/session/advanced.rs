@@ -438,14 +438,14 @@ fn serve(engine: &Path, post: &Post, latest: &Latest, incoming: &Receiver<()>) {
     }
 }
 
-struct Connection {
+pub(super) struct Connection {
     worker: Worker,
     replies: Receiver<Delivery>,
     identity: OptionsIdentity,
 }
 
 impl Connection {
-    fn open(engine: &Path, identity: &OptionsIdentity) -> Result<Self, FieldError> {
+    pub(super) fn open(engine: &Path, identity: &OptionsIdentity) -> Result<Self, FieldError> {
         let (reply, replies) = sync_channel(2);
         let worker = Worker::spawn(engine, Role::Worker, move |message| {
             let _ = reply.send(message);
@@ -516,26 +516,9 @@ impl Connection {
         }
         let policy = match &request.input.source {
             None => Ok(Vec::new()),
-            Some(source) => collect_pages(current, |first| {
-                let event = self.ask(
-                    generation,
-                    Command::ResolveOptions {
-                        schema,
-                        source: Box::new(source.clone()),
-                        settings: request.input.settings.clone(),
-                        first,
-                        count: MAX_OPTIONS_PAGE_ITEMS,
-                    },
-                )?;
-                match event {
-                    Event::OptionsResolved {
-                        first,
-                        total,
-                        values,
-                    } => Ok((first, total, values)),
-                    event => Err(reply_error(event)),
-                }
-            }),
+            Some(source) => {
+                self.resolve(generation, schema, source, &request.input.settings, current)
+            }
         };
         AdvancedReply {
             preview: request.preview,
@@ -548,7 +531,37 @@ impl Connection {
         }
     }
 
-    fn ask(&mut self, id: u64, command: Command) -> Result<Event, FieldError> {
+    pub(super) fn resolve(
+        &mut self,
+        generation: u64,
+        schema: u32,
+        source: &SourceFacts,
+        settings: &OptionRequest,
+        current: &impl Fn() -> bool,
+    ) -> Result<Vec<EffectiveOption>, FieldError> {
+        collect_pages(current, |first| {
+            let event = self.ask(
+                generation,
+                Command::ResolveOptions {
+                    schema,
+                    source: Box::new(source.clone()),
+                    settings: settings.clone(),
+                    first,
+                    count: MAX_OPTIONS_PAGE_ITEMS,
+                },
+            )?;
+            match event {
+                Event::OptionsResolved {
+                    first,
+                    total,
+                    values,
+                } => Ok((first, total, values)),
+                event => Err(reply_error(event)),
+            }
+        })
+    }
+
+    pub(super) fn ask(&mut self, id: u64, command: Command) -> Result<Event, FieldError> {
         self.worker
             .send(id, command)
             .map_err(|error| engine_error(error.to_string()))?;
