@@ -914,6 +914,7 @@ export component AppWindow inherits Window {
     // Simple controls: views of the same settings as the raw fields.
     in property <[string]> quality-labels;
     in property <int> quality-index;
+    in property <bool> rate-overridden;
     in property <[string]> priority-labels;
     in property <int> priority-index;
     in property <string> priority-caption;
@@ -1705,14 +1706,14 @@ export component AppWindow inherits Window {
                                         options: root.quality-labels;
                                         selected: root.quality-index;
                                         enabled: !root.locked;
-                                        label: root.quality-index < 0 ? "Quality: custom, rate factor " + root.crf : "Quality";
+                                        label: root.rate-overridden ? "Quality: custom rate control" : root.quality-index < 0 ? "Quality: custom, rate factor " + root.crf : "Quality";
                                         chosen(i) => {
                                             root.quality-selected(i);
                                         }
                                     }
 
                                     if root.quality-index < 0: Caption {
-                                        text: "Custom · rate factor " + root.crf + " (set in Advanced)";
+                                        text: root.rate-overridden ? "Custom rate control (set in Advanced)" : "Custom · rate factor " + root.crf + " (set in Advanced)";
                                         wrap: no-wrap;
                                     }
 
@@ -2107,7 +2108,7 @@ export component AppWindow inherits Window {
                                             }
 
                                             Caption {
-                                                text: root.crf-min + "–" + root.crf-max + ", higher is smaller";
+                                                text: root.rate-overridden ? "Used when rate control inherits from Simple." : root.crf-min + "–" + root.crf-max + ", higher is smaller";
                                             }
                                         }
 

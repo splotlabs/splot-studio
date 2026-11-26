@@ -95,6 +95,7 @@ fn render_settings(window: &AppWindow, state: &AppState) {
     window.set_output_index(AppState::output_index(settings.output));
     window.set_preset(i32::from(settings.preset.get()));
     window.set_crf(i32::from(settings.crf.get()));
+    window.set_rate_overridden(view.quality_is_overridden());
     window.set_quality_index(simple::index(&Quality::ALL, view.quality()));
     let priority = view.priority();
     window.set_priority_index(simple::index(&Priority::ALL, priority));
