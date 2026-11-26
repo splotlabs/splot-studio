@@ -55,6 +55,7 @@ pub(super) fn replay(
                 read_failed(error)
             }
         })?;
+        check_cancelled(cancelled)?;
         let Some(unit) = unit else {
             return Err(unavailable(
                 "The selected coded frame is outside replay coverage.",
