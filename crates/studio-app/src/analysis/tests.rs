@@ -1635,6 +1635,55 @@ fn resolve_timeline(
 }
 
 #[test]
+fn reference_inspection_keeps_coded_identity_without_a_range_page() {
+    use studio_domain::timeline::{TimelineSelection, TimelineTarget, TimelineView};
+
+    let (mut analysis, engine) = opened(40);
+    let scan = start_timeline(&mut analysis);
+    let shown = TimelineSelection {
+        coded_ordinal: 7,
+        coded_offset: 19,
+        output_ordinal: Some(2),
+        showing_offset: Some(37),
+        time: None,
+    };
+    resolve_timeline(
+        &mut analysis,
+        &engine,
+        scan,
+        TimelineTarget::Output { index: 2 },
+        shown,
+    );
+    let effects = analysis.input(Input::EvidenceView(references::TAB));
+    engine.settle(&mut analysis, effects);
+    analysis.input(Input::TimelineRange {
+        view: TimelineView::Output,
+        first: 1,
+        limit: 2,
+        buckets: 1,
+    });
+    assert!(doc(&analysis).timeline().page().is_none());
+    assert_eq!(doc(&analysis).bytes().cursor, 37);
+
+    let inspection = analysis.input(Input::InspectReferences);
+    assert!(matches!(
+        commands(&inspection)[..],
+        [Command::AnalysisReferences { query, .. }] if query.coded_offset == 19
+    ));
+    let request = inspection[0].request_id;
+    let rebuild = analysis.input(Input::TimelineBuild);
+    assert!(matches!(
+        commands(&rebuild)[..],
+        [
+            Command::AnalysisCancelReferences { reference, .. },
+            Command::AnalysisIdentityScan { .. }
+        ] if *reference == request
+    ));
+    assert!(!doc(&analysis).references.busy());
+    assert_eq!(doc(&analysis).reference_offset(), Some(37));
+}
+
+#[test]
 fn reference_inspection_rejects_cancelled_and_mismatched_answers() {
     use studio_domain::identity::DecodeLayers;
     use studio_domain::references::{ReferenceEvidence, ReferenceFrame};

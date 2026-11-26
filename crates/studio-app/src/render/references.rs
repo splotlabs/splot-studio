@@ -24,7 +24,7 @@ pub(super) fn render_document(view: &References<'_>, document: Option<&Document>
     let ready = document.reference_offset().is_some() && !document.selection_pending();
     let references = &document.references;
     let busy = references.busy();
-    let evidence = references.evidence().filter(|_| ready);
+    let evidence = document.reference_evidence().filter(|_| ready);
     view.set_can_inspect(ready && !busy && evidence.is_none());
     let status = references.notice().unwrap_or_else(|| {
         if busy {

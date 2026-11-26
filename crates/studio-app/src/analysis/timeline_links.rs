@@ -48,6 +48,7 @@ pub(super) enum Request {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Timeline {
     scan: Option<u64>,
+    decode_selection: Option<LayerDecodeSelection>,
     collecting: bool,
     cancelling: bool,
     completion: Option<IdentityCompletion>,
@@ -118,6 +119,12 @@ impl Timeline {
     #[must_use]
     pub const fn selection(&self) -> Option<&TimelineSelection> {
         self.selection.as_ref()
+    }
+
+    pub(super) fn selection_for(&self, policy: LayerDecodeSelection) -> Option<&TimelineSelection> {
+        self.decode_selection
+            .filter(|selection| *selection == policy)?;
+        self.selection()
     }
 
     /// The latest timeline error, when applicable.
@@ -236,7 +243,8 @@ impl Analysis {
             Input::TimelineBuild if !doc.timeline.collecting => {
                 let document = doc.id;
                 let selection = doc.layer_decode_selection();
-                doc.timeline = Timeline::default();
+                self.cancel_references(at, out);
+                self.documents[at].timeline = Timeline::default();
                 let id = self.send(
                     document,
                     Asked::Timeline(Request::Build(selection)),
@@ -249,6 +257,7 @@ impl Analysis {
                 );
                 let timeline = &mut self.documents[at].timeline;
                 timeline.scan = Some(id);
+                timeline.decode_selection = Some(selection);
                 timeline.collecting = true;
             }
             Input::TimelineCancel if doc.timeline.can_cancel() => {

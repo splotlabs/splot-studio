@@ -74,10 +74,15 @@ impl Document {
     }
 
     pub(crate) fn reference_timeline(&self) -> Option<&TimelineSelection> {
-        self.timeline
-            .page()
-            .filter(|page| page.decode_selection == self.layer_decode_selection())?;
-        self.timeline.selection()
+        self.timeline.selection_for(self.layer_decode_selection())
+    }
+
+    pub(crate) fn reference_evidence(&self) -> Option<&ReferenceEvidence> {
+        let offset = self.reference_offset()?;
+        self.references.evidence().filter(|evidence| {
+            evidence.query.coded_offset == offset
+                && evidence.query.selection == self.layer_decode_selection()
+        })
     }
 }
 
@@ -153,7 +158,7 @@ impl Analysis {
         }
         let Some(offset) = usize::try_from(index)
             .ok()
-            .zip(doc.references.evidence())
+            .zip(doc.reference_evidence())
             .and_then(|(index, evidence)| follow_offset(evidence, index))
         else {
             return;
