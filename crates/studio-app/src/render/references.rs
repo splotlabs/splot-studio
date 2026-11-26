@@ -112,7 +112,14 @@ fn render(
                     || format!("{kind} · slot {}", link.slot),
                     |index| format!("{kind} reference {index} · slot {}", link.slot),
                 );
-                let scale = if link.scaled { "Scaled" } else { "Unit scale" };
+                let available = follow_offset(evidence, index).is_some();
+                let scale = if !available {
+                    "Scale unavailable"
+                } else if link.scaled {
+                    "Scaled"
+                } else {
+                    "Unit scale"
+                };
                 let detail = evidence
                     .slots
                     .iter()
@@ -124,7 +131,7 @@ fn render(
                 ReferenceLinkRow {
                     label: label.into(),
                     detail: format!("{detail}. {scale}.").into(),
-                    available: follow_offset(evidence, index).is_some(),
+                    available,
                 }
             })
             .collect(),
