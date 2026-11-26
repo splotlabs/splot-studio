@@ -103,6 +103,40 @@ pub enum ChromaLayout {
     Yuv444,
 }
 
+/// The position of a chroma sample relative to the luma grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChromaSiting {
+    /// At the left of the chroma cell.
+    Left,
+    /// At the center of the chroma cell.
+    Center,
+    /// At the top left of the chroma cell.
+    TopLeft,
+    /// At the top of the chroma cell.
+    Top,
+    /// At the bottom left of the chroma cell.
+    BottomLeft,
+    /// At the bottom of the chroma cell.
+    Bottom,
+}
+
+/// Source colour values that the encoder can carry. Absent values are unspecified.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SourceColor {
+    /// H.273 colour primaries.
+    pub primaries: Option<u8>,
+    /// H.273 transfer characteristics.
+    pub transfer: Option<u8>,
+    /// H.273 matrix coefficients.
+    pub matrix: Option<u8>,
+    /// Whether the source declares full range. False means declared limited range.
+    pub full_range: Option<bool>,
+    /// Chroma sample position.
+    pub chroma_siting: Option<ChromaSiting>,
+}
+
 /// How the engine reads a source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -225,6 +259,9 @@ pub struct SourceFacts {
     pub bit_depth: u8,
     /// The chroma layout.
     pub chroma: ChromaLayout,
+    /// Colour and sample properties that can be carried into the output.
+    #[serde(default)]
+    pub color: SourceColor,
     /// The frame count when it is known without decoding the whole file.
     pub frame_count: Option<u64>,
     /// Things the user must know before encoding this source.

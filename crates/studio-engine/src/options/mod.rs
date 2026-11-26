@@ -113,7 +113,7 @@ pub(crate) fn resolve(
         .map(|field| match field {
             Field::Config(field) => {
                 let requested = settings.values.get(field.key).cloned();
-                let origin = match field.class {
+                let label = match field.class {
                     OptionClass::Source => "source",
                     OptionClass::FirstPass => "pass workflow",
                     OptionClass::PresetOverrides => "individual preset fields",
@@ -121,11 +121,16 @@ pub(crate) fn resolve(
                     _ if matches!(field.key, "rate_control" | "preset") => "simple",
                     _ => "codec default",
                 };
+                let origin = if field.class == OptionClass::Mixed {
+                    config::content_origin(source, requested.as_ref())
+                } else {
+                    OptionValue::Choice(label.into())
+                };
                 EffectiveOption {
                     key: field.key.into(),
                     requested,
                     value: config::value(&config, field.key).unwrap_or(OptionValue::None),
-                    origin: OptionValue::Choice(origin.into()),
+                    origin,
                     screen: None,
                     screen_origin: None,
                 }

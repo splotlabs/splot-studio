@@ -267,9 +267,16 @@ fn option_queries_reject_schema_and_page_errors_and_keep_serving() -> TestResult
 #[test]
 fn resolve_options_pages_fit_the_control_budget() -> TestResult {
     let dir = tempfile::tempdir()?;
-    for color in ["420", "420p10"] {
+    for (color, tags) in [
+        ("420mpeg2", "Ip A1:1 XCOLORRANGE=LIMITED"),
+        ("420p10", "Ip A1:1"),
+    ] {
         let path = dir.path().join(format!("source-{color}.y4m"));
-        Clip::new(64, 64, color, 1).write(&path)?;
+        Clip {
+            tags,
+            ..Clip::new(64, 64, color, 1)
+        }
+        .write(&path)?;
         let mut live = Live::spawn()?;
         live.send(
             1,
@@ -283,10 +290,18 @@ fn resolve_options_pages_fit_the_control_budget() -> TestResult {
         };
         let request = OptionRequest {
             base: settings(OutputKind::Ivf),
-            values: [("preset.rdoq".into(), OptionValue::Bool(false))].into(),
+            values: [
+                ("preset.rdoq".into(), OptionValue::Bool(false)),
+                (
+                    "content".into(),
+                    OptionValue::Record([("timing_info".into(), OptionValue::Bool(false))].into()),
+                ),
+            ]
+            .into(),
         };
         let mut first = 0;
         let mut saw_requested_value = false;
+        let mut saw_content = false;
         loop {
             let request_id = u64::from(first) + 2;
             live.send(
@@ -323,13 +338,47 @@ fn resolve_options_pages_fit_the_control_budget() -> TestResult {
                     assert_eq!(value.value, OptionValue::Bool(false));
                     saw_requested_value = true;
                 }
+                if value.key == "content" {
+                    let OptionValue::Record(content) = &value.value else {
+                        return Err("expected effective content fields".into());
+                    };
+                    let OptionValue::Record(origin) = &value.origin else {
+                        return Err("expected content origins".into());
+                    };
+                    let (siting, siting_origin) = if color == "420mpeg2" {
+                        (OptionValue::Choice("left".into()), "source")
+                    } else {
+                        (OptionValue::None, "codec default")
+                    };
+                    assert_eq!(content["chroma_sample_position"], siting);
+                    assert_eq!(content["full_range"], OptionValue::Bool(false));
+                    assert_eq!(
+                        origin["full_range"],
+                        OptionValue::Choice(siting_origin.into())
+                    );
+                    assert_eq!(
+                        origin["chroma_sample_position"],
+                        OptionValue::Choice(siting_origin.into())
+                    );
+                    assert_eq!(content["color_primaries"], OptionValue::Integer(2));
+                    assert_eq!(
+                        origin["color_primaries"],
+                        OptionValue::Choice("codec default".into())
+                    );
+                    assert_eq!(content["timing_info"], OptionValue::Bool(false));
+                    assert_eq!(
+                        origin["timing_info"],
+                        OptionValue::Choice("explicit".into())
+                    );
+                    saw_content = true;
+                }
             }
             first += u32::try_from(values.len())?;
             if first == total {
                 break;
             }
         }
-        assert!(saw_requested_value);
+        assert!(saw_requested_value && saw_content);
         live.send(
             u64::MAX,
             Command::ResolveOptions {

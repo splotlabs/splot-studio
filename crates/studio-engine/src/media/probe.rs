@@ -306,6 +306,7 @@ fn accept(
             pixel_aspect: accepted.square.then_some(Rational { num: 1, den: 1 }),
             bit_depth: accepted.header.bit_depth,
             chroma: chroma(accepted.header.format),
+            color: source::source_color(&accepted.header, &accepted.content),
             // Container frame counts include packets an edit list hides;
             // the job counts decoded frames instead.
             frame_count: None,
@@ -840,6 +841,32 @@ mod tests {
                 square_limited,
                 vec![Disclosure::ColorUnspecified]
             )
+        );
+    }
+
+    #[test]
+    fn probe_facts_preserve_known_and_unknown_colour_values() {
+        use studio_domain::job::SourceColor;
+
+        let stream = VIDEO.replacen(
+            '{',
+            r#"{"color_range":"tv","color_primaries":"bt709","color_transfer":"unknown","color_space":"smpte170m","#,
+            1,
+        );
+        let report = report(&format!(r#"{{"streams":[{stream}]}}"#));
+        let probed = accept(&report, FINGERPRINT, None, "");
+        let Ok(probed) = probed else {
+            unreachable!("{probed:?}");
+        };
+        assert_eq!(
+            probed.facts.color,
+            SourceColor {
+                primaries: Some(1),
+                transfer: None,
+                matrix: Some(6),
+                full_range: Some(false),
+                chroma_siting: None,
+            }
         );
     }
 

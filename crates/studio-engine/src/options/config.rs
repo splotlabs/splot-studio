@@ -7,10 +7,11 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use splot_encode::config::options::{OPTIONS, OptionClass, OptionDescription, ValueShape};
 use splot_encode::y4m::Y4mHeader;
 use splot_encode::{
-    BitDepth, Config, ContentDescription, CroppingWindow, Error, KeyFrameMetadata, PixelFormat,
-    Preset, PresetError, RateControlMode, ThreadCount, TileLayout, Tune,
+    BitDepth, ChromaSamplePosition, Config, ContentDescription, CroppingWindow, Error,
+    KeyFrameMetadata, PixelFormat, Preset, PresetError, RateControlMode, ThreadCount, TileLayout,
+    Tune,
 };
-use studio_domain::job::{ChromaLayout, SourceFacts};
+use studio_domain::job::{ChromaLayout, ChromaSiting, SourceFacts};
 use studio_domain::options::{FieldError, OptionValue};
 use studio_domain::protocol::MAX_MESSAGE_BYTES;
 use studio_domain::settings::EncoderSettings;
@@ -31,8 +32,27 @@ pub(super) fn from_source(
         ChromaLayout::Yuv444 => PixelFormat::Yuv444,
     };
     config.frame_rate = (source.frame_rate.num, source.frame_rate.den);
+    let color = source.color;
+    config.content.color_primaries = color.primaries.unwrap_or(config.content.color_primaries);
+    config.content.transfer_characteristics = color
+        .transfer
+        .unwrap_or(config.content.transfer_characteristics);
+    config.content.matrix_coefficients = color.matrix.unwrap_or(config.content.matrix_coefficients);
+    config.content.full_range = color.full_range.unwrap_or(config.content.full_range);
+    config.content.chroma_sample_position = color.chroma_siting.map(chroma_position);
     config.content.sample_aspect_ratio = source.pixel_aspect.map(|aspect| (aspect.num, aspect.den));
     Ok(config)
+}
+
+const fn chroma_position(siting: ChromaSiting) -> ChromaSamplePosition {
+    match siting {
+        ChromaSiting::Left => ChromaSamplePosition::Left,
+        ChromaSiting::Center => ChromaSamplePosition::Center,
+        ChromaSiting::TopLeft => ChromaSamplePosition::TopLeft,
+        ChromaSiting::Top => ChromaSamplePosition::Top,
+        ChromaSiting::BottomLeft => ChromaSamplePosition::BottomLeft,
+        ChromaSiting::Bottom => ChromaSamplePosition::Bottom,
+    }
 }
 
 pub(crate) fn from_header(
@@ -337,11 +357,38 @@ pub(super) fn value(config: &Config, key: &str) -> Option<OptionValue> {
         "chroma" => choice(config.chroma.as_str()),
         "frame_rate" => ratio(config.frame_rate),
         "content" => {
-            let timing = ("timing_info", Bool(config.content.timing_info));
-            match config.content.sample_aspect_ratio {
-                Some(aspect) => record([timing, ("sample_aspect_ratio", ratio(aspect))]),
-                None => record([timing]),
-            }
+            let content = &config.content;
+            record([
+                ("color_primaries", number(content.color_primaries)),
+                (
+                    "transfer_characteristics",
+                    number(content.transfer_characteristics),
+                ),
+                ("matrix_coefficients", number(content.matrix_coefficients)),
+                ("full_range", Bool(content.full_range)),
+                (
+                    "chroma_sample_position",
+                    content
+                        .chroma_sample_position
+                        .map_or(OptionValue::None, |position| {
+                            choice(match position {
+                                ChromaSamplePosition::Left => "left",
+                                ChromaSamplePosition::Center => "center",
+                                ChromaSamplePosition::TopLeft => "top_left",
+                                ChromaSamplePosition::Top => "top",
+                                ChromaSamplePosition::BottomLeft => "bottom_left",
+                                ChromaSamplePosition::Bottom => "bottom",
+                            })
+                        }),
+                ),
+                (
+                    "sample_aspect_ratio",
+                    content.sample_aspect_ratio.map_or(OptionValue::None, ratio),
+                ),
+                ("timing_info", Bool(content.timing_info)),
+                ("mastering_display", OptionValue::None),
+                ("content_light_level", OptionValue::None),
+            ])
         }
         "key_frame_metadata" => record([
             (
@@ -389,6 +436,33 @@ pub(super) fn value(config: &Config, key: &str) -> Option<OptionValue> {
         }),
         _ => return None,
     })
+}
+
+pub(super) fn content_origin(source: &SourceFacts, requested: Option<&OptionValue>) -> OptionValue {
+    let color = source.color;
+    let origin = |known| choice(if known { "source" } else { "codec default" });
+    let explicit_timing = matches!(requested, Some(OptionValue::Record(values)) if values.contains_key("timing_info"));
+    record([
+        ("color_primaries", origin(color.primaries.is_some())),
+        ("transfer_characteristics", origin(color.transfer.is_some())),
+        ("matrix_coefficients", origin(color.matrix.is_some())),
+        ("full_range", origin(color.full_range.is_some())),
+        (
+            "chroma_sample_position",
+            origin(color.chroma_siting.is_some()),
+        ),
+        ("sample_aspect_ratio", origin(source.pixel_aspect.is_some())),
+        (
+            "timing_info",
+            choice(if explicit_timing {
+                "explicit"
+            } else {
+                "codec default"
+            }),
+        ),
+        ("mastering_display", origin(false)),
+        ("content_light_level", origin(false)),
+    ])
 }
 
 fn rate_control_value(mode: RateControlMode) -> Option<OptionValue> {
@@ -614,6 +688,24 @@ mod tests {
                 "content",
                 record([("full_range", OptionValue::Bool(true))]),
                 "content.full_range",
+            ),
+            (
+                "content",
+                record([
+                    ("timing_info", OptionValue::Bool(true)),
+                    ("color_primaries", number(1)),
+                ]),
+                "content.color_primaries",
+            ),
+            (
+                "content",
+                record([("chroma_sample_position", choice("left"))]),
+                "content.chroma_sample_position",
+            ),
+            (
+                "content",
+                record([("sample_aspect_ratio", ratio((1, 1)))]),
+                "content.sample_aspect_ratio",
             ),
             ("keyint", number(0), "keyint"),
             ("bit_depth", number(10), "bit_depth"),

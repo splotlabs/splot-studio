@@ -191,7 +191,7 @@ pub struct EffectiveOption {
         deserialize_with = "present_value"
     )]
     pub screen: Option<OptionValue>,
-    /// How the encoder selected the ordinary value.
+    /// How the encoder selected the ordinary value. A mixed record has an origin for each field.
     pub origin: OptionValue,
     /// How the encoder selected the screen-content value.
     #[serde(

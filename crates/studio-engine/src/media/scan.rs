@@ -302,6 +302,7 @@ mod tests {
                     den: rate.1,
                 },
                 pixel_aspect: None,
+                color: Default::default(),
                 bit_depth: 8,
                 chroma: ChromaLayout::Yuv420,
                 frame_count: None,

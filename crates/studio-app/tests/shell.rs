@@ -68,6 +68,7 @@ fn facts() -> SourceFacts {
         height: 48,
         frame_rate: Rational { num: 25, den: 1 },
         pixel_aspect: None,
+        color: Default::default(),
         bit_depth: 8,
         chroma: ChromaLayout::Yuv420,
         frame_count: Some(10),

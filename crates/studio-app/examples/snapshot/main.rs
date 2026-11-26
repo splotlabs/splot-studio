@@ -88,6 +88,7 @@ fn facts(frame_count: Option<u64>) -> SourceFacts {
             den: 1001,
         },
         pixel_aspect: Some(Rational { num: 1, den: 1 }),
+        color: Default::default(),
         bit_depth: 10,
         chroma: ChromaLayout::Yuv420,
         frame_count,
