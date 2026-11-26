@@ -415,14 +415,20 @@ impl Preview {
                 fingerprint: new_fingerprint,
                 digest: new_digest,
             }),
-        ) = (&self.scene.stage, &mut scene.stage)
+        ) = (&mut self.scene.stage, &mut scene.stage)
             && document == new_document
             && path == new_path
             && fingerprint == new_fingerprint
             && new_digest.bytes > digest.bytes
         {
-            // A progress message must not restart an in-flight decode or replace the view.
-            self.document_digest = Some(std::mem::replace(new_digest, digest.clone()));
+            if new_digest.bytes == new_fingerprint.len {
+                // A frame export needs a picture verified against the complete source.
+                // Keep the selected output and view while the worker verifies it.
+                digest.clone_from(new_digest);
+                self.document_digest = None;
+            } else {
+                self.document_digest = Some(std::mem::replace(new_digest, digest.clone()));
+            }
         }
         if scene.stage != self.scene.stage {
             self.release_document(&mut out);
