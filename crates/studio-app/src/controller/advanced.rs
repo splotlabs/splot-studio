@@ -226,6 +226,13 @@ impl Controller {
     }
 
     fn edit_advanced(self: &Rc<Self>, id: &str, text: &str) {
+        let control = id.rsplit('/').next().unwrap_or(id);
+        if (matches!(control, "@mode" | "@state" | "@frames" | "@add")
+            || control.starts_with("@remove"))
+            && let Some(window) = self.window.upgrade()
+        {
+            window.invoke_flush_advanced_draft();
+        }
         let proposed = {
             let session = self.session.borrow();
             let state = session.state();
@@ -238,27 +245,28 @@ impl Controller {
             let Some(descriptor) = selected(session.advanced_catalog(), &editor.selected) else {
                 return;
             };
-            (
-                (descriptor.key.clone(), id.to_owned()),
-                advanced::edit(
-                    descriptor,
-                    state.option_request(),
-                    session.advanced_policy(),
-                    id,
-                    text,
-                ),
-            )
+            let policy = session.advanced_policy();
+            let edit = advanced::edit(descriptor, state.option_request(), policy, id, text).map(
+                |request| {
+                    let detail = advanced::inspect(descriptor, &request, policy);
+                    (request, detail.fields)
+                },
+            );
+            (descriptor.key.clone(), edit)
         };
-        let (field, proposed) = proposed;
+        let (key, proposed) = proposed;
         match proposed {
-            Ok(proposed) => {
-                self.advanced.borrow_mut().invalid.remove(&field);
-                self.dispatch(Intent::ReplaceOptions(proposed));
+            Ok((request, fields)) => {
+                let mut editor = self.advanced.borrow_mut();
+                editor.invalid.remove(&(key.clone(), id.into()));
+                editor.reconcile_invalid(&key, id, &fields);
+                drop(editor);
+                self.dispatch(Intent::ReplaceOptions(request));
                 self.view_advanced(|_| {});
             }
             Err(message) => self.view_advanced(|editor| {
                 editor.invalid.insert(
-                    field,
+                    (key, id.into()),
                     InvalidEdit {
                         text: text.into(),
                         message,
@@ -393,6 +401,27 @@ impl Controller {
 }
 
 impl Editor {
+    fn reconcile_invalid(
+        &mut self,
+        key: &str,
+        action: &str,
+        fields: &[advanced::fields::FieldRow],
+    ) {
+        self.invalid = std::mem::take(&mut self.invalid)
+            .into_iter()
+            .filter_map(|((option, field), draft)| {
+                if option != key {
+                    return Some(((option, field), draft));
+                }
+                let field = reindex_draft(field, action)?;
+                fields
+                    .iter()
+                    .any(|row| row.id == field && row.kind != "readonly")
+                    .then_some(((option, field), draft))
+            })
+            .collect();
+    }
+
     fn render_rows(
         &mut self,
         window: &AppWindow,
@@ -606,6 +635,36 @@ impl Editor {
             .map(|row| row.id.to_string());
         self.pending_focus = None;
         field
+    }
+}
+
+fn reindex_draft(field: String, action: &str) -> Option<String> {
+    let Some((list, removed)) = action.rsplit_once("/@remove") else {
+        return Some(field);
+    };
+    let Some(row) = field
+        .strip_prefix(list)
+        .and_then(|suffix| suffix.strip_prefix('/'))
+    else {
+        return Some(field);
+    };
+    let (index, suffix) = row
+        .split_once('/')
+        .map_or((row, ""), |(index, suffix)| (index, suffix));
+    let (Ok(index), Ok(removed)) = (index.parse::<usize>(), removed.parse::<usize>()) else {
+        return Some(field);
+    };
+    match index.cmp(&removed) {
+        std::cmp::Ordering::Less => Some(field),
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Greater => {
+            let index = index - 1;
+            Some(if suffix.is_empty() {
+                format!("{list}/{index}")
+            } else {
+                format!("{list}/{index}/{suffix}")
+            })
+        }
     }
 }
 

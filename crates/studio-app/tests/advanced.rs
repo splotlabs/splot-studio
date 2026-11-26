@@ -257,6 +257,46 @@ fn check_context_edits(rig: &Rig) {
     });
 }
 
+fn check_structural_drafts(rig: &Rig) {
+    let window = rig.window();
+    window.invoke_advanced_search("rate control".into());
+    window.invoke_advanced_select("rate_control".into());
+    edit(window, "value/@mode", "constant_qp");
+    edit(window, "value/qp", "abc");
+    assert!(!window.get_advanced_error().is_empty());
+    edit(window, "value/@mode", "crf");
+    rig.until("the valid CRF mode", || {
+        window.get_advanced_error().is_empty()
+            && window
+                .get_advanced_fields()
+                .iter()
+                .any(|field| field.id == "value/crf")
+    });
+    window.invoke_advanced_reset("selected".into());
+
+    window.invoke_advanced_search("tiles".into());
+    window.invoke_advanced_select("tiles".into());
+    edit(window, "value/@mode", "explicit");
+    edit(window, "value/widths/@add", "");
+    edit(window, "value/widths/@add", "");
+    edit(window, "value/widths/1", "abc");
+    edit(window, "value/widths/@remove0", "");
+    assert!(
+        window
+            .get_advanced_fields()
+            .iter()
+            .any(|field| { field.id == "value/widths/0" && field.text == "abc" })
+    );
+    window.invoke_encode_requested();
+    assert_eq!(window.get_advanced_focus_field(), "value/widths/0");
+    assert!(window.get_can_encode());
+    edit(window, "value/widths/@remove0", "");
+    rig.until("the removed invalid list entry", || {
+        window.get_advanced_error().is_empty()
+    });
+    window.invoke_advanced_reset("selected".into());
+}
+
 fn check_nested_error_focus(rig: &Rig) {
     let window = rig.window();
     window.invoke_advanced_search("rate control".into());
@@ -333,6 +373,7 @@ fn advanced_edits_and_submits_the_displayed_policy() {
     change_key_interval(&rig);
     check_context_edits(&rig);
     check_nested_error_focus(&rig);
+    check_structural_drafts(&rig);
 
     window.invoke_advanced_search("keyint".into());
     window.invoke_advanced_select("keyint".into());
