@@ -41,6 +41,7 @@ pub(super) struct Editor {
     pending_focus: Option<(String, String)>,
     engine_error: Option<FieldError>,
     candidate: Option<OptionRequest>,
+    imported_changes: Option<String>,
     preview_started: bool,
     rows: Vec<AdvancedOptionRow>,
     fields: Vec<FieldRow>,
@@ -122,6 +123,7 @@ impl Controller {
         editor.inputs = None;
         if !open {
             editor.candidate = None;
+            editor.imported_changes = None;
             editor.preview_started = false;
         }
         editor.engine_error = None;
@@ -161,6 +163,7 @@ impl Controller {
             let refresh = editor.inputs.is_some() && !locked;
             if editor.inputs.is_some() {
                 editor.candidate = None;
+                editor.imported_changes = None;
                 editor.preview_started = false;
             }
             editor.inputs = Some(inputs);
@@ -180,6 +183,12 @@ impl Controller {
             }
         }
         let catalog = session.advanced_catalog();
+        window.set_advanced_preset_files_ready(
+            !catalog.is_empty()
+                && state
+                    .capabilities()
+                    .is_some_and(|cap| cap.options.is_some()),
+        );
         let policy = if locked {
             item.and_then(Item::attempt)
                 .map_or(&[][..], |attempt| &attempt.policy)
@@ -356,8 +365,17 @@ impl Controller {
     }
 
     fn queue_preset(self: &Rc<Self>, candidate: Option<OptionRequest>) {
+        self.queue_preset_preview(candidate, None);
+    }
+
+    pub(super) fn queue_preset_preview(
+        self: &Rc<Self>,
+        candidate: Option<OptionRequest>,
+        imported_changes: Option<String>,
+    ) {
         let mut editor = self.advanced.borrow_mut();
         editor.candidate = candidate;
+        editor.imported_changes = imported_changes;
         editor.preview_started = false;
         drop(editor);
         let outcome = self.session.borrow_mut().advanced_cancel_preview();
@@ -571,6 +589,16 @@ impl Editor {
                 advanced::differences(baseline, candidate)
             }
         });
+        let imported = self
+            .candidate
+            .as_ref()
+            .and(self.imported_changes.as_deref());
+        window.set_advanced_imported_preview(imported.is_some());
+        let text = if let Some(changes) = imported {
+            format!("{text}\n\n{changes}")
+        } else {
+            text
+        };
         window.set_advanced_preset_preview(text.into());
     }
 

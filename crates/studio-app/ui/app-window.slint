@@ -74,6 +74,8 @@ export struct Fact {
 // One job of the Jobs list: a conversion or a stream read. `state` says it
 // in words; the tone only repeats it. The bar shows only when the share is
 // known (`progress-known`); an operation without progress shows none.
+export enum JobAction { clone-settings, reencode, final-pass }
+
 export struct JobRow {
     kind: string,
     name: string,
@@ -83,6 +85,9 @@ export struct JobRow {
     progress-known: bool,
     progress: float,
     can-cancel: bool,
+    can-clone-settings: bool,
+    can-reencode: bool,
+    can-encode-with-pass: bool,
     // Kind, name, state and detail for screen readers.
     accessible: string,
 }
@@ -378,8 +383,10 @@ component Bar inherits Rectangle {
 // and, while it can be stopped, Cancel.
 component JobList inherits VerticalLayout {
     in property <[JobRow]> jobs;
+    in property <bool> actions-enabled;
     callback show(int);
     callback cancel(int);
+    callback action(int, JobAction);
 
     spacing: Tokens.space-3;
     // Room for the scroll bar beside the state words.
@@ -455,6 +462,35 @@ component JobList inherits VerticalLayout {
                 clicked => {
                     root.cancel(i);
                 }
+            }
+        }
+
+        if job.can-clone-settings || job.can-reencode || job.can-encode-with-pass: HorizontalLayout {
+            alignment: start;
+            spacing: Tokens.space-4;
+
+            if job.can-clone-settings: LinkButton {
+                text: "Clone settings";
+                quiet: true;
+                enabled: root.actions-enabled;
+                description: "Review the settings recorded for " + job.name;
+                clicked => { root.action(i, JobAction.clone-settings); }
+            }
+
+            if job.can-reencode: LinkButton {
+                text: "Re-encode";
+                quiet: true;
+                enabled: root.actions-enabled;
+                description: "Review a new encode with the settings recorded for " + job.name;
+                clicked => { root.action(i, JobAction.reencode); }
+            }
+
+            if job.can-encode-with-pass: LinkButton {
+                text: "Encode with pass";
+                quiet: true;
+                enabled: root.actions-enabled;
+                description: "Review an encode that uses the first pass for " + job.name;
+                clicked => { root.action(i, JobAction.final-pass); }
             }
         }
     }
@@ -863,6 +899,12 @@ export component AppWindow inherits Window {
     in property <string> jobs-label: "Jobs";
     in property <string> jobs-description;
     in property <[JobRow]> jobs;
+    in property <bool> job-can-generate-pass;
+    in property <bool> job-actions-enabled;
+    in property <string> job-related-title;
+    in property <string> job-related-detail;
+    in property <bool> job-related-ready;
+    in property <bool> job-related-failed;
 
     // Source. Paths are display strings; Rust keeps the real paths.
     in property <SourceView> source-view;
@@ -992,6 +1034,10 @@ export component AppWindow inherits Window {
     in property <string> advanced-error;
     in property <string> advanced-status;
     in property <string> advanced-preset-preview;
+    in property <bool> advanced-imported-preview;
+    in property <bool> advanced-preset-files-ready;
+    in property <bool> advanced-preset-file-error;
+    in property <string> advanced-preset-file-status;
     in property <bool> advanced-can-undo;
     in property <bool> advanced-can-redo;
     in property <bool> advanced-can-apply-preset;
@@ -1018,6 +1064,8 @@ export component AppWindow inherits Window {
     callback advanced-redo();
     callback advanced-preview-preset(int);
     callback advanced-apply-preset();
+    callback advanced-save-preset();
+    callback advanced-import-preset();
     changed advanced-open => {
         if !root.advanced-open {
             root.flush-advanced-draft();
@@ -1090,6 +1138,10 @@ export component AppWindow inherits Window {
     callback workspace-chosen(int);
     callback job-show(int);
     callback job-cancel(int);
+    callback job-action(int, JobAction);
+    callback job-generate-pass();
+    callback job-related-approve();
+    callback job-related-decline();
     callback change-requested();
     callback row-selected(int);
     callback row-action(int);
@@ -2168,6 +2220,10 @@ export component AppWindow inherits Window {
                                         error: root.advanced-error;
                                         status: root.advanced-status;
                                         preset-preview: root.advanced-preset-preview;
+                                        imported-preview: root.advanced-imported-preview;
+                                        preset-files-ready: root.advanced-preset-files-ready;
+                                        preset-file-error: root.advanced-preset-file-error;
+                                        preset-file-status: root.advanced-preset-file-status;
                                         can-undo: root.advanced-can-undo;
                                         can-redo: root.advanced-can-redo;
                                         can-apply-preset: root.advanced-can-apply-preset;
@@ -2197,6 +2253,8 @@ export component AppWindow inherits Window {
                                         undo => { root.advanced-undo(); }
                                         redo => { root.advanced-redo(); }
                                         apply-preset => { root.advanced-apply-preset(); }
+                                        save-preset => { root.advanced-save-preset(); }
+                                        import-preset => { root.advanced-import-preset(); }
                                         cancel-preset => {
                                             root.advanced-preset-candidate = root.preset;
                                             root.advanced-preview-preset(root.preset);
@@ -2569,12 +2627,62 @@ export component AppWindow inherits Window {
 
                     Caption {
                         text: root.jobs.length == 0
-                            ? "Nothing has run in this session. Conversions and stream reads are listed here."
-                            : "Conversions and stream reads of both workspaces. They run only while the window is open.";
+                            ? "Encodes, first passes and stream reads appear here."
+                            : "Encodes, first passes and stream reads run while the window is open.";
+                    }
+
+                    if root.job-can-generate-pass && root.job-related-title == "": HorizontalLayout {
+                        alignment: start;
+                        LinkButton {
+                            text: "Generate first pass…";
+                            description: "Review a first pass for the selected source and its variable bitrate settings";
+                            clicked => { root.job-generate-pass(); }
+                        }
+                    }
+
+                    if root.job-related-title != "": VerticalLayout {
+                        spacing: Tokens.space-2;
+                        Label {
+                            text: root.job-related-title;
+                            wrap: word-wrap;
+                        }
+
+                        HorizontalLayout {
+                            alignment: start;
+                            spacing: Tokens.space-2;
+
+                            if root.job-related-ready: Button {
+                                text: "Confirm";
+                                accessible-label: "Confirm " + root.job-related-title;
+                                clicked => { root.job-related-approve(); }
+                            }
+
+                            LinkButton {
+                                text: root.job-related-failed ? "Dismiss" : "Cancel";
+                                description: "Close this job preview";
+                                init => { self.focus(); }
+                                clicked => { root.job-related-decline(); }
+                            }
+                        }
+
+                        if root.job-related-detail != "": ScrollView {
+                            height: min(108px, max(50px, related-detail.preferred-height));
+                            horizontal-scrollbar-policy: always-off;
+                            content-width: self.visible-width;
+                            content-height: related-detail.preferred-height;
+
+                            related-detail := Caption {
+                                width: parent.width - Tokens.space-6;
+                                text: root.job-related-detail;
+                                color: root.job-related-failed ? Tokens.error : Tokens.text-secondary;
+                                wrap: char-wrap;
+                            }
+                        }
                     }
 
                     if root.jobs.length > 0: ScrollView {
-                        height: min(job-list.preferred-height, root.height - 6 * Tokens.space-6);
+                        height: min(job-list.preferred-height,
+                            max(60px, root.height - (root.job-related-title == "" ? 182px : 352px)));
                         content-height: job-list.preferred-height;
                         horizontal-scrollbar-policy: always-off;
 
@@ -2582,6 +2690,7 @@ export component AppWindow inherits Window {
                             width: parent.visible-width;
                             height: self.preferred-height;
                             jobs: root.jobs;
+                            actions-enabled: root.job-actions-enabled;
                             // Closing first would drop this handler before it asks.
                             show(i) => {
                                 root.job-show(i);
@@ -2592,6 +2701,9 @@ export component AppWindow inherits Window {
                             cancel(i) => {
                                 root.job-cancel(i);
                                 jobs-close.focus();
+                            }
+                            action(i, action) => {
+                                root.job-action(i, action);
                             }
                         }
                     }
