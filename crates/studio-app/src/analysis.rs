@@ -642,6 +642,13 @@ impl Analysis {
             Input::EvidenceView(tab) => {
                 let evidence = &mut self.documents[at].evidence;
                 evidence.tab = tab.clamp(0, 2);
+                let doc = &mut self.documents[at];
+                if doc.evidence.selected.is_none()
+                    && let Some(place) = doc.history.get_mut(doc.at)
+                {
+                    place.evidence_tab = doc.evidence.tab;
+                }
+                let evidence = &mut doc.evidence;
                 evidence.first = 0;
                 evidence.reveal_selection();
                 self.ensure_syntax(at, out);
@@ -1205,6 +1212,8 @@ impl Analysis {
             window: doc.bytes.offset,
             cursor: doc.bytes.cursor,
             evidence: None,
+            evidence_tab: doc.evidence.tab,
+            bytes_shown: doc.bytes.shown,
         });
         if doc.history.len() > HISTORY {
             doc.history.remove(0);
@@ -1244,14 +1253,11 @@ impl Analysis {
             row: place.row,
             position: Position::Unknown,
         });
-        doc.evidence.selected = place.evidence;
-        if let Some(pick) = place.evidence {
-            doc.evidence.tab = if matches!(pick, Pick::Finding { .. }) {
-                2
-            } else {
-                1
-            };
-        }
+        doc.evidence.selected = place.evidence.filter(|pick| {
+            !matches!(pick, Pick::Finding { .. }) || doc.evidence.has_finding(*pick)
+        });
+        doc.evidence.tab = place.evidence_tab;
+        doc.bytes.shown = place.bytes_shown;
         doc.evidence.reveal_selection();
         self.position_selection(at, out);
         self.fetch_bytes(at, out);

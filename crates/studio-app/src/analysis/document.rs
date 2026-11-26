@@ -161,6 +161,8 @@ pub(super) struct Place {
     pub(super) window: u64,
     pub(super) cursor: u64,
     pub(super) evidence: Option<Pick>,
+    pub(super) evidence_tab: i32,
+    pub(super) bytes_shown: bool,
 }
 
 /// The byte view of one document.

@@ -483,6 +483,7 @@ component EvidenceList inherits KeyboardFocus {
     }
 
     for row[i] in Analysis.evidence-rows: Rectangle {
+        x: 0;
         y: i * 24px;
         height: 24px;
         width: root.width;
@@ -498,6 +499,7 @@ component EvidenceList inherits KeyboardFocus {
         }
 
         if row.selected: Rectangle {
+            x: 0;
             width: 3px;
             height: parent.height;
             background: Tokens.accent;
@@ -1093,6 +1095,7 @@ export component AnalyzeView inherits VerticalLayout {
 
             VerticalLayout {
                 width: root.navigator-width;
+                alignment: start;
                 spacing: Tokens.space-1;
 
                 // The list's description says this already. `accessible-role:

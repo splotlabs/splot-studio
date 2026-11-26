@@ -663,6 +663,10 @@ fn linked_validation_evidence(rig: &mut Rig, scratch: &Scratch, clipboard: &RefC
     assert_eq!(rig.global().get_evidence_rows().row_count(), 1);
 
     rig.tab_to(Key::Home, |input| matches!(input, Input::EvidenceMove(_)));
+    // Earlier probe keys can also reach the navigator and byte view.
+    rig.inputs
+        .borrow_mut()
+        .retain(|input| matches!(input, Input::EvidenceMove(_)));
     rig.idle("the exact finding location");
     assert_eq!(rig.selected(), Some((1, Position::Row(1))));
     assert!(
@@ -708,6 +712,7 @@ fn linked_validation_evidence(rig: &mut Rig, scratch: &Scratch, clipboard: &RefC
     rig.global().invoke_back();
     rig.idle("the selection before the finding jump");
     assert_eq!(rig.selected(), Some((0, Position::Row(0))));
+    assert_eq!(rig.global().get_evidence_tab(), 1);
     rig.global().invoke_forward();
     rig.idle("the restored finding");
     assert_eq!(rig.selected(), Some((1, Position::Row(1))));

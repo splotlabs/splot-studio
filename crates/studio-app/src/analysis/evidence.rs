@@ -624,6 +624,7 @@ impl Analysis {
             place.window = doc.bytes.offset;
             place.cursor = doc.bytes.cursor;
             place.evidence = doc.evidence.selected;
+            place.bytes_shown = doc.bytes.shown;
         }
         doc.bytes.shown = true;
         doc.bytes.cursor = offset;
@@ -639,6 +640,7 @@ impl Analysis {
         doc.evidence.selected = Some(pick);
         if let Some(place) = doc.history.get_mut(doc.at) {
             place.evidence = Some(pick);
+            place.evidence_tab = doc.evidence.tab;
         }
         self.ensure_syntax(at, out);
     }

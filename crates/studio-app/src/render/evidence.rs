@@ -270,12 +270,13 @@ fn finding_detail(
 
 fn span_text(span: SyntaxSpan) -> String {
     format!(
-        "File byte {}, bit {}. Stream byte {}, bit {}. Length {} bits.",
+        "File byte {}, bit {}. Stream byte {}, bit {}. Length {} {}.",
         span.start.file_bit / 8,
         span.start.file_bit % 8,
         span.start.stream_bit / 8,
         span.start.stream_bit % 8,
-        span.bit_len
+        span.bit_len,
+        if span.bit_len == 1 { "bit" } else { "bits" }
     )
 }
 

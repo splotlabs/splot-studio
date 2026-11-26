@@ -1123,7 +1123,7 @@ fn closing_cancels_validation_and_old_syntax_cannot_reach_a_new_generation() {
             total: 0,
         },
     );
-    assert!(effects.is_empty());
+    assert_eq!(effects.len(), 0);
     assert!(doc(&analysis).evidence.syntax.is_none());
     assert!(doc(&analysis).evidence.validation.is_none());
 }
