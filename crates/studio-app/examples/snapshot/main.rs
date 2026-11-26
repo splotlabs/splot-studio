@@ -46,7 +46,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use slint::{ComponentHandle, Rgba8Pixel, SharedPixelBuffer};
+use slint::{ComponentHandle, Model, Rgba8Pixel, SharedPixelBuffer};
 use studio_app::activity::Input;
 use studio_app::engine::Picture;
 use studio_app::journal::{Journal, JournalCause, JournalItem, JournalPartial, JournalState};
@@ -756,6 +756,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         studio_app::render(&window, analyze.session.state(), now);
         analyze.render_picture(&window, name)?;
         studio_app::render_analysis(&window, analyze.session.analysis());
+        if matches!(name, "analyze-blocks-8bit" | "analyze-blocks-10bit") {
+            let blocks = window.global::<studio_app::Blocks>();
+            if blocks.get_rows().row_count() == 0 {
+                return Err(format!("No decoded block records. {}", blocks.get_status()).into());
+            }
+        }
         studio_app::render_jobs(
             &window,
             &studio_app::jobs::list(&encode, analyze.session.analysis()),
