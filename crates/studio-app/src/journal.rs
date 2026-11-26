@@ -12,8 +12,8 @@
 //!
 //! Version 2 adds the workspace and Analyze view. Version 3 adds typed
 //! settings, frozen submissions and effective attempt policies. Version 4 adds
-//! the job purpose and verified pass digest. Older jobs encode without a digest. Legacy
-//! journals keep their items and reports. Legacy settings become Simple
+//! the job purpose and verified pass digest. Version 5 adds export jobs and
+//! their publication receipts. Older journals keep their items and reports. Legacy settings become Simple
 //! requests, and unavailable policy and view data use their defaults. Waiting
 //! items with incomplete source facts need a new probe before preflight.
 //!

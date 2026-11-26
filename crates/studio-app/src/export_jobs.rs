@@ -184,21 +184,28 @@ impl ExportJob {
                     || self.publication_possible
                         && matches!(
                             (current, stage),
-                            (Checking, Decoding) | (Decoding, Verifying) | (Verifying, Publishing)
+                            (Checking, Decoding) | (Decoding, Verifying)
                         )
             }
-            Phase::Cancelling => {
-                if stage != Publishing {
-                    return true;
-                }
-                self.publication_possible
-            }
+            Phase::Cancelling => return stage != Publishing,
             _ => false,
         };
         if allowed {
             self.phase = Phase::Running(stage);
         }
         allowed
+    }
+
+    pub(crate) fn authorize_publication(&mut self, frames: u64) -> Result<bool, &'static str> {
+        match self.phase {
+            Phase::Cancelling => Ok(false),
+            Phase::Running(ExportStage::Verifying) if self.frames_match(frames) => {
+                // Remove kill eligibility before the worker can claim publication.
+                self.phase = Phase::Running(ExportStage::Publishing);
+                Ok(true)
+            }
+            _ => Err("The worker did not verify the requested output selection."),
+        }
     }
 
     pub(crate) fn published(&mut self, file: ExportArtifact) -> bool {
@@ -347,9 +354,10 @@ fn identified_output(file: &ExportTemp, path: &Path) -> Option<fs::Metadata> {
     if !metadata.is_file() {
         return None;
     }
-    let parent = fs::metadata(path.parent()?).ok()?;
-    if temp_identity(Some(metadata.clone())).as_ref() == Some(identity)
-        && temp_identity(Some(parent)).as_ref() == Some(parent_identity)
+    let parent_path = path.parent()?;
+    let parent = fs::metadata(parent_path).ok()?;
+    if temp_identity(path, &metadata).as_ref() == Some(identity)
+        && temp_identity(parent_path, &parent).as_ref() == Some(parent_identity)
     {
         Some(metadata)
     } else {
@@ -357,23 +365,41 @@ fn identified_output(file: &ExportTemp, path: &Path) -> Option<fs::Metadata> {
     }
 }
 
+#[cfg(unix)]
 fn temp_identity(
-    metadata: Option<fs::Metadata>,
+    _path: &Path,
+    metadata: &fs::Metadata,
 ) -> Option<studio_domain::export::ExportTempIdentity> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        metadata.map(|data| studio_domain::export::ExportTempIdentity {
-            device: data.dev(),
-            inode: data.ino(),
-            created: data.created().ok(),
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = metadata;
-        None
-    }
+    use std::os::unix::fs::MetadataExt;
+
+    Some(studio_domain::export::ExportTempIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        created: Some(metadata.created().ok()?),
+    })
+}
+
+#[cfg(windows)]
+fn temp_identity(
+    path: &Path,
+    _metadata: &fs::Metadata,
+) -> Option<studio_domain::export::ExportTempIdentity> {
+    let handle = winapi_util::Handle::from_path_any(path).ok()?;
+    let info = winapi_util::file::information(&handle).ok()?;
+    let metadata = handle.as_file().metadata().ok()?;
+    Some(studio_domain::export::ExportTempIdentity {
+        device: info.volume_serial_number(),
+        inode: info.file_index(),
+        created: info.creation_time().and_then(|_| metadata.created().ok()),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn temp_identity(
+    _path: &Path,
+    _metadata: &fs::Metadata,
+) -> Option<studio_domain::export::ExportTempIdentity> {
+    None
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -564,6 +590,9 @@ mod tests {
         assert!(job.set_stage(ExportStage::Decoding));
         assert!(!job.set_stage(ExportStage::Publishing));
         assert!(job.set_stage(ExportStage::Verifying));
+        assert!(!job.set_stage(ExportStage::Publishing));
+        assert!(job.authorize_publication(2).is_err());
+        assert_eq!(job.authorize_publication(1), Ok(true));
         assert!(job.set_stage(ExportStage::Publishing));
         let failure = Failure {
             code: FailureCode::Output,
@@ -590,6 +619,25 @@ mod tests {
         assert_eq!(export(&job).state, State::Partial);
     }
 
+    #[test]
+    fn publication_permission_respects_an_outstanding_cancel() {
+        let scratch = Scratch::new("export-publish-cancel");
+        let path = WirePath::from_path(&scratch.path("out.y4m"));
+        let request = request(ExportFormat::Y4m { path }, &scratch);
+        let mut job = ExportJob::queued(1, request);
+        job.publication_possible = true;
+        job.phase = Phase::Cancelling;
+
+        assert_eq!(job.authorize_publication(1), Ok(false));
+        assert_eq!(job.phase, Phase::Cancelling);
+        assert!(!job.set_stage(ExportStage::Publishing));
+
+        job.phase = Phase::Running(ExportStage::Verifying);
+        assert_eq!(job.authorize_publication(1), Ok(true));
+        assert_eq!(job.phase, Phase::Running(ExportStage::Publishing));
+        assert!(!export(&job).can_cancel());
+    }
+
     #[cfg(unix)]
     #[test]
     fn cleanup_path_check_accepts_native_file_names() -> Result<(), String> {
@@ -602,7 +650,7 @@ mod tests {
         )
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn interrupted_export_preserves_replacement_and_published_output()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -626,8 +674,12 @@ mod tests {
             kind,
             partial: WirePath::from_path(partial),
             destination: WirePath::from_path(destination),
-            identity: temp_identity(fs::symlink_metadata(partial).ok()),
-            parent_identity: temp_identity(fs::metadata(&scratch.0).ok()),
+            identity: fs::symlink_metadata(partial)
+                .ok()
+                .and_then(|metadata| temp_identity(partial, &metadata)),
+            parent_identity: fs::metadata(&scratch.0)
+                .ok()
+                .and_then(|metadata| temp_identity(&scratch.0, &metadata)),
         };
         fs::write(&layout_partial, b"layout temp")?;
         fs::write(&samples_partial, b"raw temp")?;
@@ -639,6 +691,8 @@ mod tests {
         ))?;
         job.prepared(&job.temporary)?;
         let layout_has_identity = identified_output(&job.temporary[0], &layout_partial).is_some();
+        #[cfg(windows)]
+        assert!(layout_has_identity);
         job.publication_possible = true;
         fs::hard_link(&layout_partial, &layout)?;
         let moved = scratch.path("moved");

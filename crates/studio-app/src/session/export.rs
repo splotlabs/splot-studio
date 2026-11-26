@@ -77,6 +77,15 @@ impl Session {
         self.export.is_some() || self.exports.active()
     }
 
+    pub(crate) fn export_cancelling(&self) -> bool {
+        self.export.as_ref().is_some_and(|active| {
+            self.exports
+                .rows()
+                .iter()
+                .any(|job| job.id == active.id && job.phase == Phase::Cancelling)
+        })
+    }
+
     /// The latest request error that needs the user's attention.
     #[must_use]
     pub fn export_notice(&self) -> Option<&str> {
@@ -229,6 +238,7 @@ impl Session {
         {
             return self.release_export(now);
         }
+        let journal_saved = result.is_ok();
         let result = match (save, result) {
             (Save::Start, Ok(())) => self.start_export_worker(id),
             (Save::Proceed, Ok(())) => self.send_export(id, Command::ExportProceed),
@@ -240,7 +250,16 @@ impl Session {
         };
         let mut outcome = export_changed();
         if let Err(message) = result {
-            self.fail_export(id, message);
+            if journal_saved
+                && self
+                    .export
+                    .as_ref()
+                    .is_some_and(|active| active.worker.is_some())
+            {
+                self.interrupt_export(id, message);
+            } else {
+                self.fail_export(id, message);
+            }
             outcome.merge(self.release_export(now));
         }
         outcome
@@ -279,6 +298,14 @@ impl Session {
     fn fail_export(&mut self, id: u64, message: String) {
         if let Some(job) = self.exports.job(id) {
             job.failure(message);
+        }
+        self.close_export_worker();
+        self.persist();
+    }
+
+    fn interrupt_export(&mut self, id: u64, message: String) {
+        if let Some(job) = self.exports.job(id) {
+            job.phase = Phase::Interrupted(message);
         }
         self.close_export_worker();
         self.persist();
@@ -366,6 +393,15 @@ impl Session {
                     ..Outcome::nothing()
                 };
             }
+            Event::ExportPublishReady { frames } => match job.authorize_publication(frames) {
+                Ok(true) => {
+                    if let Err(message) = self.send_export(id, Command::ExportPublish) {
+                        self.interrupt_export(id, message);
+                    }
+                }
+                Ok(false) => return Outcome::nothing(),
+                Err(message) => self.fail_export(id, message.to_owned()),
+            },
             Event::ExportPublished { file } => {
                 if job.published(file) {
                     self.persist();

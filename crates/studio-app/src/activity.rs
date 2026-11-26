@@ -311,6 +311,7 @@ impl Activity {
             | Event::ExportPrepared { .. }
             | Event::ExportStage { .. }
             | Event::ExportProgress { .. }
+            | Event::ExportPublishReady { .. }
             | Event::ExportPublished { .. }
             | Event::ExportFinished { .. }
             | Event::AnalysisFailed { .. } => Step::IGNORED,

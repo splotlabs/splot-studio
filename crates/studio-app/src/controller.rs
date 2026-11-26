@@ -554,7 +554,7 @@ impl Controller {
             }
         } else {
             self.clock.stop();
-            if !session.export_active() {
+            if !session.export_cancelling() {
                 self.cancel_deadline.stop();
             }
         }
