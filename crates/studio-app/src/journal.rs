@@ -10,12 +10,11 @@
 //! with its `KindFilter` and `LayerFilter`) as their serde forms; a change
 //! to any of those forms needs a new [`VERSION`] and a migration.
 //!
-//! Version 2 adds the [`JournalView`]: the workspace shown and the Analyze
-//! documents, as where to read them and the view to restore, never their
-//! facts. A version 1 journal is read as version 2 with the Encode
-//! workspace and no documents; its items and settings are the same DTOs,
-//! so nothing of them changes. The next save writes version 2, and the
-//! session saves once at start.
+//! Version 2 adds the workspace and Analyze view. Version 3 adds typed
+//! settings, frozen submissions and effective attempt policies. Legacy
+//! journals keep their items and reports. Legacy settings become Simple
+//! requests, and unavailable policy and view data use their defaults. Waiting
+//! items with incomplete source facts need a new probe before preflight.
 //!
 //! Load rules: a missing file is an empty queue; a newer [`VERSION`] (or a
 //! file that cannot be read at all) is left untouched and this session does
@@ -35,21 +34,23 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use studio_domain::analysis::RowFilter;
 use studio_domain::job::{
     Failure, FailureCode, JobReport, JobSpec, Omissions, SourceFacts, SourceFingerprint, WirePath,
 };
+use studio_domain::options::{EffectiveOption, OptionRequest};
 use studio_domain::settings::EncoderSettings;
 
 use crate::analysis::{Origin, Restore, ResultOf, Saved};
 use crate::queue::{
-    Acknowledgement, Cause, Ending, Interruption, Item, ItemId, ItemState, PartialFate,
+    Acknowledgement, Cause, Ending, Interruption, Item, ItemId, ItemState, PartialFate, Submission,
 };
 use crate::workspace::Workspace;
 
 /// The journal format this build writes.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 /// The oldest journal format this build reads and migrates.
 pub const OLDEST_VERSION: u32 = 1;
@@ -64,8 +65,8 @@ pub struct Journal {
     pub version: u32,
     /// The next item id; ids are never reused.
     pub next_id: ItemId,
-    /// The current settings, which apply to every waiting item.
-    pub settings: EncoderSettings,
+    /// The current settings for editing jobs before submission.
+    pub settings: OptionRequest,
     /// The items, in list order.
     pub items: Vec<JournalItem>,
     /// The workspace and the Analyze documents; absent before version 2.
@@ -157,6 +158,12 @@ pub struct JournalItem {
     pub destination_chosen: bool,
     /// The recorded confirmation of what a video-only output leaves out.
     pub acknowledgement: Option<JournalAcknowledgement>,
+    /// The frozen job and policy of a submitted item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitted: Option<Submission>,
+    /// The known effective policy of the last attempt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempt_policy: Vec<EffectiveOption>,
     /// Its state and what the last attempt left.
     pub state: JournalState,
 }
@@ -289,7 +296,7 @@ pub enum JournalCause {
 #[must_use]
 pub fn snapshot(
     next_id: ItemId,
-    settings: EncoderSettings,
+    settings: OptionRequest,
     items: &[Item],
     view: JournalView,
 ) -> Journal {
@@ -389,6 +396,11 @@ fn item(item: &Item) -> JournalItem {
             omissions: a.omissions,
             settings: a.settings,
         }),
+        submitted: item.submitted.clone(),
+        attempt_policy: item
+            .attempt
+            .as_ref()
+            .map_or_else(Vec::new, |attempt| attempt.policy.clone()),
         state: state(item),
     }
 }
@@ -622,14 +634,9 @@ pub fn load(path: &Path) -> Loaded {
         Ok(Header { version }) if version < OLDEST_VERSION => {
             format!("unknown version {version}")
         }
-        // Version 1 is version 2 without the view, which defaults.
+        // Serde supplies additions and converts legacy Simple requests.
         Ok(_) => match serde_json::from_slice::<Journal>(&bytes) {
-            Ok(journal) => {
-                return Loaded::Found(Journal {
-                    version: VERSION,
-                    ..journal
-                });
-            }
+            Ok(journal) => return Loaded::Found(migrate(journal, &bytes)),
             Err(e) => match without_view(&bytes) {
                 Some(journal) => {
                     // The copy is synced before any save can replace the file.
@@ -640,10 +647,7 @@ pub fn load(path: &Path) -> Loaded {
                         Ok(copy)
                     }) {
                         Ok(copy) => Loaded::ViewUnreadable {
-                            journal: Journal {
-                                version: VERSION,
-                                ..journal
-                            },
+                            journal: migrate(journal, &bytes),
                             copy,
                             error: e.to_string(),
                         },
@@ -663,6 +667,44 @@ pub fn load(path: &Path) -> Loaded {
             error: format!("{error}; it could not be moved aside: {e}"),
         },
     }
+}
+
+#[derive(Deserialize)]
+struct LegacySources {
+    items: Vec<LegacySource>,
+}
+
+#[derive(Deserialize)]
+struct LegacySource {
+    facts: Option<LegacyColor>,
+}
+
+#[derive(Deserialize)]
+struct LegacyColor {
+    color: Option<IgnoredAny>,
+}
+
+fn migrate(mut journal: Journal, bytes: &[u8]) -> Journal {
+    if journal.version < VERSION {
+        // SourceFacts defaults an absent colour record. Check the original
+        // journal so explicitly unknown values from newer probes stay valid.
+        let sources = serde_json::from_slice::<LegacySources>(bytes).ok();
+        for (index, item) in journal.items.iter_mut().enumerate() {
+            let has_color = sources
+                .as_ref()
+                .and_then(|sources| sources.items.get(index))
+                .and_then(|item| item.facts.as_ref())
+                .is_some_and(|facts| facts.color.is_some());
+            if matches!(item.state, JournalState::Waiting) && !has_color {
+                if let Some(facts) = &item.facts {
+                    item.video_stream = item.video_stream.or(Some(facts.video_stream));
+                }
+                item.state = JournalState::Probing;
+            }
+        }
+    }
+    journal.version = VERSION;
+    journal
 }
 
 /// The journal in `bytes` with its view left out, when the rest parses.
@@ -735,10 +777,20 @@ pub fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// The state shared between [`Writer`] and its thread.
+type SaveNotice = Box<dyn FnOnce(Result<(), String>) + Send>;
+
+struct ConfirmedWrite {
+    bytes: Vec<u8>,
+    generation: u64,
+    notify: SaveNotice,
+}
+
 #[derive(Default)]
 struct Slot {
-    /// The newest journal not yet written.
+    /// The newest ordinary journal not yet written.
     pending: Option<Vec<u8>>,
+    /// A snapshot for which the session waits before it starts a job.
+    confirmed: Option<ConfirmedWrite>,
     /// How many journals were submitted, and how many of those are settled
     /// (written, or skipped for a newer one).
     submitted: u64,
@@ -778,23 +830,33 @@ impl Writer {
             .spawn(move || {
                 let mut last: Result<(), String> = Ok(());
                 loop {
-                    let (bytes, upto) = {
+                    let (bytes, upto, notify) = {
                         let mut slot = lock(&worker);
-                        while slot.pending.is_none() && !slot.closed {
+                        while slot.pending.is_none() && slot.confirmed.is_none() && !slot.closed {
                             slot = worker.1.wait(slot).unwrap_or_else(PoisonError::into_inner);
                         }
-                        match slot.pending.take() {
-                            Some(bytes) => (bytes, slot.submitted),
-                            None => return,
+                        if let Some(confirmed) = slot.confirmed.take() {
+                            (
+                                confirmed.bytes,
+                                confirmed.generation,
+                                Some(confirmed.notify),
+                            )
+                        } else if let Some(bytes) = slot.pending.take() {
+                            (bytes, slot.submitted, None)
+                        } else {
+                            return;
                         }
                     };
                     let result = write_atomically(&path, &bytes).map_err(|e| e.to_string());
                     if result != last {
                         report(result.clone());
-                        last = result;
+                        last.clone_from(&result);
                     }
                     lock(&worker).settled = upto;
                     worker.1.notify_all();
+                    if let Some(notify) = notify {
+                        notify(result);
+                    }
                 }
             })?;
         Ok(Self {
@@ -808,6 +870,33 @@ impl Writer {
         let mut slot = lock(&self.shared);
         slot.pending = Some(bytes);
         slot.submitted += 1;
+        drop(slot);
+        self.shared.1.notify_all();
+    }
+
+    /// Writes this exact snapshot before it writes any later ordinary snapshot.
+    ///
+    /// The writer calls `notify` with the result of this write. If another
+    /// confirmed snapshot is waiting, this call immediately reports an error
+    /// through `notify`.
+    pub fn submit_confirmed(
+        &self,
+        bytes: Vec<u8>,
+        notify: impl FnOnce(Result<(), String>) + Send + 'static,
+    ) {
+        let mut slot = lock(&self.shared);
+        if slot.confirmed.is_some() {
+            drop(slot);
+            notify(Err("Wait for the previous queue save.".to_owned()));
+            return;
+        }
+        slot.submitted += 1;
+        slot.pending = None;
+        slot.confirmed = Some(ConfirmedWrite {
+            bytes,
+            generation: slot.submitted,
+            notify: Box::new(notify),
+        });
         drop(slot);
         self.shared.1.notify_all();
     }
@@ -862,7 +951,10 @@ mod tests {
                 output: OutputKind::Av2AnnexB,
                 preset: SpeedPreset::new(9).unwrap_or_else(|e| unreachable!("{e}")),
                 crf: Crf::new(40).unwrap_or_else(|e| unreachable!("{e}")),
-            },
+            }
+            .into(),
+            identity: None,
+            pass_artifact: None,
         }
     }
 
@@ -876,12 +968,14 @@ mod tests {
             destination: WirePath::from_path(&abs(&format!("/m/{id}.ivf"))),
             destination_chosen: false,
             acknowledgement: None,
+            submitted: None,
+            attempt_policy: Vec::new(),
             state,
         };
         Journal {
             version: VERSION,
             next_id: 9,
-            settings: INITIAL_SETTINGS,
+            settings: INITIAL_SETTINGS.into(),
             view: JournalView {
                 workspace: JournalWorkspace::Analyze,
                 shown_document: 1,
@@ -958,7 +1052,10 @@ mod tests {
         assert_eq!(dir.entries(), [FILE_NAME]);
         // The format is readable and names the version first.
         let text = String::from_utf8(bytes).unwrap_or_default();
-        assert!(text.starts_with("{\n  \"version\": 2,"), "{text}");
+        assert!(
+            text.starts_with(&format!("{{\n  \"version\": {VERSION},")),
+            "{text}"
+        );
         assert!(text.contains("\"kind\": \"running\""), "{text}");
     }
 
@@ -1032,31 +1129,119 @@ mod tests {
 }"#;
 
     #[test]
-    fn a_version_1_journal_migrates_without_losing_anything() {
+    fn legacy_journals_keep_jobs_settings_and_view() -> serde_json::Result<()> {
+        use serde_json::{Value, json};
+
         let dir = Scratch::new("migrate");
         let path = dir.path(FILE_NAME);
-        assert!(fs::write(&path, VERSION_1).is_ok());
-        let Loaded::Found(migrated) = load(&path) else {
-            unreachable!("{:?}", load(&path))
-        };
-        assert_eq!(migrated.version, VERSION);
-        assert_eq!(migrated.view, JournalView::default());
-        // Read only; the file stays as it was until the next save.
-        assert_eq!(fs::read(&path).ok().as_deref(), Some(VERSION_1.as_bytes()));
-        // Every item, setting and id is the same JSON as before: settings,
-        // jobs, reports, output paths and acknowledgements.
-        let bytes = encode(&migrated).unwrap_or_default();
-        let value = |bytes: &[u8]| -> serde_json::Value {
-            serde_json::from_slice(bytes).unwrap_or_else(|e| unreachable!("{e}"))
-        };
-        let (before, after) = (value(VERSION_1.as_bytes()), value(&bytes));
-        for key in ["items", "settings", "next_id"] {
-            assert_eq!(before[key], after[key], "{key}");
+        let mut legacy: Value = serde_json::from_str(VERSION_1)?;
+        for (version, view) in [(1, JournalView::default()), (2, journal().view)] {
+            legacy["version"] = json!(version);
+            if version == 2 {
+                legacy["view"] = json!(view);
+            }
+            let original = serde_json::to_vec(&legacy)?;
+            assert!(fs::write(&path, &original).is_ok());
+            let Loaded::Found(migrated) = load(&path) else {
+                unreachable!("{:?}", load(&path))
+            };
+            assert_eq!(migrated.version, VERSION);
+            assert_eq!(migrated.view, view);
+            assert_eq!(fs::read(&path).ok(), Some(original));
+
+            let mut expected = legacy.clone();
+            expected["version"] = json!(VERSION);
+            expected["view"] = json!(view);
+            expected["settings"] = json!({"base": legacy["settings"], "values": {}});
+            for i in 0..migrated.items.len() {
+                let item = &migrated.items[i];
+                assert_eq!(item.submitted, None);
+                assert_eq!(item.attempt_policy.as_slice(), &[]);
+                let job = &mut expected["items"][i]["state"]["job"];
+                job["settings"] = json!({"base": job["settings"], "values": {}});
+            }
+            let bytes = encode(&migrated)?;
+            let mut actual: Value = serde_json::from_slice(&bytes)?;
+            for i in 0..migrated.items.len() {
+                let job = actual["items"][i]["state"]["job"]
+                    .as_object_mut()
+                    .unwrap_or_else(|| unreachable!());
+                for field in ["identity", "pass_artifact"] {
+                    assert!(job.remove(field).is_none_or(|value| value.is_null()));
+                }
+            }
+            assert_eq!(expected, actual);
+            assert!(write_atomically(&path, &bytes).is_ok());
+            assert_eq!(load(&path), Loaded::Found(migrated));
         }
-        assert_eq!(after["version"], 2);
-        // The migrated journal saves and loads as version 2.
-        assert!(write_atomically(&path, &bytes).is_ok());
-        assert_eq!(load(&path), Loaded::Found(migrated));
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_waiting_jobs_refresh_only_incomplete_source_facts() -> serde_json::Result<()> {
+        use serde_json::{Value, json};
+
+        let dir = Scratch::new("refresh-legacy");
+        let path = dir.path(FILE_NAME);
+        let mut legacy: Value = serde_json::from_str(VERSION_1)?;
+        let mut waiting = legacy["items"][0].clone();
+        waiting["state"] = json!({"kind": "waiting"});
+        waiting["video_stream"] = Value::Null;
+        waiting["facts"] = json!({
+            "reader": "ffmpeg",
+            "fingerprint": {"len": 4096, "modified": [1_795_352_441, 421_141_523]},
+            "video_stream": 1,
+            "video_tracks": [],
+            "omissions": {"other_video": 0, "audio": 2, "subtitles": 1, "attachments": 0, "other": 0, "chapters": 3},
+            "width": 64,
+            "height": 36,
+            "frame_rate": {"num": 25, "den": 1},
+            "pixel_aspect": null,
+            "bit_depth": 8,
+            "chroma": "yuv420",
+            "frame_count": null,
+            "disclosures": []
+        });
+        let mut with_color = waiting.clone();
+        with_color["id"] = json!(7);
+        with_color["facts"]["color"] = json!({});
+        legacy["items"] = json!([waiting, with_color]);
+        for version in [1, 2, VERSION] {
+            legacy["version"] = json!(version);
+            assert!(fs::write(&path, serde_json::to_vec(&legacy)?).is_ok());
+            let Loaded::Found(loaded) = load(&path) else {
+                unreachable!("expected a readable journal");
+            };
+            let first = &loaded.items[0];
+            let second = &loaded.items[1];
+            if version == VERSION {
+                assert_eq!(first.state, JournalState::Waiting);
+                assert_eq!(first.video_stream, None);
+            } else {
+                assert_eq!(first.state, JournalState::Probing);
+                assert_eq!(first.video_stream, Some(1));
+            }
+            assert_eq!(second.state, JournalState::Waiting);
+            assert_eq!(second.video_stream, None);
+            assert_eq!(first.destination, second.destination);
+            assert!(first.destination_chosen);
+            assert!(first.acknowledgement.is_some());
+            assert_eq!(first.acknowledgement, second.acknowledgement);
+            assert_eq!(first.facts, second.facts);
+            assert_eq!(loaded.settings, INITIAL_SETTINGS.into());
+            let restored = crate::recovery::recover(loaded, &crate::recovery::RealDisk);
+            assert_eq!(
+                restored.items[0].state(),
+                if version == VERSION {
+                    ItemState::Waiting
+                } else {
+                    ItemState::Probing
+                }
+            );
+            assert_eq!(restored.items[1].state(), ItemState::Waiting);
+            assert!(restored.items.iter().all(|item| item.attempt().is_none()));
+        }
+        Ok(())
     }
 
     #[test]
@@ -1098,13 +1283,30 @@ mod tests {
     }
 
     #[test]
+    fn invalid_attempt_policy_moves_the_unmodified_journal_aside() -> serde_json::Result<()> {
+        let dir = Scratch::new("bad-policy");
+        let path = dir.path(FILE_NAME);
+        let mut text = serde_json::to_value(journal())?;
+        text["items"][1]["attempt_policy"] = "invalid".into();
+        let bytes = serde_json::to_vec(&text)?;
+        assert!(fs::write(&path, &bytes).is_ok());
+        let Loaded::MovedAside { to, error } = load(&path) else {
+            unreachable!("expected the malformed journal to move aside");
+        };
+        assert!(error.contains("invalid"), "{error}");
+        assert_eq!(fs::read(&to).ok(), Some(bytes));
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[test]
     fn a_newer_version_is_left_untouched_and_not_saved_over() {
         let dir = Scratch::new("too-new");
         let path = dir.path(FILE_NAME);
-        let future = br#"{"version": 3, "items": "renamed", "view": {"tabs": []}}"#;
+        let future = br#"{"version": 4, "items": "renamed", "view": {"tabs": []}}"#;
         assert!(fs::write(&path, future).is_ok());
         let loaded = load(&path);
-        assert_eq!(loaded, Loaded::TooNew { version: 3 });
+        assert_eq!(loaded, Loaded::TooNew { version: 4 });
         assert!(!loaded.may_save());
         assert_eq!(fs::read(&path).ok().as_deref(), Some(&future[..]));
     }
@@ -1167,6 +1369,36 @@ mod tests {
         writer.submit(b"{}".to_vec());
         writer.flush();
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn confirmed_writes_report_the_exact_snapshot_or_error() {
+        let dir = Scratch::new("confirmed-writer");
+        let folder = dir.path("blocked");
+        let path = folder.join(FILE_NAME);
+        let writer = Writer::spawn(path.clone(), |_| {}).unwrap_or_else(|e| unreachable!("{e}"));
+        let (tx, rx) = mpsc::channel();
+        let failed = tx.clone();
+        writer.submit_confirmed(b"before".to_vec(), move |result| {
+            let _ = failed.send(result.map(|()| Vec::new()));
+        });
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(10)),
+            Ok(Err(_))
+        ));
+        fs::create_dir(&folder).unwrap_or_else(|e| unreachable!("{e}"));
+        let checked_path = path.clone();
+        writer.submit_confirmed(b"confirmed".to_vec(), move |result| {
+            let _ =
+                tx.send(result.and_then(|()| fs::read(checked_path).map_err(|e| e.to_string())));
+        });
+        writer.submit(b"after".to_vec());
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10)),
+            Ok(Ok(b"confirmed".to_vec()))
+        );
+        writer.flush();
+        assert_eq!(fs::read(&path).ok().as_deref(), Some(&b"after"[..]));
     }
 
     #[test]

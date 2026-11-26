@@ -61,6 +61,26 @@ fn hello_frame(request_id: u64) -> Result<Vec<u8>, Box<dyn Error>> {
     frame(request_id, hello())
 }
 
+#[test]
+fn worker_requires_an_option_identity_before_opening_the_source() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("input.y4m");
+    let output = dir.path().join("output.ivf");
+    Clip::new(64, 48, "420", 1).write(&input)?;
+    let mut job = spec(&input, &output, OutputKind::Ivf);
+    std::fs::remove_file(input)?;
+    job.identity = None;
+    let result = worker(&frame(1, Command::Start { job, live: None })?)?;
+    assert!(result.status.success());
+    assert!(matches!(
+        events(&result)?.as_slice(),
+        [Envelope { body: Event::Failed { failure }, .. }]
+            if failure.code == FailureCode::InvalidSettings && failure.message.starts_with("identity:")
+    ));
+    assert_eq!(dir.path().read_dir()?.count(), 0);
+    Ok(())
+}
+
 fn raw_frame(body: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut bytes = u32::try_from(body.len())?.to_le_bytes().to_vec();
     bytes.extend_from_slice(body);
@@ -569,6 +589,113 @@ fn probe_answers_facts_or_failure() -> TestResult {
         &got[1].body,
         Event::Failed { failure } if failure.code == FailureCode::InvalidSource
     ));
+    Ok(())
+}
+
+fn complete_policy(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::JobPolicy { first, total, values }
+            if *first as usize + values.len() == *total as usize
+    )
+}
+
+#[test]
+fn checked_job_requires_confirmation_on_its_own_request() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let src = dir.path().join("in.y4m");
+    let dst = dir.path().join("out.ivf");
+    Clip::new(64, 48, "420", 1).write(&src)?;
+    let mut worker = Live::spawn()?;
+    worker.send(
+        7,
+        Command::StartChecked {
+            job: spec(&src, &dst, OutputKind::Ivf),
+            live: None,
+        },
+    )?;
+    let got = worker.read_until(|event| complete_policy(event) || terminal(event))?;
+    assert!(got.last().is_some_and(|event| complete_policy(&event.body)));
+    assert!(
+        got.iter()
+            .all(|event| !matches!(event.body, Event::Working { .. }))
+    );
+
+    worker.send(8, Command::ConfirmPolicy)?;
+    assert!(matches!(
+        worker.next()?,
+        Envelope {
+            request_id: 8,
+            body: Event::Error {
+                code: ErrorCode::WrongState,
+                ..
+            },
+            ..
+        }
+    ));
+    assert_eq!(
+        leftovers(dir.path(), &[&src]),
+        [] as [std::path::PathBuf; 0]
+    );
+
+    worker.send(7, Command::ConfirmPolicy)?;
+    let got = worker.read_until(terminal)?;
+    assert!(
+        got.iter()
+            .any(|event| matches!(event.body, Event::Working { .. }))
+    );
+    assert!(
+        got.last()
+            .is_some_and(|event| matches!(event.body, Event::Completed { .. }))
+    );
+    assert!(dst.is_file());
+    drop(worker.stdin.take());
+    assert!(worker.child.wait()?.success());
+    Ok(())
+}
+
+#[test]
+fn waiting_for_policy_confirmation_can_stop_without_output() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let src = dir.path().join("in.y4m");
+    let dst = dir.path().join("out.ivf");
+    Clip::new(64, 48, "420", 1).write(&src)?;
+    for close_input in [false, true] {
+        let mut worker = Live::spawn()?;
+        worker.send(
+            7,
+            Command::StartChecked {
+                job: spec(&src, &dst, OutputKind::Ivf),
+                live: None,
+            },
+        )?;
+        let got = worker.read_until(|event| complete_policy(event) || terminal(event))?;
+        assert!(got.last().is_some_and(|event| complete_policy(&event.body)));
+        if close_input {
+            drop(worker.stdin.take());
+        } else {
+            worker.send(8, Command::Cancel)?;
+        }
+        let got = worker.read_until(terminal)?;
+        assert!(
+            got.last()
+                .is_some_and(|event| matches!(event.body, Event::Cancelled))
+        );
+        assert!(
+            got.iter()
+                .all(|event| !matches!(event.body, Event::Working { .. }))
+        );
+        assert_eq!(
+            leftovers(dir.path(), &[&src]),
+            [] as [std::path::PathBuf; 0]
+        );
+        if !close_input {
+            worker.send(9, hello())?;
+            assert!(matches!(worker.next()?.body, Event::Hello { .. }));
+            drop(worker.stdin.take());
+        }
+        assert!(worker.child.wait()?.success());
+    }
     Ok(())
 }
 

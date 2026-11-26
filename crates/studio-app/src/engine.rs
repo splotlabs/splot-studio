@@ -140,7 +140,7 @@ impl PictureSlot {
     }
 }
 
-/// What a worker's reader thread hands to the callback, in order.
+/// What a worker or the journal writer hands to the session callback.
 #[derive(Debug)]
 pub enum Delivery {
     /// One event from the engine, other than a picture.
@@ -152,6 +152,8 @@ pub enum Delivery {
     /// The event stream is over and the process has been reaped. Always the
     /// last delivery.
     Ended(Ending),
+    /// The journal writer finished saving a submitted batch.
+    JournalSaved(Result<(), String>),
 }
 
 /// How a worker's event stream ended.
@@ -434,6 +436,7 @@ impl EngineStatus {
                 Event::Error { message, .. } => Self::Failed(message),
                 other => Self::Failed(format!("answered Hello with {other:?}")),
             },
+            Delivery::JournalSaved(_) => Self::Failed("The engine did not answer Hello.".into()),
             Delivery::Pictures(_) => Self::Failed("answered Hello with a picture".to_owned()),
             Delivery::Ended(Ending {
                 error: Some(ProtocolError::IncompatibleVersion { theirs }),

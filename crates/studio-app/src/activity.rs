@@ -264,6 +264,7 @@ impl Activity {
             | Event::OptionsDescribed { .. }
             | Event::OptionsResolved { .. }
             | Event::OptionsFailed { .. }
+            | Event::JobPolicy { .. }
             | Event::Probed { .. }
             | Event::Working { .. }
             | Event::Picture { .. }

@@ -19,7 +19,9 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use studio_domain::job::{Failure, JobReport, JobSpec, Omissions, SourceFacts, SourceFingerprint};
+use studio_domain::options::EffectiveOption;
 use studio_domain::settings::EncoderSettings;
 
 use crate::activity::Activity;
@@ -309,12 +311,23 @@ impl Ending {
     }
 }
 
+/// An immutable job and the effective policy returned by preflight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Submission {
+    /// The source, destination, and requested settings.
+    pub job: JobSpec,
+    /// The effective policy. Empty until preflight finishes.
+    pub policy: Vec<EffectiveOption>,
+}
+
 /// One attempt to convert an item: the immutable job it started with and
 /// what came of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attempt {
     /// The job exactly as it was sent, settings included.
     pub job: JobSpec,
+    /// The effective policy captured before the job starts.
+    pub policy: Vec<EffectiveOption>,
     /// The worker request it ran under; `0` for an attempt restored from
     /// the journal, which has no worker.
     pub request: u64,
@@ -344,6 +357,7 @@ pub struct Item {
     pub(crate) probe_request: Option<u64>,
     pub(crate) destination: Destination,
     pub(crate) ack: Option<Acknowledgement>,
+    pub(crate) submitted: Option<Submission>,
     /// The current or last attempt. A retry keeps the last one visible until
     /// the next one starts.
     pub(crate) attempt: Option<Attempt>,
@@ -368,6 +382,7 @@ impl Item {
                 exists: false,
             },
             ack: None,
+            submitted: None,
             attempt: None,
         }
     }
@@ -445,6 +460,21 @@ impl Item {
     #[must_use]
     pub const fn acknowledgement(&self) -> Option<&Acknowledgement> {
         self.ack.as_ref()
+    }
+
+    /// The frozen job waiting to start, if there is one.
+    #[must_use]
+    pub const fn submission(&self) -> Option<&Submission> {
+        self.submitted.as_ref()
+    }
+
+    pub(crate) fn source_changed(&self) -> bool {
+        self.submitted.as_ref().is_some_and(|submitted| {
+            self.facts.as_ref().is_some_and(|facts| {
+                facts.fingerprint != submitted.job.fingerprint
+                    || facts.video_stream != submitted.job.video_stream
+            })
+        })
     }
 
     /// The current or last attempt.

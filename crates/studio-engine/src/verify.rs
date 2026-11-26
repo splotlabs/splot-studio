@@ -213,7 +213,9 @@ fn splot_decode(
     expected: Expected<'_>,
     cancel: &AtomicBool,
 ) -> Result<CheckOutcome, Stop> {
-    let frame_bytes = raw_frame_bytes(expected.config);
+    let Some(frame_bytes) = raw_frame_bytes(expected.config) else {
+        return Ok(failed("The expected visible frame size is invalid."));
+    };
     let context = match DecodeContext::new(DecodeRuntimeConfig::new(ThreadCount::Auto)) {
         Ok(context) => context,
         Err(e) => return Ok(failed(format!("cannot start the decoder: {e}"))),
@@ -239,20 +241,32 @@ fn splot_decode(
 
 /// Bytes of one frame in `splot-decode`'s raw output: the visible planes,
 /// one byte per 8-bit sample and two per 10-bit sample.
-fn raw_frame_bytes(config: &Config) -> u64 {
-    let coded = config.coded();
-    let samples: u64 = coded
+fn raw_frame_bytes(config: &Config) -> Option<u64> {
+    let mut coded = config.coded();
+    if let Some(crop) = coded.crop {
+        coded.width = coded
+            .width
+            .checked_sub(crop.left)?
+            .checked_sub(crop.right)?;
+        coded.height = coded
+            .height
+            .checked_sub(crop.top)?
+            .checked_sub(crop.bottom)?;
+    }
+    let samples = coded
         .plane_sizes()
-        .unwrap_or_default()
+        .ok()?
         .iter()
-        .map(|plane| (plane.width() * plane.height()) as u64)
-        .sum();
+        .try_fold(0_u64, |sum, plane| {
+            let count = (plane.width() as u64).checked_mul(plane.height() as u64)?;
+            sum.checked_add(count)
+        })?;
     let per_sample = if coded.bit_depth == BitDepth::Eight {
         1
     } else {
         2
     };
-    (samples * per_sample).max(1)
+    samples.checked_mul(per_sample)
 }
 
 /// `file` from its start, buffered, failing reads once `cancel` is set.

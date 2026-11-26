@@ -41,7 +41,7 @@ pub const DECODE_THREADS: usize = 1;
 /// What live pictures need to know of the stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stream {
-    /// How its pictures are converted: the source's basis.
+    /// The source color basis. An assumed matrix uses the decoded picture size.
     pub basis: ColorBasis,
     /// Frames per second as `(num, den)`.
     pub frame_rate: (u32, u32),
@@ -217,7 +217,14 @@ impl Live {
         let Some(frame) = stream::frame(&held) else {
             return;
         };
-        let rendered = picture::render(&frame, stream.basis, PictureView::Fit, self.size);
+        let frame_width = u32::try_from(held.width()).unwrap_or(u32::MAX);
+        let frame_height = u32::try_from(held.height()).unwrap_or(u32::MAX);
+        let basis = if stream.basis.assumed {
+            picture::basis(None, frame.chroma.is_none(), frame_width, frame_height)
+        } else {
+            stream.basis
+        };
+        let rendered = picture::render(&frame, basis, PictureView::Fit, self.size);
         let index = held.props().user_data;
         let (num, den) = stream.frame_rate;
         let header = PictureHeader {
@@ -231,10 +238,10 @@ impl Live {
             frame_count: stream.frame_count,
             width: rendered.width,
             height: rendered.height,
-            frame_width: u32::try_from(held.width()).unwrap_or(u32::MAX),
-            frame_height: u32::try_from(held.height()).unwrap_or(u32::MAX),
+            frame_width,
+            frame_height,
             view: rendered.view,
-            basis: stream.basis,
+            basis,
         };
         drop(held);
         offer(header, rendered.pixels);

@@ -350,7 +350,7 @@ fn concurrent(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let saved = journal::Journal {
         version: journal::VERSION,
         next_id: 1,
-        settings: studio_app::state::INITIAL_SETTINGS,
+        settings: studio_app::state::INITIAL_SETTINGS.into(),
         items: Vec::new(),
         view: JournalView {
             workspace: JournalWorkspace::Encode,

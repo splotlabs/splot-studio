@@ -472,8 +472,8 @@ fn convert_builds_the_job_from_the_probe_and_the_current_settings() {
     assert_eq!(job.video_stream, 0);
     // Nothing to leave out: one click, nothing acknowledged.
     assert!(!job.omissions_acknowledged);
-    assert_eq!(job.settings.preset.get(), 9);
-    assert_eq!(job.settings.crf.get(), 33);
+    assert_eq!(job.settings.base.preset.get(), 9);
+    assert_eq!(job.settings.base.crf.get(), 33);
     assert!(app.state.running());
     assert_eq!(app.states(), [ItemState::Running]);
 
@@ -634,50 +634,84 @@ fn an_acknowledgement_holds_for_its_file_while_nothing_changes() {
 }
 
 #[test]
-fn any_change_to_what_was_acknowledged_discards_it() {
-    type Change = fn(&mut App);
-    let changes: [(&str, Change); 5] = [
-        ("quality", |app| {
-            app.apply(Intent::QualitySelected(0));
-        }),
-        ("speed preset", |app| {
-            app.apply(Intent::PresetEdited(1));
-        }),
-        ("output kind", |app| {
-            app.apply(Intent::OutputSelected(1));
-        }),
-        ("video track", |app| {
-            let update = app.apply(Intent::VideoTrackSelected(1));
-            app.answer(update, |_| Ok(rich(1)));
-        }),
-        ("the file", |app| {
-            // Read again (by a retry) and found changed.
-            let update = app.apply(Intent::RowAction(0));
-            app.answer(update, |_| {
-                Ok(SourceFacts {
-                    fingerprint: SourceFingerprint { len: 7, ..PRINT },
-                    ..rich(0)
-                })
-            });
-        }),
-    ];
-    for (what, change) in changes {
-        let mut app = App::new();
-        app.add(&["/media/trip.mp4"], with_audio);
-        app.apply(Intent::ConvertRequested);
-        let (id, _) = only_start(&app.apply(Intent::OmissionsConfirmed).effects);
-        app.apply(Intent::CancelRequested);
-        app.event(id, Event::Cancelled);
-        assert!(app.state.items()[0].acknowledgement().is_some(), "{what}");
-        change(&mut app);
-        assert_eq!(app.state.items()[0].acknowledgement(), None, "{what}");
-        if app.state.items()[0].state() == ItemState::Cancelled {
-            let update = app.apply(Intent::RowAction(0));
-            app.answer(update, with_audio);
-        }
-        assert_eq!(app.apply(Intent::ConvertRequested).effects, [], "{what}");
-        assert!(app.state.confirmation().is_some(), "{what}: must ask again");
-    }
+fn changing_track_requires_a_new_omissions_acknowledgement() {
+    let mut app = App::new();
+    app.add(&["/media/trip.mp4"], with_audio);
+    app.apply(Intent::ConvertRequested);
+    let (id, _) = only_start(&app.apply(Intent::OmissionsConfirmed).effects);
+    app.apply(Intent::CancelRequested);
+    app.event(id, Event::Cancelled);
+    assert!(app.state.items()[0].acknowledgement().is_some());
+    let update = app.apply(Intent::VideoTrackSelected(1));
+    app.answer(update, |_| Ok(rich(1)));
+    assert_eq!(app.state.items()[0].acknowledgement(), None);
+    assert_eq!(app.apply(Intent::ConvertRequested).effects, []);
+    assert!(app.state.confirmation().is_some());
+}
+
+#[test]
+fn retry_uses_the_original_acknowledged_settings() {
+    let mut app = App::new();
+    app.add(&["/media/trip.mp4"], with_audio);
+    app.apply(Intent::ConvertRequested);
+    let (id, original) = only_start(&app.apply(Intent::OmissionsConfirmed).effects);
+    app.apply(Intent::CancelRequested);
+    app.event(id, Event::Cancelled);
+    app.apply(Intent::QualitySelected(0));
+    app.apply(Intent::PresetEdited(1));
+    app.apply(Intent::OutputSelected(1));
+    let retry = app.apply(Intent::RowAction(0));
+    app.answer(retry, with_audio);
+    let (_, job) = only_start(&app.apply(Intent::ConvertRequested).effects);
+    assert_eq!(job.settings, original.settings);
+    assert_eq!(job.destination, original.destination);
+    assert!(job.omissions_acknowledged);
+}
+
+#[test]
+fn convert_after_failure_uses_the_corrected_draft_and_confirms_omissions() {
+    let mut app = App::new();
+    app.add(&["/media/trip.mp4"], with_audio);
+    app.apply(Intent::ConvertRequested);
+    let (id, _) = only_start(&app.apply(Intent::OmissionsConfirmed).effects);
+    app.fail(id, FailureCode::InvalidSettings);
+    app.apply(Intent::PresetEdited(1));
+    app.apply(Intent::OutputSelected(1));
+    app.apply(Intent::OptionEdited {
+        key: "fast_decode".into(),
+        value: Some(OptionValue::Bool(true)),
+    });
+    let convert = app.apply(Intent::ConvertRequested);
+    let effects = app.answer(convert, with_audio);
+    assert_eq!(starts(&effects), []);
+    let (_, job) = only_start(&app.apply(Intent::OmissionsConfirmed).effects);
+    assert_eq!(&job.settings, app.state.option_request());
+    assert_eq!(dest_of(&job), abs("/media/trip.obu"));
+    assert!(job.omissions_acknowledged);
+}
+
+#[test]
+fn retry_cannot_start_after_its_source_changed() {
+    let mut app = App::new();
+    app.add(&["/media/trip.mp4"], with_audio);
+    app.apply(Intent::ConvertRequested);
+    let (id, _) = only_start(&app.apply(Intent::OmissionsConfirmed).effects);
+    app.apply(Intent::CancelRequested);
+    app.event(id, Event::Cancelled);
+    let retry = app.apply(Intent::RowAction(0));
+    app.answer(retry, |_| {
+        Ok(SourceFacts {
+            fingerprint: SourceFingerprint { len: 7, ..PRINT },
+            ..rich(0)
+        })
+    });
+    assert_eq!(app.state.items()[0].acknowledgement(), None);
+    assert_eq!(app.apply(Intent::ConvertRequested).effects, []);
+    assert!(
+        app.state
+            .blocker()
+            .is_some_and(|blocker| blocker.text.contains("Add the source again."))
+    );
 }
 
 #[test]
@@ -871,9 +905,14 @@ fn a_file_that_joins_unacknowledged_is_asked_about_at_the_end() {
 }
 
 #[test]
-fn settings_apply_to_waiting_files_never_to_the_running_one() {
+fn settings_edits_do_not_change_submitted_jobs() {
     let mut app = App::new();
     app.add(&["/m/a.y4m", "/m/b.y4m"], ready);
+    let key = "fast_decode".to_owned();
+    app.apply(Intent::OptionEdited {
+        key: key.clone(),
+        value: Some(OptionValue::Bool(false)),
+    });
     let (a, first) = convert(&mut app);
     // In the list, the running row shows its own settings, read-only;
     // selecting a waiting row shows the current ones, editable.
@@ -885,13 +924,24 @@ fn settings_apply_to_waiting_files_never_to_the_running_one() {
     assert!(!app.state.settings_view().read_only);
     app.apply(Intent::QualitySelected(0));
     app.apply(Intent::OutputSelected(1));
+    app.apply(Intent::OptionEdited {
+        key: key.clone(),
+        value: Some(OptionValue::Bool(true)),
+    });
     let running = app.state.items()[0].attempt().map(|a| a.job.clone());
     assert_eq!(running.as_ref(), Some(&first), "the snapshot is immutable");
-    assert_eq!(first.settings, INITIAL_SETTINGS);
+    assert_eq!(first.settings.base, INITIAL_SETTINGS);
+    assert_eq!(
+        first.settings.values.get(&key),
+        Some(&OptionValue::Bool(false))
+    );
+    assert_eq!(
+        app.state.option_request().values.get(&key),
+        Some(&OptionValue::Bool(true))
+    );
     let (_, second) = only_start(&app.complete(a).effects);
-    assert_eq!(second.settings.crf, Quality::Compact.crf());
-    assert_eq!(second.settings.output, OutputKind::Av2AnnexB);
-    assert_eq!(dest_of(&second), abs("/m/b.obu"));
+    assert_eq!(second.settings, first.settings);
+    assert_eq!(dest_of(&second), abs("/m/b.ivf"));
     // The converted row remembers what it ran with.
     app.apply(Intent::RowSelected(0));
     let view = app.state.settings_view();
@@ -1158,13 +1208,16 @@ fn destinations_are_unique_in_the_queue_and_on_disk() {
 fn retry_picks_a_new_name_when_the_destination_now_exists() {
     let mut app = App::new();
     app.add(&["/m/a.y4m"], ready);
-    let (id, _) = convert(&mut app);
+    let (id, original) = convert(&mut app);
     app.fail(id, FailureCode::DestinationExists);
+    app.apply(Intent::PresetEdited(1));
     app.disk.0.push(abs("/m/a.ivf"));
-    let update = app.apply(Intent::ConvertRequested);
-    let effects = app.answer(update, ready);
-    let (_, job) = only_start(&effects);
+    let retry = app.apply(Intent::RowAction(0));
+    app.answer(retry, ready);
+    let (_, job) = only_start(&app.apply(Intent::ConvertRequested).effects);
     assert_eq!(dest_of(&job), abs("/m/a (2).ivf"));
+    assert_eq!(job.settings, original.settings);
+    assert_eq!(job.fingerprint, original.fingerprint);
 }
 
 #[test]
@@ -1196,7 +1249,7 @@ fn a_restored_queue_waits_for_continue() {
     );
     let saved = journal::snapshot(
         app.state.next_id(),
-        app.state.settings(),
+        app.state.option_request().clone(),
         app.state.items(),
         journal::JournalView::default(),
     );
@@ -1270,7 +1323,7 @@ fn the_journal_round_trips_every_settled_state() {
     app.event(c, Event::Cancelled);
     let saved = journal::snapshot(
         app.state.next_id(),
-        app.state.settings(),
+        app.state.option_request().clone(),
         app.state.items(),
         journal::JournalView::default(),
     );
@@ -1280,7 +1333,7 @@ fn the_journal_round_trips_every_settled_state() {
     assert_eq!(parsed, saved);
     let recovered = recovery::recover(parsed, &Files::default());
     assert_eq!(recovered.cleanups, []);
-    assert_eq!(recovered.settings, app.state.settings());
+    assert_eq!(&recovered.settings, app.state.option_request());
     let restored = AppState::new(Startup {
         recovered: Some(recovered),
         problem: None,

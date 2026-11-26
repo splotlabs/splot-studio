@@ -144,6 +144,7 @@ impl From<Crf> for u8 {
 /// What the user asks the encoder for. Source-derived values (dimensions, bit
 /// depth, frame rate) are not settings and arrive with the job in STUDIO-02.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EncoderSettings {
     /// The output file format.
     pub output: OutputKind,

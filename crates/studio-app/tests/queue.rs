@@ -23,12 +23,13 @@ use std::time::{Duration, Instant};
 
 use studio_app::engine::{Delivery, ENGINE_NAME};
 use studio_app::instance::{self, Acquired, DATA_DIR_VAR};
-use studio_app::journal::{self, Loaded};
-use studio_app::queue::{Cause, Ending, Interruption, ItemState, PartialFate};
+use studio_app::journal::{self, Journal, JournalState, Loaded};
+use studio_app::queue::{Attempt, Cause, Ending, Interruption, ItemState, PartialFate};
 use studio_app::session::{Route, Session};
 use studio_app::state::{AppState, Intent, Startup};
 use studio_app::{Opening, Prepared};
 use studio_domain::job::{FailureCode, Stage};
+use studio_domain::options::OptionValue;
 use studio_domain::protocol::{BuildIdentity, Event};
 
 /// Long enough for a debug-build encode of a tiny clip.
@@ -383,7 +384,90 @@ fn a_run_of_three_files_with_one_unreadable_publishes_two() {
         })
         .collect();
     assert_eq!(kinds, ["completed", "unreadable", "completed"]);
-    assert_eq!(saved.settings.preset.get(), 10);
+    assert_eq!(saved.settings.base.preset.get(), 10);
+}
+
+#[test]
+fn recovered_batch_retries_with_its_frozen_settings_after_global_edits() {
+    let scratch = Scratch::new("frozen-batch");
+    let paths = [scratch.media("a.y4m"), scratch.media("b.y4m")];
+    for path in &paths {
+        write_y4m(path, 64, 36, 3);
+    }
+    let mut h = Harness::open(&scratch);
+    h.add(&paths);
+    let keyint = |frames| Intent::OptionEdited {
+        key: "keyint".into(),
+        value: Some(OptionValue::Integer(frames)),
+    };
+    h.dispatch(keyint(3));
+    h.dispatch(Intent::ConvertRequested);
+    h.pump_until("the first job opens its output", JOB_TIMEOUT, |s| {
+        s.items()[0].attempt().is_some_and(|a| a.partial.is_some())
+    });
+    let first = h.state().items()[0]
+        .attempt()
+        .unwrap_or_else(|| unreachable!("expected a running attempt"))
+        .clone();
+    assert_frozen_keyint(&first);
+    assert_eq!(h.states(), [ItemState::Running, ItemState::Waiting]);
+
+    h.dispatch(Intent::RowSelected(1));
+    h.dispatch(keyint(9));
+    let edited = Harness::wait_for_journal(&scratch, "\"keyint\": 9");
+    let saved: Journal = serde_json::from_str(&edited)
+        .unwrap_or_else(|error| unreachable!("expected a queue journal: {error}"));
+    assert_eq!(saved.settings.values["keyint"], OptionValue::Integer(9));
+    assert!(
+        matches!(&saved.items[0].state, JournalState::Running { job, .. } if job == &first.job)
+    );
+    assert_eq!(saved.items[0].attempt_policy, first.policy);
+    let second = saved.items[1]
+        .submitted
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("expected the frozen waiting job"));
+    assert_eq!(second.job.settings, first.job.settings);
+    assert_eq!(second.policy, first.policy);
+    h.die(&scratch, "\"keyint\": 9");
+
+    let mut h = Harness::open(&scratch);
+    assert_eq!(h.states(), [ItemState::Interrupted, ItemState::Waiting]);
+    assert!(!h.state().running());
+    let restored_first = h.state().items()[0]
+        .attempt()
+        .unwrap_or_else(|| unreachable!("expected the interrupted attempt"));
+    assert_eq!(restored_first.request, 0);
+    assert_eq!(restored_first.job, first.job);
+    assert_eq!(restored_first.policy, first.policy);
+
+    h.dispatch(Intent::RowAction(0));
+    h.pump_until("the retry source is checked", ANSWER_TIMEOUT, |s| {
+        s.items()[0].state() != ItemState::Probing
+    });
+    assert_eq!(h.states(), [ItemState::Waiting, ItemState::Waiting]);
+    h.dispatch(Intent::ConvertRequested);
+    h.pump_until("the recovered batch finishes", JOB_TIMEOUT, |s| {
+        !s.running()
+    });
+    assert_eq!(h.states(), [ItemState::Completed, ItemState::Completed]);
+    for item in h.state().items() {
+        let attempt = item
+            .attempt()
+            .unwrap_or_else(|| unreachable!("expected a completed attempt"));
+        assert_eq!(attempt.job.settings, first.job.settings);
+        assert_eq!(attempt.job.identity, first.job.identity);
+        assert_frozen_keyint(attempt);
+    }
+}
+
+fn assert_frozen_keyint(attempt: &Attempt) {
+    let requested = OptionValue::Integer(3);
+    assert_eq!(attempt.job.settings.values["keyint"], requested);
+    assert!(attempt.policy.iter().any(|entry| {
+        entry.key == "keyint"
+            && entry.requested.as_ref() == Some(&requested)
+            && entry.value == requested
+    }));
 }
 
 /// A converted file opens in Analyze through the real inspect process with

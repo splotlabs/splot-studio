@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use studio_domain::analysis::RowFilter;
-use studio_domain::job::WirePath;
+use studio_domain::job::{JobSpec, WirePath};
 use studio_domain::protocol::{BuildIdentity, Command, Envelope, Event, ProtocolError};
 use studio_domain::settings::OutputKind;
 
@@ -41,6 +41,8 @@ use crate::source::ProbeFailure;
 use crate::state::{AppState, Effect, Intent, JournalProblem};
 use crate::workspace::Workspace;
 
+mod preflight;
+
 /// The request id of the startup `Hello`; probes and jobs count from 1.
 const HELLO_ID: u64 = 0;
 
@@ -53,6 +55,8 @@ pub enum Route {
     Probe(u64),
     /// A job, by request id.
     Job(u64),
+    /// The journal save that authorizes a prepared job, by job request ID.
+    Journal(u64),
     /// The preview process, by how many were started before it.
     Preview(u64),
     /// The inspect process, by how many were started before it.
@@ -136,6 +140,10 @@ pub struct Session {
     hello: Option<Worker>,
     probe: Option<(u64, Worker)>,
     job: Option<(u64, Worker)>,
+    preflight: Option<preflight::Preflight>,
+    preflight_queue: VecDeque<preflight::Request>,
+    prepared: Option<(u64, JobSpec)>,
+    confirming: Option<(u64, usize)>,
     preview: Preview,
     /// The preview process, started on first need, with its spawn number.
     previewer: Option<(u64, Worker)>,
@@ -177,6 +185,10 @@ impl Session {
             hello: None,
             probe: None,
             job: None,
+            preflight: None,
+            preflight_queue: VecDeque::new(),
+            prepared: None,
+            confirming: None,
             preview: Preview::new(),
             previewer: None,
             previewers_started: 0,
@@ -320,6 +332,7 @@ impl Session {
             return outcome;
         }
         let workspace = self.state.workspace();
+        let batch_policy = matches!(intent, Intent::QueuedPolicy { .. });
         let mut pending = VecDeque::from([intent]);
         while let Some(intent) = pending.pop_front() {
             // Destinations are looked at before anything can start, but not
@@ -331,7 +344,7 @@ impl Session {
                     ..
                 }
             );
-            if !counters {
+            if !counters && !batch_policy {
                 self.state.refresh_destinations(&RealDisk);
             }
             let update = self.state.apply(intent, now, &RealDisk);
@@ -343,7 +356,9 @@ impl Session {
         if outcome.changed == Changed::Phase {
             self.note_storage();
             outcome.analysis |= self.analysis.take_dirty();
-            self.persist();
+            if !batch_policy {
+                self.persist();
+            }
             let effects = self.preview.sync(preview::scene(&self.state));
             self.send_preview(effects);
         }
@@ -519,6 +534,7 @@ impl Session {
             return Outcome::nothing();
         }
         let effects = match delivery {
+            Delivery::JournalSaved(_) => return Outcome::nothing(),
             Delivery::Event(envelope) => self.analysis.event(envelope.request_id, envelope.body),
             Delivery::Pictures(slot) => {
                 // The inspect process sends no pictures.
@@ -557,6 +573,7 @@ impl Session {
             }
             Route::Probe(id) => {
                 let result = match delivery {
+                    Delivery::JournalSaved(_) => return nothing,
                     Delivery::Event(e) if e.request_id != id => return nothing,
                     Delivery::Pictures(slot) => {
                         let _ = slot.take();
@@ -587,44 +604,79 @@ impl Session {
                 // A probe that already answered ignores this one.
                 self.dispatch(Intent::ProbeAnswered { id, result }, now)
             }
-            Route::Job(id) => {
-                let input = match delivery {
-                    Delivery::Event(e) if e.request_id != id => {
-                        eprintln!(
-                            "{}: ignoring an event for request {} during job {id}",
-                            crate::APP_NAME,
-                            e.request_id
-                        );
-                        return nothing;
-                    }
-                    Delivery::Event(Envelope {
-                        body: Event::PictureUnavailable { message, .. },
-                        ..
-                    }) => {
-                        self.preview.live_unavailable(id, &message);
-                        return self.preview_outcome();
-                    }
-                    Delivery::Event(e) => activity::Input::Event(e.body),
-                    Delivery::Pictures(slot) => {
-                        if let Some(picture) = slot.take().filter(|p| p.request_id == id) {
-                            self.preview.live(id, picture);
-                        }
-                        return self.preview_outcome();
-                    }
-                    Delivery::Ended(ending) => {
-                        if self.job.as_ref().is_some_and(|(current, _)| *current == id) {
-                            self.job = None;
-                        }
-                        activity::Input::WorkerEnded {
-                            detail: ending_text(&ending),
-                        }
-                    }
-                };
-                self.dispatch(Intent::Job { id, input }, now)
+            Route::Job(id) => self.deliver_job(id, delivery, now),
+            Route::Journal(id) => {
+                if self
+                    .prepared
+                    .as_ref()
+                    .is_none_or(|(current, _)| *current != id)
+                {
+                    return nothing;
+                }
+                match delivery {
+                    Delivery::JournalSaved(Ok(())) => self.start_prepared(id, now),
+                    Delivery::JournalSaved(Err(message)) => self.journal_failed(id, &message, now),
+                    _ => nothing,
+                }
             }
             Route::Preview(spawn) => self.deliver_preview(spawn, delivery),
             Route::Inspect(spawn) => self.deliver_inspect(spawn, delivery),
         }
+    }
+
+    fn deliver_job(&mut self, id: u64, delivery: Delivery, now: Instant) -> Outcome {
+        let nothing = Outcome::nothing();
+        if self
+            .preflight
+            .as_ref()
+            .is_some_and(|preflight| preflight.id == id)
+        {
+            return self.deliver_preflight(id, delivery, now);
+        }
+        let input = match delivery {
+            Delivery::JournalSaved(_) => return nothing,
+            Delivery::Event(e) if e.request_id != id => {
+                eprintln!(
+                    "{}: ignoring an event for request {} during job {id}",
+                    crate::APP_NAME,
+                    e.request_id
+                );
+                return nothing;
+            }
+            Delivery::Event(Envelope {
+                body:
+                    Event::JobPolicy {
+                        first,
+                        total,
+                        values,
+                    },
+                ..
+            }) => return self.confirm_policy(id, first, total, &values, now),
+            Delivery::Event(Envelope {
+                body: Event::PictureUnavailable { message, .. },
+                ..
+            }) => {
+                self.preview.live_unavailable(id, &message);
+                return self.preview_outcome();
+            }
+            Delivery::Event(e) => activity::Input::Event(e.body),
+            Delivery::Pictures(slot) => {
+                if let Some(picture) = slot.take().filter(|p| p.request_id == id) {
+                    self.preview.live(id, picture);
+                }
+                return self.preview_outcome();
+            }
+            Delivery::Ended(ending) => {
+                if self.job.as_ref().is_some_and(|(current, _)| *current == id) {
+                    self.job = None;
+                    self.clear_preflight();
+                }
+                activity::Input::WorkerEnded {
+                    detail: ending_text(&ending),
+                }
+            }
+        };
+        self.dispatch(Intent::Job { id, input }, now)
     }
 
     fn preview_outcome(&mut self) -> Outcome {
@@ -639,6 +691,7 @@ impl Session {
     fn deliver_preview(&mut self, spawn: u64, delivery: Delivery) -> Outcome {
         let current = self.previewer.as_ref().is_some_and(|(n, _)| *n == spawn);
         let effects = match delivery {
+            Delivery::JournalSaved(_) => return Outcome::nothing(),
             Delivery::Pictures(slot) => match slot.take() {
                 Some(picture) if current => self.preview.picture(picture),
                 _ => Vec::new(),
@@ -740,25 +793,31 @@ impl Session {
                     }
                 }
             }
-            Effect::Start { id, job } => {
-                let started = self.spawn(Route::Job(id)).and_then(|mut worker| {
-                    let live = Some(self.preview.live_box());
-                    worker
-                        .send(id, Command::Start { job, live })
-                        .map_err(|e| format!("could not send the job: {e}"))?;
-                    Ok(worker)
-                });
-                match started {
-                    // The previous job's worker, already told to exit, is
-                    // dropped here and reaped by its watchdog.
-                    Ok(worker) => self.job = Some((id, worker)),
-                    Err(detail) => pending.push_back(Intent::Job {
-                        id,
-                        input: activity::Input::WorkerEnded { detail },
-                    }),
-                }
-            }
+            Effect::Start { id, job } => self.begin_preflight(id, job, pending),
             Effect::Worker { id, effect } => {
+                if effect == activity::Effect::SendCancel
+                    && self.confirming.is_some_and(|(current, _)| current == id)
+                {
+                    self.confirming = None;
+                }
+                if effect == activity::Effect::SendCancel
+                    && (self
+                        .preflight
+                        .as_ref()
+                        .is_some_and(|preflight| preflight.id == id)
+                        || self
+                            .prepared
+                            .as_ref()
+                            .is_some_and(|(current, _)| *current == id))
+                {
+                    self.clear_preflight();
+                    self.job.take();
+                    pending.push_back(Intent::Job {
+                        id,
+                        input: activity::Input::Event(Event::Cancelled),
+                    });
+                    return;
+                }
                 let Some((_, worker)) = self.job.as_mut().filter(|(current, _)| *current == id)
                 else {
                     return;
@@ -838,7 +897,7 @@ impl Session {
         };
         let journal = journal::snapshot(
             self.state.next_id(),
-            self.state.settings(),
+            self.state.option_request().clone(),
             self.state.items(),
             view.clone(),
         );

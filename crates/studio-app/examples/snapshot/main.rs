@@ -448,6 +448,8 @@ fn restored_scenario(now: Instant) -> AppState {
         destination: WirePath::Utf8(source.replace(".y4m", ".ivf")),
         destination_chosen: false,
         acknowledgement: None,
+        submitted: None,
+        attempt_policy: Vec::new(),
         state,
     };
     let job = |source: &str| JobSpec {
@@ -456,13 +458,15 @@ fn restored_scenario(now: Instant) -> AppState {
         video_stream: 0,
         omissions_acknowledged: false,
         destination: WirePath::Utf8(source.replace(".y4m", ".ivf")),
-        settings: studio_app::state::INITIAL_SETTINGS,
+        settings: studio_app::state::INITIAL_SETTINGS.into(),
+        identity: None,
+        pass_artifact: None,
     };
     let journal = Journal {
         view: studio_app::journal::JournalView::default(),
         version: studio_app::journal::VERSION,
         next_id: 4,
-        settings: studio_app::state::INITIAL_SETTINGS,
+        settings: studio_app::state::INITIAL_SETTINGS.into(),
         items: vec![
             item(
                 1,

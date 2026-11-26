@@ -579,7 +579,7 @@ pub(super) fn error(config: &Config, error: &Error) -> FieldError {
             "content".into()
         }
         Error::InvalidMetadata { .. } => "key_frame_metadata".into(),
-        Error::InvalidTiles { .. } => "tiles".into(),
+        Error::InvalidTiles { reason, .. } => return FieldError::new("tiles", *reason),
         Error::InvalidPreset { .. } => "preset".into(),
         Error::Preset(PresetError::UnknownField { name }) => format!("preset.{name}"),
         Error::Preset(
@@ -594,6 +594,22 @@ pub(super) fn error(config: &Config, error: &Error) -> FieldError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tile_error_uses_codec_reason_without_copying_the_request() {
+        let config = Config::new(64, 64);
+        let cause = Error::InvalidTiles {
+            tiles: TileLayout::Explicit {
+                widths: vec![1; 22_000],
+                heights: vec![],
+            },
+            reason: "tiles beyond the frame edge",
+        };
+        assert_eq!(
+            error(&config, &cause),
+            FieldError::new("tiles", "tiles beyond the frame edge")
+        );
+    }
 
     #[test]
     fn readback_preserves_each_rate_control_shape() -> Result<(), FieldError> {

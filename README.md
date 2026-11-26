@@ -53,8 +53,8 @@ rotation or cropping, RGB or alpha, encrypted streams, network and playlist inpu
 - Audio, subtitles and chapters are not carried over; the app lists what a file would lose
   and asks before converting. Container output with audio is planned in
   [#12](https://github.com/splotlabs/splot-studio/issues/12).
-- No resize, target size, pause or background conversion: closing the window stops the
-  current file.
+- Closing the window stops the current file. Target file size, pause and background
+  conversion remain unavailable.
 - Packages are unsigned and need an x86-64-v3 processor (AVX2) on Windows and Linux.
 
 Known defects are in the [issues](https://github.com/splotlabs/splot-studio/issues); what
@@ -69,6 +69,15 @@ stands between the test builds and a real release is tracked in
   `inspect` reads IVF and Annex B files read-only for their OBU envelope and header facts, and
   `encode` runs the same job from the command line.
 - `studio-domain`: shared settings, job and protocol values (no GUI, codec or native types).
+
+The engine accepts typed overrides with repeated `--option KEY JSON` arguments.
+For example, this command requests the codec's half-size output and disables
+rate-distortion optimized quantization. The engine checks the source and settings
+before it opens the output file.
+
+```sh
+splot-studio-engine encode input.y4m output.ivf --option resize_denominator 16 --option preset.rdoq false
+```
 
 ## Development
 

@@ -24,10 +24,12 @@ mod run;
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use studio_domain::job::{FailureCode, JobSpec, Omissions, SourceFacts};
+use studio_domain::job::{Failure, FailureCode, JobSpec, Omissions, SourceFacts};
+use studio_domain::options::{EffectiveOption, OptionRequest, OptionValue};
 use studio_domain::protocol::Capabilities;
 use studio_domain::settings::{Crf, EncoderSettings, OutputKind, SpeedPreset};
 
@@ -106,6 +108,13 @@ pub enum Intent {
     QualitySelected(i32),
     /// A Priority step, by index into [`Priority::ALL`].
     PrioritySelected(i32),
+    /// Sets one typed override. An absent value removes the override.
+    OptionEdited {
+        /// The canonical option key.
+        key: String,
+        /// An explicit option value, or absence to inherit.
+        value: Option<OptionValue>,
+    },
     /// Clear the one file to start over (Convert Another).
     ResetRequested,
     /// Show another workspace. Refused while it has no flow in this build.
@@ -128,6 +137,20 @@ pub enum Intent {
         id: u64,
         /// What happened.
         input: activity::Input,
+    },
+    /// Preflight returned the complete effective policy.
+    JobPolicy {
+        /// The job's request.
+        id: u64,
+        /// The policy in codec schema order.
+        values: Vec<EffectiveOption>,
+    },
+    /// Preflight finished for a waiting submission.
+    QueuedPolicy {
+        /// The queue item.
+        item: ItemId,
+        /// The full policy, or why the worker refused the submission.
+        result: Result<Vec<EffectiveOption>, Failure>,
     },
     /// [`Effect::CleanPartial`] was carried out.
     PartialCleaned {
@@ -316,8 +339,10 @@ enum Dialog {
 }
 
 /// A run: converting the waiting files one after another.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Run {
+    /// Settings to use for files whose probe completes during this run.
+    settings: OptionRequest,
     /// Items this run started or decided not to start, in order.
     attempted: Vec<ItemId>,
     /// Cancel was pressed: end the run when the current item ends.
@@ -339,7 +364,7 @@ pub struct SettingsView {
 pub struct AppState {
     items: Vec<Item>,
     next_id: ItemId,
-    settings: EncoderSettings,
+    settings: OptionRequest,
     /// `None` until the startup handshake answers; `Err` when the engine
     /// cannot be used, with the reason for the user.
     engine: Option<Result<Capabilities, String>>,
@@ -379,7 +404,10 @@ impl AppState {
         let mut state = Self {
             items: Vec::new(),
             next_id: 1,
-            settings: INITIAL_SETTINGS,
+            settings: OptionRequest {
+                base: INITIAL_SETTINGS,
+                values: BTreeMap::new(),
+            },
             engine: None,
             selected: None,
             run: None,
@@ -505,14 +533,7 @@ impl AppState {
                     update.effects.push(effect);
                 }
             }
-            Intent::DestinationPicked(path) => {
-                if let Some(Dialog::Save(id)) = self.dialog {
-                    self.dialog = None;
-                    if let Some(path) = path {
-                        self.choose_destination(id, path);
-                    }
-                }
-            }
+            Intent::DestinationPicked(path) => self.destination_picked(path),
             Intent::OutputSelected(_)
             | Intent::PresetEdited(_)
             | Intent::CrfEdited(_)
@@ -522,6 +543,10 @@ impl AppState {
                     self.edit_settings(&intent, disk);
                 }
             }
+            Intent::OptionEdited { key, value } if !self.settings_view().read_only && !modal => {
+                self.edit_option(key, value);
+            }
+            Intent::OptionEdited { .. } => {}
             Intent::ResetRequested => {
                 if self.items.len() == 1 && !self.items[0].state.is_active() {
                     self.remove(self.items[0].id);
@@ -538,8 +563,49 @@ impl AppState {
             Intent::OmissionsDeclined => self.decline(),
             Intent::CancelRequested => self.cancel(now, update),
             Intent::Job { id, input } => self.job_input(id, input, now, disk, update),
+            Intent::JobPolicy { id, values } => self.record_policy(id, values),
+            Intent::QueuedPolicy { item, result } => self.queued_policy(item, result),
             Intent::PartialCleaned { item, fate } => self.partial_cleaned(item, fate),
             Intent::JournalSaved(result) => self.save_error = result.err(),
+        }
+    }
+
+    fn destination_picked(&mut self, path: Option<PathBuf>) {
+        if let Some(Dialog::Save(id)) = self.dialog {
+            self.dialog = None;
+            if let Some(path) = path {
+                self.choose_destination(id, path);
+            }
+        }
+    }
+
+    fn edit_option(&mut self, key: String, value: Option<OptionValue>) {
+        let changed = match value {
+            Some(value) if self.settings.values.get(&key) == Some(&value) => false,
+            Some(value) => {
+                self.settings.values.insert(key, value);
+                true
+            }
+            None => self.settings.values.remove(&key).is_some(),
+        };
+        if changed {
+            for item in &mut self.items {
+                if item.submitted.is_none() {
+                    item.ack = None;
+                }
+            }
+        }
+    }
+
+    fn record_policy(&mut self, id: u64, values: Vec<EffectiveOption>) {
+        if let Some(attempt) = self
+            .items
+            .iter_mut()
+            .filter(|item| item.state.is_active())
+            .filter_map(|item| item.attempt.as_mut())
+            .find(|attempt| attempt.request == id)
+        {
+            attempt.policy = values;
         }
     }
 
@@ -547,7 +613,7 @@ impl AppState {
     /// and the confirmation that no longer hold are dropped, the next probe
     /// is sent and the run moves on.
     fn settle(&mut self, now: Instant, update: &mut Update) {
-        let settings = self.settings;
+        let settings = self.draft_settings().base;
         for item in &mut self.items {
             let judged = item.facts.is_some() && item.state != ItemState::Probing;
             if !item.state.is_active() && judged && !item.acknowledged_for(settings) {
@@ -790,10 +856,22 @@ impl AppState {
         self.save_error.as_deref()
     }
 
-    /// The current settings, which every waiting file will use.
+    /// The Simple controls for new submissions.
     #[must_use]
     pub const fn settings(&self) -> EncoderSettings {
-        self.settings
+        self.settings.base
+    }
+
+    /// The typed settings for a new submission.
+    #[must_use]
+    pub const fn option_request(&self) -> &OptionRequest {
+        &self.settings
+    }
+
+    fn draft_settings(&self) -> &OptionRequest {
+        self.run
+            .as_ref()
+            .map_or(&self.settings, |run| &run.settings)
     }
 
     /// The settings the window shows: the selected file's snapshot while it
@@ -813,11 +891,11 @@ impl AppState {
         };
         match item.and_then(|i| i.attempt.as_ref()) {
             Some(attempt) => SettingsView {
-                settings: attempt.job.settings,
+                settings: attempt.job.settings.base,
                 read_only: true,
             },
             None => SettingsView {
-                settings: self.settings,
+                settings: self.settings.base,
                 read_only: false,
             },
         }
@@ -852,7 +930,9 @@ impl AppState {
 
     /// A file whose source, track and destination may still change.
     const fn editable(item: &Item) -> bool {
-        !item.state.is_active() && !matches!(item.state, ItemState::Completed)
+        item.submitted.is_none()
+            && !item.state.is_active()
+            && !matches!(item.state, ItemState::Completed)
     }
 
     /// Why Convert is unavailable and how serious that is. Engine problems
@@ -877,10 +957,13 @@ impl AppState {
         }
         let supported = self
             .capabilities()
-            .is_none_or(|c| c.encode_outputs.contains(&self.settings.output));
+            .is_none_or(|c| c.encode_outputs.contains(&self.settings.base.output));
         if !supported {
             return blocker(
-                &format!("This engine cannot write {}.", self.settings.output.label()),
+                &format!(
+                    "This engine cannot write {}.",
+                    self.settings.base.output.label()
+                ),
                 Severity::Problem,
             );
         }
@@ -909,6 +992,10 @@ impl AppState {
                 blocker("This build converts Y4M files only.", Severity::Problem)
             }
             ItemState::Unreadable => blocker("This file cannot be converted.", Severity::Problem),
+            ItemState::Waiting if item.source_changed() => blocker(
+                "The source changed after submission. Add the source again.",
+                Severity::Warning,
+            ),
             ItemState::Waiting if item.destination.exists => {
                 blocker("The output file already exists.", Severity::Warning)
             }
@@ -934,6 +1021,16 @@ impl AppState {
         }
         if self.items.iter().any(|i| i.state == ItemState::Probing) {
             return blocker("Reading the files…", Severity::Info);
+        }
+        if self
+            .items
+            .iter()
+            .any(|i| i.state == ItemState::Waiting && i.source_changed())
+        {
+            return blocker(
+                "A source changed after submission. Add it again.",
+                Severity::Warning,
+            );
         }
         let taken = self
             .items
@@ -978,28 +1075,28 @@ impl AppState {
         match *intent {
             Intent::OutputSelected(index) => {
                 if let Some(output) = step(&OutputKind::ALL, index) {
-                    self.settings.output = output;
+                    self.settings.base.output = output;
                     self.follow_output_kind(disk);
                 }
             }
             Intent::PresetEdited(value) => {
                 if let Some(preset) = to_u8(value).and_then(|v| SpeedPreset::new(v).ok()) {
-                    self.settings.preset = preset;
+                    self.settings.base.preset = preset;
                 }
             }
             Intent::CrfEdited(value) => {
                 if let Some(crf) = to_u8(value).and_then(|v| Crf::new(v).ok()) {
-                    self.settings.crf = crf;
+                    self.settings.base.crf = crf;
                 }
             }
             Intent::QualitySelected(index) => {
                 if let Some(quality) = step(&Quality::ALL, index) {
-                    self.settings.crf = quality.crf();
+                    self.settings.base.crf = quality.crf();
                 }
             }
             Intent::PrioritySelected(index) => {
                 if let Some(priority) = step(&Priority::ALL, index) {
-                    self.settings.preset = priority.preset();
+                    self.settings.base.preset = priority.preset();
                 }
             }
             _ => {}
