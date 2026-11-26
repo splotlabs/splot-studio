@@ -6,6 +6,7 @@
 
 use slint::{ComponentHandle, SharedString};
 use studio_domain::analysis::{DocumentSummary, Element, Span};
+use studio_domain::syntax::SyntaxSpan;
 
 use super::{model, refill};
 use crate::analysis::{
@@ -99,7 +100,14 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
             .map_or_else(String::new, |s| extent(&s.row.element).0.to_string())
             .into(),
     );
-    render_bytes(&global, doc.bytes(), summary.fingerprint.len, selected);
+    super::evidence::render(&global, &doc.evidence);
+    render_bytes(
+        &global,
+        doc.bytes(),
+        summary.fingerprint.len,
+        selected,
+        doc.evidence.exact_span(),
+    );
 }
 
 /// Sets the state card for the shown document's phase; the summary when
@@ -274,7 +282,13 @@ const fn region_name(region: ByteRegion) -> &'static str {
     }
 }
 
-fn render_bytes(global: &Global<'_>, bytes: &Bytes, len: u64, selected: Option<&Selected>) {
+fn render_bytes(
+    global: &Global<'_>,
+    bytes: &Bytes,
+    len: u64,
+    selected: Option<&Selected>,
+    evidence: Option<SyntaxSpan>,
+) {
     let element = selected.map(|s| &s.row.element);
     global.set_bytes_shown(bytes.shown);
     if let Some(legend) = refill(&global.get_legend(), legend(element)) {
@@ -324,6 +338,12 @@ fn render_bytes(global: &Global<'_>, bytes: &Bytes, len: u64, selected: Option<&
                         text: format!("{value:02X}").into(),
                         region: region(element, at),
                         cursor: at == bytes.cursor,
+                        evidence: evidence.is_some_and(|span| {
+                            let start = at.saturating_mul(8);
+                            start < span.start.file_bit.saturating_add(span.bit_len)
+                                && start.saturating_add(8) > span.start.file_bit
+                                && span.bit_len > 0
+                        }),
                     })
                     .collect(),
             ),

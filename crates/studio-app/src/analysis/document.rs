@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use studio_domain::analysis::{DocumentSummary, Element, Row, RowFilter, Span};
 use studio_domain::job::SourceFingerprint;
 
+use super::evidence::{Evidence, Pick};
 use super::{LINE_BYTES, WINDOW_BYTES};
 use crate::queue::ItemId;
 
@@ -159,6 +160,7 @@ pub(super) struct Place {
     pub(super) row: Row,
     pub(super) window: u64,
     pub(super) cursor: u64,
+    pub(super) evidence: Option<Pick>,
 }
 
 /// The byte view of one document.
@@ -197,6 +199,7 @@ pub struct Document {
     pub(super) wanted: Option<u64>,
     pub(super) selected: Option<Selected>,
     pub(super) history: Vec<Place>,
+    pub(crate) evidence: Evidence,
     pub(super) at: usize,
     pub(super) bytes: Bytes,
     /// The newest locate that may select; older ones are dropped.
@@ -228,6 +231,7 @@ impl Document {
             wanted: None,
             selected: None,
             history: Vec::new(),
+            evidence: Evidence::default(),
             at: 0,
             bytes: Bytes {
                 offset: 0,

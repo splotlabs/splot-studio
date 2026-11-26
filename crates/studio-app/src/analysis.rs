@@ -55,6 +55,7 @@ use studio_domain::protocol::{Command, Event};
 
 mod bytes;
 mod document;
+pub(crate) mod evidence;
 #[cfg(test)]
 mod tests;
 
@@ -63,6 +64,7 @@ pub use document::{
     parse_offset, same_file,
 };
 use document::{Place, in_window, line_of};
+use evidence::{Pick, Request as EvidenceRequest, VIEW_ROWS};
 
 use crate::recovery::{Disk, Kind, RestoredView};
 
@@ -181,12 +183,35 @@ pub enum Input {
     LayerFilter(i32),
     /// Admit every element again.
     ClearFilters,
+    /// Show Properties, Syntax or Findings.
+    EvidenceView(i32),
+    /// Search the open evidence view.
+    EvidenceSearch(String),
+    /// Filter finding rule IDs.
+    EvidenceRule(String),
+    /// Select a finding severity filter.
+    EvidenceSeverity(i32),
+    /// Select a finding layer filter.
+    EvidenceLayer(i32),
+    /// Select a visible evidence row.
+    EvidencePick(i32),
+    /// Move the selection within the current evidence list.
+    EvidenceMove(Step),
+    /// Change the current evidence page.
+    EvidencePage(i32),
+    /// Select the previous or next matching finding.
+    FindingStep(i32),
+    /// Validate the current source.
+    Validate,
+    /// Stop validation of the current source.
+    CancelValidation,
 }
 
 /// What a request was for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Asked {
     Open,
+    Evidence(EvidenceRequest),
     Cancel,
     Close,
     Page { generation: u64, first: u64 },
@@ -199,11 +224,17 @@ enum Asked {
 enum Purpose {
     /// Select what it found. From a byte or an offset the byte window
     /// stays; from the list it moves to the element.
-    Select { from_list: bool },
+    Select {
+        from_list: bool,
+    },
     /// Select the element of a restored view, as from the list. Unlike a
     /// selection of the user's, it keeps a restored view the read could
     /// not apply in full.
     Restore,
+    Evidence {
+        pick: Pick,
+        offset: u64,
+    },
     /// Learn the selection's row under the filter.
     Position,
 }
@@ -583,6 +614,57 @@ impl Analysis {
             Input::TypeFilter(index) => self.choose_kind(at, index, out),
             Input::LayerFilter(index) => self.choose_layer(at, index, out),
             Input::ClearFilters => self.refilter(at, RowFilter::default(), out),
+            Input::EvidenceView(tab) => {
+                let evidence = &mut self.documents[at].evidence;
+                evidence.tab = tab.clamp(0, 2);
+                evidence.first = 0;
+                evidence.reveal_selection();
+                self.ensure_syntax(at, out);
+            }
+            Input::EvidenceSearch(query) => {
+                let evidence = &mut self.documents[at].evidence;
+                if evidence.tab == 2 {
+                    evidence.finding_query = query;
+                } else {
+                    evidence.syntax_query = query;
+                }
+                evidence.first = 0;
+            }
+            Input::EvidenceRule(rule) => {
+                self.documents[at].evidence.rule_query = rule;
+                self.documents[at].evidence.first = 0;
+            }
+            Input::EvidenceSeverity(severity) => {
+                self.documents[at].evidence.severity = severity;
+                self.documents[at].evidence.first = 0;
+            }
+            Input::EvidenceLayer(layer) => {
+                self.documents[at].evidence.layer = layer;
+                self.documents[at].evidence.first = 0;
+            }
+            Input::EvidencePick(slot) => {
+                let evidence = &self.documents[at].evidence;
+                if let Ok(slot) = usize::try_from(slot)
+                    && let Some(&index) =
+                        evidence.matching().get(evidence.first.saturating_add(slot))
+                {
+                    self.pick_evidence(at, index, out);
+                }
+            }
+            Input::EvidenceMove(step) => self.move_evidence(at, step, out),
+            Input::EvidencePage(direction) => {
+                let evidence = &mut self.documents[at].evidence;
+                if direction < 0 {
+                    evidence.first = evidence.first.saturating_sub(VIEW_ROWS);
+                } else if evidence.first + VIEW_ROWS < evidence.matching().len() {
+                    evidence.first += VIEW_ROWS;
+                }
+            }
+            Input::FindingStep(direction) => {
+                self.move_evidence(at, if direction < 0 { Step::Up } else { Step::Down }, out);
+            }
+            Input::Validate => self.start_validation(at, Default::default(), out),
+            Input::CancelValidation => self.stop_validation(at, out),
             Input::Open(_)
             | Input::OpenResult(_)
             | Input::Show(_)
@@ -697,6 +779,17 @@ impl Analysis {
         // it is closed. The close waits behind the open in the engine's
         // queue, so the slot is free before any later open.
         if doc.in_engine() {
+            if let Some(validation) = doc.evidence.running {
+                self.send(
+                    doc.id,
+                    Asked::Evidence(EvidenceRequest::Cancel),
+                    out,
+                    |document| Command::AnalysisCancelValidation {
+                        document,
+                        validation,
+                    },
+                );
+            }
             self.send(doc.id, Asked::Close, out, |document| {
                 Command::AnalysisClose { document }
             });
@@ -737,6 +830,10 @@ impl Analysis {
             | Event::AnalysisPage { document: d, .. }
             | Event::AnalysisLocated { document: d, .. }
             | Event::AnalysisBytes { document: d, .. }
+            | Event::AnalysisSyntaxReady { document: d, .. }
+            | Event::AnalysisSyntaxPage { document: d, .. }
+            | Event::AnalysisValidated { document: d, .. }
+            | Event::AnalysisFindings { document: d, .. }
             | Event::AnalysisClosed { document: d }
             | Event::AnalysisFailed { document: d, .. } => Some(*d),
             _ => None,
@@ -827,6 +924,9 @@ impl Analysis {
             (_, Event::Error { message, .. }) => {
                 self.failed(at, request_id, asked, None, message);
             }
+            (Asked::Evidence(request), event) => {
+                self.evidence_event(at, request_id, request, event, &mut out);
+            }
             // An answer of the wrong kind breaks the protocol.
             (Asked::Cancel | Asked::Close, _) => {}
             _ => self.broken(at, "an answer of the wrong kind", &mut out),
@@ -899,6 +999,21 @@ impl Analysis {
                     self.position_selection(at, out);
                 }
             }
+            Purpose::Evidence { pick, offset } => {
+                if doc.locating != Some(request_id) || !doc.evidence.has_finding(pick) {
+                    return;
+                }
+                doc.locating = None;
+                let position = if current {
+                    Position::of(row)
+                } else {
+                    Position::Unknown
+                };
+                self.select_evidence(at, found, position, pick, offset, out);
+                if !current {
+                    self.position_selection(at, out);
+                }
+            }
             Purpose::Position => {
                 let same = doc
                     .selected
@@ -953,6 +1068,16 @@ impl Analysis {
                     doc.locating = None;
                 }
                 fail_or_notice(doc, code, &message);
+            }
+            Asked::Evidence(request) => {
+                if matches!(
+                    code,
+                    Some(AnalysisFailure::SourceChanged | AnalysisFailure::UnknownDocument)
+                ) {
+                    fail_or_notice(doc, code, &message);
+                } else {
+                    doc.evidence.fail(request_id, request, message);
+                }
             }
             Asked::Cancel | Asked::Close => {}
         }
@@ -1039,6 +1164,8 @@ impl Analysis {
     ) {
         let doc = &mut self.documents[at];
         doc.wanted = None;
+        doc.locating = None;
+        doc.evidence.selected = None;
         if doc
             .selected
             .as_ref()
@@ -1069,6 +1196,7 @@ impl Analysis {
             row: row.clone(),
             window: doc.bytes.offset,
             cursor: doc.bytes.cursor,
+            evidence: None,
         });
         if doc.history.len() > HISTORY {
             doc.history.remove(0);
@@ -1080,6 +1208,7 @@ impl Analysis {
         }
         self.fill(at, out);
         self.fetch_bytes(at, out);
+        self.ensure_syntax(at, out);
     }
 
     fn travel(&mut self, at: usize, forward: bool, out: &mut Vec<Effect>) {
@@ -1107,8 +1236,18 @@ impl Analysis {
             row: place.row,
             position: Position::Unknown,
         });
+        doc.evidence.selected = place.evidence;
+        if let Some(pick) = place.evidence {
+            doc.evidence.tab = if matches!(pick, Pick::Finding { .. }) {
+                2
+            } else {
+                1
+            };
+        }
+        doc.evidence.reveal_selection();
         self.position_selection(at, out);
         self.fetch_bytes(at, out);
+        self.ensure_syntax(at, out);
     }
 
     /// Asks where the selection is under the current filter.
@@ -1134,7 +1273,7 @@ impl Analysis {
                 target,
             },
         );
-        if let Purpose::Select { .. } | Purpose::Restore = purpose {
+        if let Purpose::Select { .. } | Purpose::Restore | Purpose::Evidence { .. } = purpose {
             self.documents[at].locating = Some(id);
         }
     }
