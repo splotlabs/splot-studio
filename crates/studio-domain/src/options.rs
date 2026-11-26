@@ -50,7 +50,12 @@ pub enum ValueShape {
     /// A true or false value.
     Bool,
     /// The inclusive numeric bounds.
-    Integer { min: i64, max: i64 },
+    Integer {
+        /// Smallest accepted value.
+        min: i64,
+        /// Largest accepted value.
+        max: i64,
+    },
     /// An unsigned integer with a fixed or dependent maximum.
     Unsigned {
         /// The inclusive minimum.
@@ -61,7 +66,10 @@ pub enum ValueShape {
         unit: Option<String>,
     },
     /// One of the listed names.
-    Choice { values: Vec<String> },
+    Choice {
+        /// Names that the codec accepts.
+        values: Vec<String>,
+    },
     /// A positive ratio.
     Ratio,
     /// A list of unsigned byte values.
@@ -71,7 +79,9 @@ pub enum ValueShape {
     },
     /// A list with an element shape and an optional fixed length.
     List {
+        /// Shape of each list item.
         element: Box<Self>,
+        /// Number of items for a fixed-length list.
         length: Option<u32>,
     },
     /// A group of named values.
@@ -85,10 +95,15 @@ pub enum ValueShape {
         modes: BTreeMap<String, OptionMode>,
     },
     /// An explicit empty value or the stated shape.
-    Optional { value: Box<Self> },
+    Optional {
+        /// Shape when the user supplies a value.
+        value: Box<Self>,
+    },
     /// One value for all frames or one value per named frame kind.
     PerFrame {
+        /// Shape of a frame override.
         value: Box<Self>,
+        /// Frame kinds in input order.
         frames: Vec<String>,
     },
     /// Information supplied by the source, codec or pass workflow.
