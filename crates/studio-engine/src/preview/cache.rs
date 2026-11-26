@@ -5,7 +5,9 @@
 
 use std::collections::VecDeque;
 
-use studio_domain::preview::{PictureBox, PictureHeader, PictureView};
+use studio_domain::preview::PictureHeader;
+
+use super::Display;
 
 /// The most pixel bytes kept: about 24 pictures of the largest size.
 pub const CACHE_BYTES: usize = 64 << 20;
@@ -15,8 +17,7 @@ const MAX_ENTRIES: usize = 256;
 
 struct Entry<K> {
     key: K,
-    view: PictureView,
-    size: PictureBox,
+    display: Display,
     header: PictureHeader,
     pixels: Vec<u8>,
 }
@@ -43,12 +44,12 @@ impl<K: PartialEq> Cache<K> {
         &mut self,
         key: &K,
         index: u64,
-        view: PictureView,
-        size: PictureBox,
+        display: Display,
     ) -> Option<(PictureHeader, Vec<u8>)> {
-        let at = self.entries.iter().position(|e| {
-            e.key == *key && e.header.frame == index && e.view == view && e.size == size
-        })?;
+        let at = self
+            .entries
+            .iter()
+            .position(|e| e.key == *key && e.header.frame == index && e.display == display)?;
         let entry = self.entries.remove(at)?;
         let found = (entry.header.clone(), entry.pixels.clone());
         self.entries.push_back(entry);
@@ -57,14 +58,7 @@ impl<K: PartialEq> Cache<K> {
 
     /// Keeps a copy of the picture, dropping the oldest pictures over
     /// [`CACHE_BYTES`].
-    pub fn put(
-        &mut self,
-        key: K,
-        view: PictureView,
-        size: PictureBox,
-        header: &PictureHeader,
-        pixels: &[u8],
-    ) {
+    pub fn put(&mut self, key: K, display: Display, header: &PictureHeader, pixels: &[u8]) {
         let bytes = pixels.len();
         if bytes > CACHE_BYTES {
             return;
@@ -78,8 +72,7 @@ impl<K: PartialEq> Cache<K> {
         self.bytes += bytes;
         self.entries.push_back(Entry {
             key,
-            view,
-            size,
+            display,
             header: header.clone(),
             pixels: pixels.to_vec(),
         });
@@ -105,7 +98,17 @@ impl<K: PartialEq> Cache<K> {
 
 #[cfg(test)]
 mod tests {
+    use studio_domain::preview::{PictureBox, PictureOptions, PictureView};
+
     use super::*;
+
+    fn display(size: PictureBox) -> Display {
+        Display {
+            view: PictureView::Fit,
+            size,
+            options: PictureOptions::default(),
+        }
+    }
 
     fn header(frame: u64) -> PictureHeader {
         use studio_domain::preview::{ColorBasis, ColorMatrix, PictureOrigin};
@@ -113,6 +116,8 @@ mod tests {
             generation: 0,
             origin: PictureOrigin::Result,
             output: None,
+            options: PictureOptions::default(),
+            document_info: None,
             frame,
             time: None,
             frame_count: None,
@@ -129,43 +134,54 @@ mod tests {
     }
 
     #[test]
+    fn the_cache_checks_surface_and_grain() {
+        use studio_domain::preview::{GrainPolicy, PictureSurface};
+
+        let mut cache = Cache::default();
+        let original = display(PictureBox::clamped(1, 1));
+        let mut alternate = original;
+        cache.put(1, original, &header(0), &[0; 3]);
+
+        alternate.options.surface = PictureSurface::Y;
+        assert!(cache.get(&1, 0, alternate).is_none());
+        alternate.options.surface = PictureSurface::Rgb;
+        alternate.options.grain = GrainPolicy::Skip;
+        assert!(cache.get(&1, 0, alternate).is_none());
+        assert!(cache.get(&1, 0, original).is_some());
+    }
+
+    #[test]
     fn tiny_pictures_do_not_fill_the_cache_with_headers() {
         let mut cache = Cache::default();
-        let size = PictureBox::clamped(1, 1);
+        let display = display(PictureBox::clamped(1, 1));
         for index in 0..=MAX_ENTRIES as u64 {
-            cache.put(1, PictureView::Fit, size, &header(index), &[0; 3]);
+            cache.put(1, display, &header(index), &[0; 3]);
         }
-        assert!(cache.get(&1, 0, PictureView::Fit, size).is_none());
-        assert!(cache.get(&1, 1, PictureView::Fit, size).is_some());
+        assert!(cache.get(&1, 0, display).is_none());
+        assert!(cache.get(&1, 1, display).is_some());
         assert_eq!(cache.entries.len(), MAX_ENTRIES);
     }
 
     #[test]
     fn the_byte_budget_holds() {
         let mut cache = Cache::default();
-        let size = PictureBox {
+        let display = display(PictureBox {
             width: 1280,
             height: 720,
-        };
+        });
         let big = vec![0; CACHE_BYTES / 3];
         for index in 0..10 {
-            cache.put(1, PictureView::Fit, size, &header(index), &big);
+            cache.put(1, display, &header(index), &big);
             assert!(cache.bytes() <= CACHE_BYTES);
         }
-        assert!(cache.get(&1, 9, PictureView::Fit, size).is_some());
-        assert!(cache.get(&1, 0, PictureView::Fit, size).is_none());
+        assert!(cache.get(&1, 9, display).is_some());
+        assert!(cache.get(&1, 0, display).is_none());
         // A use keeps a picture: 7 was used, so 8 goes first.
-        assert!(cache.get(&1, 7, PictureView::Fit, size).is_some());
-        cache.put(1, PictureView::Fit, size, &header(10), &big);
-        assert!(cache.get(&1, 8, PictureView::Fit, size).is_none());
-        cache.put(
-            2,
-            PictureView::Fit,
-            size,
-            &header(0),
-            &vec![0; CACHE_BYTES + 1],
-        );
-        assert!(cache.get(&2, 0, PictureView::Fit, size).is_none());
+        assert!(cache.get(&1, 7, display).is_some());
+        cache.put(1, display, &header(10), &big);
+        assert!(cache.get(&1, 8, display).is_none());
+        cache.put(2, display, &header(0), &vec![0; CACHE_BYTES + 1]);
+        assert!(cache.get(&2, 0, display).is_none());
         cache.forget(&1);
         assert_eq!(cache.bytes(), 0);
     }

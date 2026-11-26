@@ -312,6 +312,20 @@ export component Stage inherits KeyboardFocus {
     in property <bool> comparing;
     in property <bool> navigable;
     in property <bool> can-end: true;
+    in property <bool> precise;
+    in property <int> magnification;
+    in property <bool> can-sample;
+    property <float> fit-scale: min(root.width / 1phx / max(1, root.picture.width),
+        root.height / 1phx / max(1, root.picture.height));
+    property <float> paint-scale: root.magnification == 0 ? root.fit-scale : root.magnification;
+    property <length> paint-width: max(1, round(root.picture.width * root.paint-scale)) * 1phx;
+    property <length> paint-height: max(1, round(root.picture.height * root.paint-scale)) * 1phx;
+    property <length> paint-x: floor((root.width - root.paint-width) / 2 / 1phx) * 1phx;
+    property <length> paint-y: floor((root.height - root.paint-height) / 2 / 1phx) * 1phx;
+    property <length> drag-x;
+    property <length> drag-y;
+    property <bool> dragged;
+    callback pick-sample(int, int, int, int);
     in property <string> accessible-text;
     callback compare(bool);
     callback step(int);
@@ -326,7 +340,9 @@ export component Stage inherits KeyboardFocus {
     accessible-label: root.accessible-text;
     accessible-description: (root.can-compare ? "Press and hold, or hold O, to see the original. " : "")
         + (root.navigable ? "Space plays or pauses. Left and Right step one frame. Home goes to the first." : "")
-        + (root.navigable && root.can-end ? " End goes to the last." : "");
+        + (root.navigable && root.can-end ? " End goes to the last." : "")
+        + (root.precise && root.can-sample ? " Click a sample or enter its coordinates below." : "")
+        + (root.precise && root.magnification > 0 ? " Press W, A, S or D to pan." : "");
     // Screen readers cannot hold: activating switches sides until activated again.
     accessible-action-default => {
         if root.can-compare || root.comparing {
@@ -341,6 +357,28 @@ export component Stage inherits KeyboardFocus {
                 root.compare(true);
             }
             return accept;
+        }
+        if root.precise && root.magnification > 0 {
+            if event.text == "a" || event.text == "A" {
+                root.keyboard-used();
+                root.pan(-32px, 0px);
+                return accept;
+            }
+            if event.text == "d" || event.text == "D" {
+                root.keyboard-used();
+                root.pan(32px, 0px);
+                return accept;
+            }
+            if event.text == "w" || event.text == "W" {
+                root.keyboard-used();
+                root.pan(0px, -32px);
+                return accept;
+            }
+            if event.text == "s" || event.text == "S" {
+                root.keyboard-used();
+                root.pan(0px, 32px);
+                return accept;
+            }
         }
         if !root.navigable {
             return reject;
@@ -407,7 +445,7 @@ export component Stage inherits KeyboardFocus {
         border-color: Tokens.border;
         clip: true;
 
-        if root.state == StageState.picture && !root.native: Image {
+        if root.state == StageState.picture && !root.precise && !root.native: Image {
             width: parent.width;
             height: parent.height;
             source: root.picture;
@@ -416,12 +454,23 @@ export component Stage inherits KeyboardFocus {
         }
 
         // Actual pixels: one picture pixel per physical pixel, centred.
-        if root.state == StageState.picture && root.native: Image {
+        if root.state == StageState.picture && !root.precise && root.native: Image {
             width: root.picture.width * 1phx;
             height: root.picture.height * 1phx;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             source: root.picture;
+            accessible-role: none;
+        }
+
+        if root.state == StageState.picture && root.precise: Image {
+            x: root.paint-x;
+            y: root.paint-y;
+            width: root.paint-width;
+            height: root.paint-height;
+            source: root.picture;
+            image-fit: fill;
+            image-rendering: root.magnification == 0 ? smooth : pixelated;
             accessible-role: none;
         }
 
@@ -457,13 +506,36 @@ export component Stage inherits KeyboardFocus {
         changed pressed => {
             if self.pressed {
                 root.focus();
+                root.drag-x = self.mouse-x;
+                root.drag-y = self.mouse-y;
+                root.dragged = false;
             }
             if root.can-compare || root.comparing {
                 root.compare(self.pressed);
             }
         }
+        moved => {
+            if root.precise && root.magnification > 0 && self.pressed {
+                let dx = root.drag-x - self.mouse-x;
+                let dy = root.drag-y - self.mouse-y;
+                let threshold = max(3px, root.magnification * 1phx);
+                if abs(dx) >= threshold || abs(dy) >= threshold {
+                    root.pan(dx, dy);
+                    root.drag-x = self.mouse-x;
+                    root.drag-y = self.mouse-y;
+                    root.dragged = true;
+                }
+            }
+        }
+        clicked => {
+            if root.precise && root.can-sample && !root.dragged {
+                root.pick-sample(floor((self.mouse-x - root.paint-x) / 1phx),
+                    floor((self.mouse-y - root.paint-y) / 1phx),
+                    round(root.paint-width / 1phx), round(root.paint-height / 1phx));
+            }
+        }
         scroll-event(event) => {
-            if root.native {
+            if root.native || (root.precise && root.magnification > 0) {
                 root.pan(-event.delta-x, -event.delta-y);
                 return accept;
             }
@@ -500,6 +572,25 @@ export global Playback {
     in property <string> output-coded;
     in property <string> output-showing;
     in property <string> output-sequence;
+    in-out property <int> surface;
+    in property <bool> chroma;
+    in-out property <int> zoom;
+    in property <int> magnification;
+    in property <bool> grain;
+    in property <string> viewer-geometry;
+    in property <string> viewer-policy;
+    in property <string> sample-plane;
+    in property <bool> can-sample;
+    in property <string> sample-text;
+    in property <string> sample-x;
+    in property <string> sample-y;
+    in property <string> sample-copy;
+
+    callback choose-surface(int);
+    callback choose-zoom(int);
+    callback toggle-grain(bool);
+    callback pick-sample(int, int, int, int);
+    callback read-sample(string, string);
 
     callback compare(bool);
     callback step(int);
@@ -531,6 +622,12 @@ export component PlaybackPanel inherits VerticalLayout {
         navigable: Playback.navigable;
         accessible-text: Playback.accessible;
         can-end: !root.document || Playback.frames > 0;
+        precise: root.document;
+        magnification: Playback.magnification;
+        can-sample: Playback.can-sample;
+        pick-sample(x, y, width, height) => {
+            Playback.pick-sample(x, y, width, height);
+        }
         compare(on) => {
             Playback.compare(on);
         }

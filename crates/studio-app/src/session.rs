@@ -786,6 +786,17 @@ impl Session {
             },
             _ if !current => Vec::new(),
             Delivery::Event(envelope) => match envelope.body {
+                Event::PictureSample {
+                    generation,
+                    ordinal,
+                    grain,
+                    point,
+                    value,
+                } => {
+                    self.preview
+                        .sample_answer(generation, ordinal, grain, point, value);
+                    Vec::new()
+                }
                 Event::PictureProgress {
                     generation,
                     stage,

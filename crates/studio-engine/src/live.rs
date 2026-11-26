@@ -231,6 +231,8 @@ impl Live {
             generation: 0,
             origin: PictureOrigin::Live,
             output: None,
+            options: studio_domain::preview::PictureOptions::default(),
+            document_info: None,
             frame: index,
             time: (num > 0).then(|| MediaTime {
                 num: index.saturating_mul(u64::from(den)),

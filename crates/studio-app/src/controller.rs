@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, SharedString, Timer, TimerMode};
-use studio_domain::preview::PictureBox;
+use studio_domain::preview::{GrainPolicy, PictureBox, PictureSurface};
 use studio_domain::protocol::BuildIdentity;
 use studio_domain::settings::OutputKind;
 
@@ -406,6 +406,7 @@ impl Controller {
         });
         playback.on_play_pause(on(Input::PlayPause));
         playback.on_toggle_native(on(Input::ToggleNative));
+        self.wire_viewer(&playback);
         playback.on_compare({
             let ctl = Rc::downgrade(self);
             move |held| with(&ctl, |ctl| ctl.preview_input(Input::Compare(held)))
@@ -437,6 +438,55 @@ impl Controller {
         });
         // The first size needs no settling.
         self.preview_input(geometry(window));
+    }
+
+    fn wire_viewer(self: &Rc<Self>, playback: &crate::Playback<'_>) {
+        let ctl = Rc::downgrade(self);
+        playback.on_choose_surface(move |index| {
+            let surface = match index {
+                0 => PictureSurface::Rgb,
+                1 => PictureSurface::Y,
+                2 => PictureSurface::U,
+                3 => PictureSurface::V,
+                _ => return,
+            };
+            with(&ctl, |ctl| ctl.preview_input(Input::Surface(surface)));
+        });
+        let ctl = Rc::downgrade(self);
+        playback.on_choose_zoom(move |index| {
+            if let Some(&zoom) = usize::try_from(index)
+                .ok()
+                .and_then(|i| crate::preview::ZOOMS.get(i))
+            {
+                with(&ctl, |ctl| ctl.preview_input(Input::Zoom(zoom)));
+            }
+        });
+        let ctl = Rc::downgrade(self);
+        playback.on_toggle_grain(move |apply| {
+            let grain = if apply {
+                GrainPolicy::Apply
+            } else {
+                GrainPolicy::Skip
+            };
+            with(&ctl, |ctl| ctl.preview_input(Input::Grain(grain)));
+        });
+        let ctl = Rc::downgrade(self);
+        playback.on_pick_sample(move |x, y, width, height| {
+            with(&ctl, |ctl| {
+                ctl.preview_input(Input::PickSample {
+                    x,
+                    y,
+                    width,
+                    height,
+                });
+            });
+        });
+        let ctl = Rc::downgrade(self);
+        playback.on_read_sample(move |x, y| {
+            let x = x.trim().parse().ok();
+            let y = y.trim().parse().ok();
+            with(&ctl, |ctl| ctl.preview_input(Input::ReadSample { x, y }));
+        });
     }
 
     fn handle(self: &Rc<Self>, outcome: Outcome) {

@@ -753,12 +753,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             analyze.session.state().clone()
         };
         studio_app::render(&window, analyze.session.state(), now);
-        if name == "analyze-playback" {
+        if matches!(name, "analyze-playback" | "analyze-sample") {
+            window.show()?;
             let stage = PictureBox::clamped(
                 u32::try_from(window.get_stage_px_width()).unwrap_or(1),
                 u32::try_from(window.get_stage_px_height()).unwrap_or(1),
             );
-            analyze.playback(stage)?;
+            analyze.playback(stage, name == "analyze-sample")?;
             studio_app::render_preview(
                 &window,
                 analyze.session.state(),
@@ -865,6 +866,7 @@ fn answer(preview: &mut Preview, mut effects: Vec<preview::Effect>, timed: bool)
             frame,
             view,
             size,
+            ..
         } = effect.command
         {
             let origin = match target {
@@ -918,6 +920,7 @@ fn paint(
             let y = y.min(fh - u32::from(h));
             (w, h, x, y, 1.0)
         }
+        PictureView::Zoom { .. } => unreachable!("The Encode snapshot offers Fit and 1:1."),
     };
     let coarse = origin != PictureOrigin::Source;
     let shift = frame as f64 * 3.0;
@@ -943,6 +946,8 @@ fn paint(
         }),
         frame_count: Some(300),
         output: None,
+        options: studio_domain::preview::PictureOptions::default(),
+        document_info: None,
         width,
         height,
         frame_width: fw,
@@ -950,6 +955,7 @@ fn paint(
         view: match view {
             PictureView::Fit => PictureView::Fit,
             PictureView::Native { .. } => PictureView::Native { x: x0, y: y0 },
+            PictureView::Zoom { .. } => unreachable!("The Encode snapshot offers Fit and 1:1."),
         },
         basis: ColorBasis {
             matrix: ColorMatrix::Bt709,

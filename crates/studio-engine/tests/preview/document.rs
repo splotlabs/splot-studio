@@ -3,6 +3,9 @@
 
 //! Playback from independently opened AV2 documents.
 
+#[path = "samples.rs"]
+mod samples;
+
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -13,7 +16,8 @@ use std::time::Duration;
 use studio_domain::{
     job::WirePath,
     preview::{
-        PictureBox, PictureFailure, PictureFrame, PictureHeader, PictureOrigin, PictureTarget,
+        PictureBox, PictureFailure, PictureFrame, PictureHeader, PictureOptions, PictureOrigin,
+        PictureTarget,
     },
     protocol::{Command, Envelope, Event, read_event, write_message},
 };
@@ -105,6 +109,7 @@ fn picture(generation: u64, target: &PictureTarget, index: u64) -> Command {
         target: target.clone(),
         frame: PictureFrame::Index { index },
         view: NATIVE,
+        options: PictureOptions::default(),
         size: BIG,
     }
 }

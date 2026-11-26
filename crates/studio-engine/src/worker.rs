@@ -212,6 +212,7 @@ fn serve<'scope>(
             }
             Command::Picture { .. }
             | Command::Play { .. }
+            | Command::PictureSample { .. }
             | Command::StopPlayback
             | Command::CloseDocumentPlayback { .. } => {
                 outbox.reply(

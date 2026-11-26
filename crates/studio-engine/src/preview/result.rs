@@ -9,9 +9,9 @@
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use splot_core::annexb::AnnexBObuCursor;
-use splot_core::headers::ContentInterpretation;
 use splot_core::span::ByteOffset;
 use splot_core::stream_reader::{ReaderError, TemporalUnitReader, is_random_access_point};
 use splot_core::types::ObuType;
@@ -22,9 +22,10 @@ use splot_decode::{
 use studio_domain::analysis::SourceDigest;
 use studio_domain::job::{SourceFingerprint, WirePath};
 use studio_domain::preview::{
-    ColorMatrix, MediaTime, OutputEvent, PictureFailure, PictureStage, SourceRef,
+    ColorMatrix, GrainPolicy, MediaTime, OutputEvent, PictureFailure, PictureStage, SourceRef,
 };
 
+use super::document::DocumentPicture;
 use super::{Context, Decoded, Outcome, Stopped};
 use crate::inspect::document::HashReader;
 use crate::output::FileId;
@@ -37,6 +38,9 @@ pub const MAX_UNIT_BYTES: usize = 64 << 20;
 /// The most temporal units indexed: over nine hours at 30 frames a second,
 /// about 24 MiB of index.
 pub const MAX_UNITS: usize = 1 << 20;
+
+/// Maximum read between cancellation checks while feeding a temporal unit.
+const READ_CHUNK_BYTES: usize = 1 << 20;
 
 /// One temporal unit in the file.
 #[derive(Debug, Clone, Copy)]
@@ -51,6 +55,7 @@ struct Unit {
 /// A decoder positioned in the file.
 struct Session {
     decoder: Decoder,
+    grain: GrainPolicy,
     /// The next unit to send.
     next_send: usize,
     /// The display index of the next picture.
@@ -76,41 +81,6 @@ pub struct ResultPictures {
     matrix: Option<ColorMatrix>,
     session: Option<Session>,
     buffer: Vec<u8>,
-}
-
-/// A document picture with the decoder evidence necessary to join it to source bytes.
-pub(super) struct DocumentPicture {
-    pub picture: Picture,
-    pub output: OutputEvent,
-    pub time: Option<MediaTime>,
-}
-
-impl DocumentPicture {
-    pub fn matrix(&self) -> Outcome<Option<ColorMatrix>> {
-        let Some(color) = self
-            .picture
-            .content_interpretation()
-            .map(ContentInterpretation::derived_color)
-        else {
-            return Ok(None);
-        };
-        let unsupported = |message| Stopped::unavailable(PictureFailure::Unsupported, message);
-        if color.full_range || matches!(color.code_points.transfer_characteristics, 16 | 18) {
-            return Err(unsupported(
-                "Preview supports only limited-range SDR pictures.",
-            ));
-        }
-        if self.picture.plane(splot_decode::PlaneId::U).is_none() {
-            return Ok(None);
-        }
-        match color.code_points.matrix_coefficients {
-            1 => Ok(Some(ColorMatrix::Bt709)),
-            2 => Ok(None),
-            5 | 6 => Ok(Some(ColorMatrix::Bt601)),
-            9 => Ok(Some(ColorMatrix::Bt2020)),
-            _ => Err(unsupported("Preview does not support this color matrix.")),
-        }
-    }
 }
 
 fn unreadable(message: impl Into<String>) -> Stopped {
@@ -210,6 +180,16 @@ impl ResultPictures {
         self.buffer = Vec::new();
     }
 
+    pub fn choose_grain(&mut self, grain: GrainPolicy) {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.grain != grain)
+        {
+            self.rest();
+        }
+    }
+
     pub fn check(&self) -> Outcome<()> {
         if let Some(id) = &self.document_id {
             return source::still_the_same(&self.path, id, self.fingerprint)
@@ -277,7 +257,7 @@ impl ResultPictures {
         (u64::from(rate.0) + u64::from(rate.1) / 2) / u64::from(rate.1.max(1))
     }
 
-    pub fn seek(&mut self, context: &Context<'_>, index: u64) -> Outcome<()> {
+    pub fn seek(&mut self, context: &Context<'_>, index: u64, grain: GrainPolicy) -> Outcome<()> {
         let document = self.is_document();
         let start = if document {
             if self.count.is_some_and(|count| index >= count) {
@@ -296,12 +276,14 @@ impl ResultPictures {
             self.encoded_seek_start(index)?
         };
         let reusable = self.session.as_ref().is_some_and(|session| {
-            (document || !session.drained)
+            session.grain == grain
+                && (document || !session.drained)
                 && session.next_out <= index
                 && session.next_out >= start as u64
         });
         if !reusable {
-            let decoder = if let Some(mut session) = self.session.take() {
+            let reuse = self.session.take().filter(|session| session.grain == grain);
+            let decoder = if let Some(mut session) = reuse {
                 session.decoder.flush();
                 session.decoder
             } else {
@@ -310,7 +292,7 @@ impl ResultPictures {
                     let limits = DecodeLimits::DEFAULT
                         .with_max_frames_to_decode(limit)
                         .with_max_output_frames(limit);
-                    stream::preview_decoder(PREVIEW_DECODE_THREADS, limits)
+                    stream::preview_decoder(PREVIEW_DECODE_THREADS, limits, grain)
                 } else {
                     stream::decoder(PREVIEW_DECODE_THREADS)
                 };
@@ -318,6 +300,7 @@ impl ResultPictures {
             };
             self.session = Some(Session {
                 decoder,
+                grain,
                 next_send: start,
                 next_out: start as u64,
                 drained: false,
@@ -361,7 +344,7 @@ impl ResultPictures {
             return Ok(None);
         };
         let decoded = if self.is_document() {
-            Decoded::Document(Box::new(self.document_picture(index, picture)?))
+            Decoded::Document(Rc::new(self.document_picture(index, picture)?))
         } else {
             Decoded::Picture(Box::new(picture))
         };
@@ -483,13 +466,15 @@ impl ResultPictures {
                 session.drained = true;
                 continue;
             };
+            context.check()?;
             self.buffer.resize(unit.len, 0);
             self.file
                 .seek(SeekFrom::Start(unit.offset))
-                .and_then(|_| self.file.read_exact(&mut self.buffer))
-                .map_err(|e| unreadable(format!("Cannot read the preview file. {e}")))?;
+                .map_err(|e| unreadable(format!("Cannot seek the preview file. {e}")))?;
+            read_unit(&mut self.file, &mut self.buffer, context)?;
             let token = session.next_send as u64;
             let props = DataProps::default().with_user_data(token);
+            context.check()?;
             match session
                 .decoder
                 .send_data(&self.buffer, props)
@@ -501,6 +486,16 @@ impl ResultPictures {
             }
         }
     }
+}
+
+fn read_unit(reader: &mut impl Read, buffer: &mut [u8], context: &Context<'_>) -> Outcome<()> {
+    for chunk in buffer.chunks_mut(READ_CHUNK_BYTES) {
+        context.check()?;
+        reader
+            .read_exact(chunk)
+            .map_err(|e| unreadable(format!("Cannot read the preview file. {e}")))?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -756,6 +751,44 @@ mod tests {
     }
 
     #[test]
+    fn a_superseded_request_stops_reading_a_temporal_unit() {
+        use super::super::{Request, Shared};
+
+        struct CancellingRead<'a> {
+            shared: &'a Shared,
+            reads: usize,
+        }
+
+        impl Read for CancellingRead<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                self.reads += 1;
+                self.shared.submit(2, Request::Stop);
+                buffer.fill(0);
+                Ok(buffer.len())
+            }
+        }
+
+        let shared = Shared::default();
+        let mut reader = CancellingRead {
+            shared: &shared,
+            reads: 0,
+        };
+        let context = Context {
+            shared: &shared,
+            serial: 0,
+            request_id: 1,
+            generation: 1,
+            last_progress: std::cell::Cell::default(),
+        };
+        let mut buffer = vec![0; READ_CHUNK_BYTES * 2];
+        assert!(matches!(
+            read_unit(&mut reader, &mut buffer, &context),
+            Err(Stopped::Superseded)
+        ));
+        assert_eq!(reader.reads, 1);
+    }
+
+    #[test]
     fn preview_stops_at_the_verified_prefix() -> Result<(), Box<dyn std::error::Error>> {
         for kind in [OutputKind::Ivf, OutputKind::Av2AnnexB] {
             let (bytes, _) = encoded(kind);
@@ -781,7 +814,9 @@ mod tests {
             let mut pictures =
                 ResultPictures::open(&path, None, Some((fingerprint, &digest)), &context)
                     .map_err(|e| format!("{e:?}"))?;
-            pictures.seek(&context, 0).map_err(|e| format!("{e:?}"))?;
+            pictures
+                .seek(&context, 0, GrainPolicy::Apply)
+                .map_err(|e| format!("{e:?}"))?;
 
             // The fourth IVF unit has a complete record. For Annex B the
             // prefix does not establish the boundary of its last unit.

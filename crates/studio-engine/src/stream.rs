@@ -16,6 +16,8 @@ use splot_decode::{
     FrameDelay, Picture, PictureSamples, PlaneId, PlaneRef, ReconSample, ThreadCount,
 };
 
+use studio_domain::preview::GrainPolicy;
+
 use crate::picture::{Frame, Plane, Samples};
 use crate::source::{FRAMES_IN_FLIGHT, MEMORY_BUDGET_BYTES};
 
@@ -33,12 +35,13 @@ pub const DECODE_STORE_BYTES: u64 = 1 << 30;
 /// # Errors
 /// When the decoder's threads cannot start.
 pub fn decoder(threads: usize) -> splot_decode::Result<Decoder> {
-    preview_decoder(threads, DecodeLimits::DEFAULT)
+    preview_decoder(threads, DecodeLimits::DEFAULT, GrainPolicy::Apply)
 }
 
 pub(crate) fn preview_decoder(
     threads: usize,
     limits: DecodeLimits,
+    grain: GrainPolicy,
 ) -> splot_decode::Result<Decoder> {
     let largest = MEMORY_BUDGET_BYTES / (2 * FRAMES_IN_FLIGHT);
     let limits = limits
@@ -55,7 +58,8 @@ pub(crate) fn preview_decoder(
     let settings = DecoderSettings::default()
         .with_threads(threads)
         .with_frame_delay(FrameDelay::Fixed(std::num::NonZeroUsize::MIN))
-        .with_limits(limits);
+        .with_limits(limits)
+        .with_skip_film_grain(grain == GrainPolicy::Skip);
     Decoder::new(settings)
 }
 

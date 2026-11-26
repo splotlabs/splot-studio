@@ -14,7 +14,8 @@
 //! the first shown, for the Jobs list), and two documents restored from a last session:
 //! `analyze-changed` (the file was replaced since) and `analyze-missing`
 //! (nothing is at its path any more). `analyze-playback` decodes an AV2 file
-//! from `STUDIO_PLAYBACK_FIXTURE` with the real preview engine.
+//! from `STUDIO_PLAYBACK_FIXTURE` with the real preview engine. `analyze-sample`
+//! shows a decoded Y plane at 4× and an exact sample value.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,7 +31,7 @@ use studio_app::state::{AppState, INITIAL_SETTINGS, Intent, Startup};
 use studio_app::workspace::Workspace;
 use studio_domain::analysis::{KindFilter, RowFilter};
 use studio_domain::job::SourceFingerprint;
-use studio_domain::preview::PictureBox;
+use studio_domain::preview::{PictureBox, PictureSurface, PictureView};
 
 /// The engine tests' `ivf()`: three records (TD and sequence header, an
 /// empty payload, TD and a tile group with the extension), 82 bytes.
@@ -105,7 +106,7 @@ impl Scenario {
         Ok(())
     }
 
-    pub fn playback(&mut self, stage: PictureBox) -> Result<(), String> {
+    pub fn playback(&mut self, stage: PictureBox, inspect_sample: bool) -> Result<(), String> {
         let path = std::env::var_os("STUDIO_PLAYBACK_FIXTURE")
             .map(PathBuf::from)
             .ok_or("Set STUDIO_PLAYBACK_FIXTURE to an AV2 file.")?;
@@ -126,6 +127,11 @@ impl Scenario {
             thumb: PictureBox::clamped(64, 36),
         });
         self.input(Input::TogglePlayback);
+        if inspect_sample {
+            self.session
+                .preview_input(preview::Input::Surface(PictureSurface::Y));
+            self.session.preview_input(preview::Input::Zoom(4));
+        }
         self.wait_until(|session| {
             matches!(
                 session.preview().view().state,
@@ -133,11 +139,41 @@ impl Scenario {
             )
         })?;
         let view = self.session.preview().view();
-        if view.state == StageState::Picture {
-            Ok(())
-        } else {
-            Err(view.message)
+        if view.state != StageState::Picture {
+            return Err(view.message);
         }
+        if inspect_sample {
+            return self.sample();
+        }
+        Ok(())
+    }
+    fn sample(&mut self) -> Result<(), String> {
+        let picture = self
+            .session
+            .preview()
+            .view()
+            .picture
+            .ok_or("The worker did not return a picture.")?;
+        let PictureView::Zoom { x, y, .. } = picture.header.view else {
+            return Err("The worker did not return the zoomed region.".into());
+        };
+        self.session.preview_input(preview::Input::ReadSample {
+            x: Some(x + u32::from(picture.header.width) / 2),
+            y: Some(y + u32::from(picture.header.height) / 2),
+        });
+        self.wait_until(|session| {
+            let view = session.preview().view();
+            !view.viewer.sample_text.is_empty() || view.state == StageState::Unavailable
+        })?;
+        let view = self.session.preview().view();
+        if view.viewer.sample_copy.is_empty() {
+            return Err(if view.viewer.sample_text.is_empty() {
+                view.message
+            } else {
+                view.viewer.sample_text
+            });
+        }
+        Ok(())
     }
 }
 
@@ -213,7 +249,7 @@ pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
         Instant::now(),
     );
     match name {
-        "analyze-empty" | "analyze-playback" => {}
+        "analyze-empty" | "analyze-playback" | "analyze-sample" => {}
         "analyze-opening" => {
             // Asked for, and never answered here.
             let path = scenario.file("park walk.ivf", &ivf())?;

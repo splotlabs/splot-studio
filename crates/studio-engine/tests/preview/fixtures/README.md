@@ -26,3 +26,37 @@ avmdec --threads=1 --all-layers --skip-film-grain --rawvideo --i420 -o "$input.y
 [vectors]: https://github.com/splotlabs/splot/tree/6d5ada491438c6a26c2e792bf733ba18c3fb90a9/tests/conformance/vectors/valid
 [manifest]: https://github.com/splotlabs/splot/blob/6d5ada491438c6a26c2e792bf733ba18c3fb90a9/tests/conformance/manifest.toml
 [avm]: https://github.com/AOMediaCodec/avm/tree/a1ec4594d97028ebc34083ec8346616d697c2fc9
+
+## Native sample viewer
+
+The sample tests also use the vectors below. The source commit is
+`7a1ef0978e69b4a0d06a2c3c3af9c97f28d8c793` for the Splot vectors.
+The tests record selected values from AVM's native planes. Regenerate them
+with the command above, omitting `--i420` to preserve each sampling format.
+Omit `--skip-film-grain` to regenerate the post-grain output. All hashes
+match with one and eight AVM threads.
+
+| Bitstream | AVM native output SHA-256 |
+| --- | --- |
+| `syn-luma-palette2-row-mono-16x16-q0.ivf` | `418ecf79e4b2564419678cb25c28cbbf0259bf4602dd54f3e2868529d4df261d` |
+| `syn-3frame-padded-filters-422-134x69-10bit-q150.ivf` | `88ed1eec0b69461416d840c759eaf37570b283d3c02ed18c482aa1a75a4f1a9f` |
+| `syn-mrl-padded-444-67x67-10bit-q120.ivf` | `1d03e5c85f4542facb672568ae893e8c80194f322f9ccac111e128fccd1882c1` |
+| `syn-2seq-crop-intra-64x64.obu` | `215d5e9d52a581a9ada3ba4d153016f2a65012661fc1e67289bd27e3ff74af0e` |
+| `syn-3frame-filmgrain-inter-64x64-10bit.ivf` without grain | `5e4da3a2658836d7f15696188ecf895b16992d6fd033d30e4c62f579b81cdf89` |
+| The same stream with grain | `e03fa2fe0bd341f21282ede12d527aea2066d00ab9603728a3acb31836f54b5b` |
+| `syn-pq-420-10bit-64x64.ivf` | `d28d3ac800fa3af64ccbfba31bf7e38d16d871a3791ec57a8f4ab732723323a2` |
+
+The PQ vector uses a Studio-owned 64 × 64 10-bit I420 source. Its Y4M header is
+`YUV4MPEG2 W64 H64 F30:1 Ip A1:1 C420p10`. After the `FRAME` line, write
+4,096 Y samples of 433, 1,024 U samples of 520, and 1,024 V samples of 620.
+Store each sample in a little-endian 16-bit word. Use the AVM revision above.
+
+```sh
+avmenc --ivf --limit=1 --threads=1 --cpu-used=4 --bit-depth=10 \
+  --input-bit-depth=10 --lossless=1 --color-primaries=bt2020 \
+  --transfer-characteristics=smpte2084 --matrix-coefficients=bt2020ncl \
+  -o syn-pq-420-10bit-64x64.ivf pq.y4m
+```
+
+The PQ input SHA-256 is
+`bcdb7385fc217cf2c87885ef32295a559980fe31f9df404e9fa82106c1cbe235`.

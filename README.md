@@ -63,6 +63,12 @@ codec is young.
   seek can require decoding from the start of the stream. You can cancel the seek.
   When timing is unavailable, playback uses a labeled 30 fps assumption.
   A decode error leaves the navigator, syntax, and bytes available.
+- Inspect a decoded picture in RGB or select an available Y, U, or V plane. Fit shows the whole
+  picture. Use integer zoom to inspect individual samples. Select a sample with the pointer
+  or enter its coordinates to read and copy its exact integer value. The viewer shows
+  plane dimensions, bit depth, and available color and chroma information. The grain control
+  selects which decoded samples the viewer shows. Native planes remain available for
+  sample inspection when the viewer cannot display the signaled colors in RGB.
 - Open a validation result in Analyze to inspect its findings without running validation
   again. From Jobs, export the complete retained report as JSON or plain text. The report
   records scope, interruptions, and omitted findings. When validation runs, the report
@@ -71,7 +77,7 @@ codec is young.
   workers can verify the full source. Reports omit absolute paths. Completed checks cannot
   certify AV2 conformance.
 
-**What it refuses, with a reason**
+**Inputs that Encode refuses**
 
 Variable frame rate, interlaced, HDR (PQ, HLG, Dolby Vision), full range, non-square pixels,
 rotation or cropping, RGB or alpha, encrypted streams, network and playlist inputs.

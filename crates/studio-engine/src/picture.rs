@@ -16,7 +16,7 @@
 //! The matrix is the one the source states. When it states none, the rule
 //! of [`basis`] picks one and the picture says it was assumed.
 
-use studio_domain::preview::{ColorBasis, ColorMatrix, PictureBox, PictureView};
+use studio_domain::preview::{ColorBasis, ColorMatrix, PictureBox, PictureView, SamplePlane};
 
 /// One plane's samples, row by row.
 #[derive(Debug, Clone, Copy)]
@@ -70,6 +70,26 @@ impl<'a> Plane<'a> {
     #[must_use]
     pub fn packed(samples: &'a [u16], width: usize, height: usize) -> Option<Self> {
         Self::new(Samples::Wide(samples), 0, width, width, height)
+    }
+
+    /// The visible plane size.
+    #[must_use]
+    pub const fn size(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
+    /// Reads one sample at a visible coordinate.
+    #[must_use]
+    pub fn sample(&self, x: u32, y: u32) -> Option<u16> {
+        let (x, y) = (usize::try_from(x).ok()?, usize::try_from(y).ok()?);
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let index = self.offset + y * self.stride + x;
+        match self.samples {
+            Samples::Narrow(samples) => samples.get(index).copied().map(u16::from),
+            Samples::Wide(samples) => samples.get(index).copied(),
+        }
     }
 
     /// Adds `weight` times the samples `lo..hi` of row `y` to `acc[0..]`.
@@ -133,6 +153,16 @@ impl<'a> Frame<'a> {
         })
     }
 
+    /// The selected visible plane, if it exists.
+    #[must_use]
+    pub fn plane(&self, plane: SamplePlane) -> Option<&Plane<'a>> {
+        match plane {
+            SamplePlane::Y => Some(&self.luma),
+            SamplePlane::U => self.chroma.as_ref().map(|planes| &planes[0]),
+            SamplePlane::V => self.chroma.as_ref().map(|planes| &planes[1]),
+        }
+    }
+
     /// The frame size in luma samples.
     #[must_use]
     pub const fn size(&self) -> (usize, usize) {
@@ -194,8 +224,8 @@ pub struct Rendered {
 }
 
 /// The picture size and luma origin a `view` of a `width` x `height`
-/// frame gets in `size`: `Fit` scales down keeping the aspect (never up),
-/// `Native` crops one to one with its origin moved inside the frame.
+/// surface gets in `size`. Fit scales down and preserves aspect ratio.
+/// Native and Zoom crop at the sample grid with the origin moved inside the surface.
 #[must_use]
 pub fn layout(
     width: usize,
@@ -216,13 +246,24 @@ pub fn layout(
                 (w, bh, view)
             }
         }
-        PictureView::Native { x, y } => {
-            let (w, h) = (width.min(bw), height.min(bh));
+        PictureView::Native { x, y } | PictureView::Zoom { x, y, .. } => {
+            let factor = match view {
+                PictureView::Zoom { factor, .. } => usize::from(factor.max(1)),
+                _ => 1,
+            };
+            let (w, h) = (
+                width.min((bw / factor).max(1)),
+                height.min((bh / factor).max(1)),
+            );
             let x = usize::try_from(x).unwrap_or(usize::MAX).min(width - w);
             let y = usize::try_from(y).unwrap_or(usize::MAX).min(height - h);
-            let used = PictureView::Native {
-                x: u32::try_from(x).unwrap_or(u32::MAX),
-                y: u32::try_from(y).unwrap_or(u32::MAX),
+            let (x, y) = (
+                u32::try_from(x).unwrap_or(u32::MAX),
+                u32::try_from(y).unwrap_or(u32::MAX),
+            );
+            let used = match view {
+                PictureView::Zoom { factor, .. } => PictureView::Zoom { x, y, factor },
+                _ => PictureView::Native { x, y },
             };
             (w, h, used)
         }
@@ -239,10 +280,7 @@ pub fn render(
 ) -> Rendered {
     let (width, height) = frame.size();
     let (ow, oh, used) = layout(width, height, view, size);
-    let origin = match used {
-        PictureView::Native { x, y } => Some((x as usize, y as usize)),
-        PictureView::Fit => None,
-    };
+    let origin = crop_origin(used);
     let resample = |plane: &Plane<'_>| {
         // Chroma is subsampled by 2 exactly when it is narrower (shorter).
         let sub_x = if plane.width < width { 2 } else { 1 };
@@ -286,11 +324,47 @@ pub fn render(
         };
         pixels.extend(rgb.map(to_byte));
     }
+    rendered(pixels, ow, oh, used)
+}
+
+/// Maps native code values to diagnostic grayscale over the bit-depth range.
+///
+/// Fit uses the same area filter as RGB. The integer views return an unscaled crop.
+#[must_use]
+pub fn render_plane(
+    plane: &Plane<'_>,
+    bit_depth: u8,
+    view: PictureView,
+    size: PictureBox,
+) -> Rendered {
+    let (width, height) = plane.size();
+    let (ow, oh, used) = layout(width, height, view, size);
+    let origin = crop_origin(used);
+    let x = axis(width, ow, 1, width, origin.map(|xy| xy.0));
+    let y = axis(height, oh, 1, height, origin.map(|xy| xy.1));
+    let max = f32::from((1_u16 << bit_depth.clamp(1, 15)) - 1);
+    let mut pixels = Vec::with_capacity(ow * oh * 3);
+    for value in resample(plane, &x, &y, ow) {
+        pixels.extend([to_byte(value / max); 3]);
+    }
+    rendered(pixels, ow, oh, used)
+}
+
+fn crop_origin(view: PictureView) -> Option<(usize, usize)> {
+    match view {
+        PictureView::Native { x, y } | PictureView::Zoom { x, y, .. } => {
+            Some((x as usize, y as usize))
+        }
+        PictureView::Fit => None,
+    }
+}
+
+fn rendered(pixels: Vec<u8>, width: usize, height: usize, view: PictureView) -> Rendered {
     Rendered {
         pixels,
-        width: u16::try_from(ow).unwrap_or(u16::MAX),
-        height: u16::try_from(oh).unwrap_or(u16::MAX),
-        view: used,
+        width: u16::try_from(width).unwrap_or(u16::MAX),
+        height: u16::try_from(height).unwrap_or(u16::MAX),
+        view,
     }
 }
 
@@ -536,6 +610,47 @@ mod tests {
         let Some(frame) = frame else { unreachable!() };
         let out = render(&frame, basis(None, true, 2, 2), PictureView::Fit, BOX);
         assert_eq!(out.pixels, [128; 12]);
+    }
+
+    #[test]
+    fn samples_and_diagnostic_crop_use_the_visible_plane_grid() -> Result<(), &'static str> {
+        // Three visible samples per row. Padding and crop offsets contain different values.
+        let storage = [
+            16_u16, 16, 16, 16, 16, 17, 513, 1023, 16, 16, 300, 700, 0, 16, 16,
+        ];
+        let plane = Plane::new(Samples::Wide(&storage), 5, 5, 3, 2).ok_or("Invalid test plane.")?;
+        assert_eq!(plane.sample(0, 0), Some(17));
+        assert_eq!(plane.sample(1, 0), Some(513));
+        assert_eq!(plane.sample(2, 1), Some(0));
+        assert_eq!(plane.sample(3, 0), None);
+        assert_eq!(plane.sample(0, 2), None);
+        let output = render_plane(
+            &plane,
+            10,
+            PictureView::Zoom {
+                x: u32::MAX,
+                y: u32::MAX,
+                factor: 3,
+            },
+            PictureBox {
+                width: 8,
+                height: 6,
+            },
+        );
+        assert_eq!(
+            output.view,
+            PictureView::Zoom {
+                x: 1,
+                y: 0,
+                factor: 3
+            }
+        );
+        assert_eq!((output.width, output.height), (2, 2));
+        assert_eq!(
+            output.pixels,
+            [128, 128, 128, 255, 255, 255, 174, 174, 174, 0, 0, 0],
+        );
+        Ok(())
     }
 
     /// The area filter averages each output's share; it never picks one
