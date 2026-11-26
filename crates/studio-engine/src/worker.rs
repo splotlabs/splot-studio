@@ -205,6 +205,16 @@ fn serve<'scope>(
                     );
                     continue;
                 }
+                if spec.identity.as_ref() != Some(&job::options_identity()) {
+                    outbox.reply(
+                        id,
+                        failed(Stop::failed(
+                            FailureCode::InvalidSettings,
+                            "identity: Use the option schema and codec revision reported by this engine.",
+                        )),
+                    );
+                    continue;
+                }
                 match start(scope, outbox, id, spec, live) {
                     Ok(handle) => job = Some(handle),
                     Err(error) => outbox.job_end(

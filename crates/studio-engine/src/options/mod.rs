@@ -19,6 +19,7 @@ use studio_domain::options::{
     OptionRequest, OptionValue,
 };
 use studio_domain::protocol::{Envelope, Event, write_message};
+use studio_domain::settings::OutputKind;
 
 enum Field {
     Config(&'static OptionDescription),
@@ -107,10 +108,31 @@ pub(crate) fn resolve(
     let (total, range) = page(schema, first, count)?;
     let config = config::from_source(source, settings.base)?;
     let (config, resolved) = prepare(config, settings)?;
+    check_output_geometry(
+        settings.base.output,
+        resolved.coded_width,
+        resolved.coded_height,
+    )
+    .map_err(|message| FieldError::new("output", message))?;
     Ok((
         total,
         effective(&config, &resolved, source, settings, range),
     ))
+}
+
+pub(crate) fn check_output_geometry(
+    kind: OutputKind,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    if kind == OutputKind::Ivf && (u16::try_from(width).is_err() || u16::try_from(height).is_err())
+    {
+        return Err(format!(
+            "IVF holds at most {} samples per side, not {width}x{height}",
+            u16::MAX
+        ));
+    }
+    Ok(())
 }
 
 fn prepare(
@@ -232,4 +254,18 @@ fn effective(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ivf_limits_each_coded_dimension_to_the_header_field() {
+        let limit = u32::from(u16::MAX);
+        assert!(check_output_geometry(OutputKind::Ivf, limit, limit).is_ok());
+        assert!(check_output_geometry(OutputKind::Ivf, limit + 1, 16).is_err());
+        assert!(check_output_geometry(OutputKind::Ivf, 16, limit + 1).is_err());
+        assert!(check_output_geometry(OutputKind::Av2AnnexB, limit + 1, 16).is_ok());
+    }
 }

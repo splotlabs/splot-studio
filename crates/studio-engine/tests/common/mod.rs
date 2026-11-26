@@ -17,7 +17,6 @@ use std::process::Command;
 use std::sync::atomic::AtomicBool;
 
 use studio_domain::job::{JobSpec, SourceFingerprint, WirePath};
-use studio_domain::options::OptionRequest;
 use studio_domain::protocol::Event;
 use studio_domain::settings::{Crf, EncoderSettings, OutputKind, SpeedPreset};
 
@@ -285,11 +284,8 @@ pub fn spec(source: &Path, destination: &Path, output: OutputKind) -> JobSpec {
         video_stream: 0,
         omissions_acknowledged: false,
         destination: WirePath::from_path(destination),
-        settings: OptionRequest {
-            base: settings(output),
-            values: Default::default(),
-        },
-        identity: None,
+        settings: settings(output).into(),
+        identity: Some(studio_engine::job::options_identity()),
         pass_artifact: None,
     }
 }

@@ -176,17 +176,8 @@ fn execute(
         options::job_policy(config, &source.facts, &job.settings).map_err(invalid_policy)?;
     let output_kind = job.settings.base.output;
     let coded = config.coded();
-    if output_kind == OutputKind::Ivf
-        && (u16::try_from(coded.width).is_err() || u16::try_from(coded.height).is_err())
-    {
-        return Err(Stop::failed(
-            FailureCode::TooLarge,
-            format!(
-                "IVF holds at most 65535 samples per side, not {}x{}",
-                coded.width, coded.height
-            ),
-        ));
-    }
+    options::check_output_geometry(output_kind, coded.width, coded.height)
+        .map_err(|message| Stop::failed(FailureCode::TooLarge, message))?;
     output::check_destination(&destination, &source.id)?;
     // A decoded source is scanned first; that can take a while and writes
     // nothing.
@@ -196,6 +187,9 @@ fn execute(
         });
     }
     source.start(cancel)?;
+    stop_if(cancel)?;
+    let mut encoder = Encoder::new(config.clone()).map_err(encoder_error)?;
+    control.hold_encoder(encoder.cancel_token());
     for event in policy {
         stop_if(cancel)?;
         report(event);
@@ -230,6 +224,7 @@ fn execute(
     let frames = encode(
         &mut source,
         &config,
+        &mut encoder,
         output_kind,
         temp.as_file(),
         control,
@@ -406,14 +401,13 @@ fn tick(reporter: &Mutex<Reporter<'_>>, stopped: &mpsc::Receiver<()>) {
 fn encode(
     source: &mut Source,
     config: &Config,
+    encoder: &mut Encoder,
     kind: OutputKind,
     file: &File,
     control: &dyn Control,
     report: &mut (dyn FnMut(Event) + Send),
 ) -> Result<u64, Stop> {
     let output_error = |e: io::Error| output::output(format!("cannot write the output: {e}"));
-    let mut encoder = Encoder::new(config.clone()).map_err(encoder_error)?;
-    control.hold_encoder(encoder.cancel_token());
     let mut sink = PacketSink::new(kind, BufWriter::new(file), config).map_err(output_error)?;
     let reporter = Mutex::new(Reporter {
         progress: Progress::default(),
@@ -427,7 +421,7 @@ fn encode(
         let _ = thread::Builder::new()
             .name("studio-progress".to_owned())
             .spawn_scoped(scope, move || tick(reporter, &stopped));
-        let frames = encode_frames(source, config, &mut encoder, &mut sink, control, reporter);
+        let frames = encode_frames(source, config, encoder, &mut sink, control, reporter);
         drop(stop);
         frames
     })?;
@@ -611,6 +605,36 @@ mod tests {
             }
         }
         Err("The job produced no Working event.".into())
+    }
+
+    #[test]
+    fn cancellation_at_encoder_setup_leaves_no_output() -> TestResult {
+        struct CancelOnSetup(AtomicBool);
+
+        impl Control for CancelOnSetup {
+            fn cancel_flag(&self) -> &AtomicBool {
+                &self.0
+            }
+
+            fn hold_encoder(&self, token: CancelToken) {
+                self.0.store(true, Ordering::Relaxed);
+                token.cancel();
+            }
+        }
+
+        let (dir, spec) = job()?;
+        let mut events = Vec::new();
+        let end = run(
+            &spec,
+            &CancelOnSetup(AtomicBool::new(false)),
+            &mut |event| {
+                events.push(event);
+            },
+        );
+        assert!(matches!(end, Event::Cancelled));
+        assert!(events.is_empty());
+        assert_eq!(dir.path().read_dir()?.count(), 1);
+        Ok(())
     }
 
     #[test]

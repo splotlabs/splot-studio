@@ -61,6 +61,26 @@ fn hello_frame(request_id: u64) -> Result<Vec<u8>, Box<dyn Error>> {
     frame(request_id, hello())
 }
 
+#[test]
+fn worker_requires_an_option_identity_before_opening_the_source() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let input = dir.path().join("input.y4m");
+    let output = dir.path().join("output.ivf");
+    Clip::new(64, 48, "420", 1).write(&input)?;
+    let mut job = spec(&input, &output, OutputKind::Ivf);
+    std::fs::remove_file(input)?;
+    job.identity = None;
+    let result = worker(&frame(1, Command::Start { job, live: None })?)?;
+    assert!(result.status.success());
+    assert!(matches!(
+        events(&result)?.as_slice(),
+        [Envelope { body: Event::Failed { failure }, .. }]
+            if failure.code == FailureCode::InvalidSettings && failure.message.starts_with("identity:")
+    ));
+    assert_eq!(dir.path().read_dir()?.count(), 0);
+    Ok(())
+}
+
 fn raw_frame(body: &[u8]) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut bytes = u32::try_from(body.len())?.to_le_bytes().to_vec();
     bytes.extend_from_slice(body);
