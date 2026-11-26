@@ -1435,6 +1435,7 @@ export component AppWindow inherits Window {
                             height: self.preferred-height;
                             visible: parent.analyze;
                             open-shortcut: root.analyze-keys.to-string();
+                            timeline-active: !root.minimized;
                             copy(text) => {
                                 root.copy-text(text);
                             }

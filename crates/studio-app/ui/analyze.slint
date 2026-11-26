@@ -886,6 +886,7 @@ component StateCard inherits Rectangle {
 // The whole workspace.
 export component AnalyzeView inherits VerticalLayout {
     in property <string> open-shortcut;
+    in property <bool> timeline-active: true;
     property <length> navigator-width: 320px;
     property <length> detail-width: 380px;
     out property <length> full-width: root.navigator-width + Tokens.space-4 + root.detail-width;
@@ -1015,7 +1016,7 @@ export component AnalyzeView inherits VerticalLayout {
         spacing: Tokens.space-2;
 
         if TimelineUi.available: TimelinePane {
-            active: root.visible;
+            active: root.visible && root.timeline-active;
             copy(text) => { root.copy(text); }
         }
 
