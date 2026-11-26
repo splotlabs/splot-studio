@@ -745,10 +745,20 @@ pub fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// The state shared between [`Writer`] and its thread.
+type SaveNotice = Box<dyn FnOnce(Result<(), String>) + Send>;
+
+struct ConfirmedWrite {
+    bytes: Vec<u8>,
+    generation: u64,
+    notify: SaveNotice,
+}
+
 #[derive(Default)]
 struct Slot {
-    /// The newest journal not yet written.
+    /// The newest ordinary journal not yet written.
     pending: Option<Vec<u8>>,
+    /// A snapshot for which the session waits before it starts a job.
+    confirmed: Option<ConfirmedWrite>,
     /// How many journals were submitted, and how many of those are settled
     /// (written, or skipped for a newer one).
     submitted: u64,
@@ -788,23 +798,33 @@ impl Writer {
             .spawn(move || {
                 let mut last: Result<(), String> = Ok(());
                 loop {
-                    let (bytes, upto) = {
+                    let (bytes, upto, notify) = {
                         let mut slot = lock(&worker);
-                        while slot.pending.is_none() && !slot.closed {
+                        while slot.pending.is_none() && slot.confirmed.is_none() && !slot.closed {
                             slot = worker.1.wait(slot).unwrap_or_else(PoisonError::into_inner);
                         }
-                        match slot.pending.take() {
-                            Some(bytes) => (bytes, slot.submitted),
-                            None => return,
+                        if let Some(confirmed) = slot.confirmed.take() {
+                            (
+                                confirmed.bytes,
+                                confirmed.generation,
+                                Some(confirmed.notify),
+                            )
+                        } else if let Some(bytes) = slot.pending.take() {
+                            (bytes, slot.submitted, None)
+                        } else {
+                            return;
                         }
                     };
                     let result = write_atomically(&path, &bytes).map_err(|e| e.to_string());
                     if result != last {
                         report(result.clone());
-                        last = result;
+                        last = result.clone();
                     }
                     lock(&worker).settled = upto;
                     worker.1.notify_all();
+                    if let Some(notify) = notify {
+                        notify(result);
+                    }
                 }
             })?;
         Ok(Self {
@@ -818,6 +838,33 @@ impl Writer {
         let mut slot = lock(&self.shared);
         slot.pending = Some(bytes);
         slot.submitted += 1;
+        drop(slot);
+        self.shared.1.notify_all();
+    }
+
+    /// Writes this exact snapshot before it writes any later ordinary snapshot.
+    ///
+    /// The writer calls `notify` with the result of this write. If another
+    /// confirmed snapshot is waiting, this call immediately reports an error
+    /// through `notify`.
+    pub fn submit_confirmed(
+        &self,
+        bytes: Vec<u8>,
+        notify: impl FnOnce(Result<(), String>) + Send + 'static,
+    ) {
+        let mut slot = lock(&self.shared);
+        if slot.confirmed.is_some() {
+            drop(slot);
+            notify(Err("Wait for the previous queue save.".to_owned()));
+            return;
+        }
+        slot.submitted += 1;
+        slot.pending = None;
+        slot.confirmed = Some(ConfirmedWrite {
+            bytes,
+            generation: slot.submitted,
+            notify: Box::new(notify),
+        });
         drop(slot);
         self.shared.1.notify_all();
     }
@@ -1223,6 +1270,36 @@ mod tests {
         writer.submit(b"{}".to_vec());
         writer.flush();
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn confirmed_writes_report_the_exact_snapshot_or_error() {
+        let dir = Scratch::new("confirmed-writer");
+        let folder = dir.path("blocked");
+        let path = folder.join(FILE_NAME);
+        let writer = Writer::spawn(path.clone(), |_| {}).unwrap_or_else(|e| unreachable!("{e}"));
+        let (tx, rx) = mpsc::channel();
+        let failed = tx.clone();
+        writer.submit_confirmed(b"before".to_vec(), move |result| {
+            let _ = failed.send(result.map(|()| Vec::new()));
+        });
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(10)),
+            Ok(Err(_))
+        ));
+        fs::create_dir(&folder).unwrap_or_else(|e| unreachable!("{e}"));
+        let checked_path = path.clone();
+        writer.submit_confirmed(b"confirmed".to_vec(), move |result| {
+            let _ =
+                tx.send(result.and_then(|()| fs::read(checked_path).map_err(|e| e.to_string())));
+        });
+        writer.submit(b"after".to_vec());
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10)),
+            Ok(Ok(b"confirmed".to_vec()))
+        );
+        writer.flush();
+        assert_eq!(fs::read(&path).ok().as_deref(), Some(&b"after"[..]));
     }
 
     #[test]
