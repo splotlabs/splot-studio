@@ -15,6 +15,13 @@ use studio_domain::job::SourceFacts;
 /// How far numbered alternatives go: `clip (2).ivf` … `clip (999).ivf`.
 const MAX_NUMBERED: u32 = 999;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RetryKind {
+    Replay,
+    NewRequest,
+    Refresh,
+}
+
 impl AppState {
     /// Adds files to the end of the list. A file already waiting (or about
     /// to) is not added twice.
@@ -146,21 +153,21 @@ impl AppState {
             return;
         };
         if item.state.can_retry() {
-            self.retry(id, stream, true, disk);
+            self.retry(id, stream, RetryKind::NewRequest, disk);
         } else if item.transition(Transition::Reprobe).is_ok() {
             item.stream = stream;
             item.probe_request = None;
         }
     }
 
-    /// Converts an ended file again: it is read first, and a destination
-    /// that now exists (or another file's) is replaced by a numbered one
-    /// rather than failing. `by_user` lets a running run pick it up again.
+    /// Reads an ended file again and selects an available destination.
+    /// Replay keeps the previous request and policy. A new request uses
+    /// the editor. A refresh only updates the source facts.
     pub(super) fn retry(
         &mut self,
         id: ItemId,
         stream: Option<u32>,
-        by_user: bool,
+        kind: RetryKind,
         disk: &dyn Disk,
     ) -> bool {
         let Some(item) = self.item_mut(id) else {
@@ -169,7 +176,7 @@ impl AppState {
         let replay = item
             .attempt
             .as_ref()
-            .filter(|_| by_user)
+            .filter(|_| kind == RetryKind::Replay)
             .filter(|attempt| stream.is_none_or(|stream| stream == attempt.job.video_stream))
             .map(|attempt| crate::queue::Submission {
                 job: attempt.job.clone(),
@@ -184,7 +191,10 @@ impl AppState {
         item.stream = stream;
         item.probe_request = None;
         item.probe_failure = None;
-        let wanted = item.destination.path.clone();
+        let wanted = replay
+            .as_ref()
+            .and_then(|submission| submission.job.destination.to_path_buf().ok())
+            .unwrap_or_else(|| item.destination.path.clone());
         let path = self.unique(wanted, id, Some(disk));
         if let Some(item) = self.item_mut(id) {
             item.destination.path = path;
@@ -195,7 +205,9 @@ impl AppState {
                 submission
             });
         }
-        if by_user && let Some(run) = &mut self.run {
+        if kind != RetryKind::Refresh
+            && let Some(run) = &mut self.run
+        {
             run.attempted.retain(|a| *a != id);
         }
         true

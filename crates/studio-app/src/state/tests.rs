@@ -664,6 +664,29 @@ fn retry_uses_the_original_acknowledged_settings() {
     app.answer(retry, with_audio);
     let (_, job) = only_start(&app.apply(Intent::ConvertRequested).effects);
     assert_eq!(job.settings, original.settings);
+    assert_eq!(job.destination, original.destination);
+    assert!(job.omissions_acknowledged);
+}
+
+#[test]
+fn convert_after_failure_uses_the_corrected_draft_and_confirms_omissions() {
+    let mut app = App::new();
+    app.add(&["/media/trip.mp4"], with_audio);
+    app.apply(Intent::ConvertRequested);
+    let (id, _) = only_start(&app.apply(Intent::OmissionsConfirmed).effects);
+    app.fail(id, FailureCode::InvalidSettings);
+    app.apply(Intent::PresetEdited(1));
+    app.apply(Intent::OutputSelected(1));
+    app.apply(Intent::OptionEdited {
+        key: "fast_decode".into(),
+        value: Some(OptionValue::Bool(true)),
+    });
+    let convert = app.apply(Intent::ConvertRequested);
+    let effects = app.answer(convert, with_audio);
+    assert_eq!(starts(&effects), []);
+    let (_, job) = only_start(&app.apply(Intent::OmissionsConfirmed).effects);
+    assert_eq!(&job.settings, app.state.option_request());
+    assert_eq!(dest_of(&job), abs("/media/trip.obu"));
     assert!(job.omissions_acknowledged);
 }
 

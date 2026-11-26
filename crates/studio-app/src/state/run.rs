@@ -10,6 +10,7 @@ use studio_domain::job::{Failure, FailureCode, JobSpec, SourceReader, Stage, Wir
 use studio_domain::options::EffectiveOption;
 use studio_domain::protocol::Event;
 
+use super::files::RetryKind;
 use super::{AppState, Asked, Confirmation, Effect, Run, Update};
 use crate::activity::{self, Activity, Changed, Phase};
 use crate::queue::{
@@ -57,7 +58,7 @@ impl AppState {
             && only.state.can_retry()
         {
             let id = only.id;
-            self.retry(id, None, true, disk);
+            self.retry(id, None, RetryKind::NewRequest, disk);
         }
         let asked = self.unacknowledged(None);
         if !asked.is_empty() {
@@ -454,7 +455,7 @@ impl AppState {
             // does not convert it again; Convert does.
             if changed {
                 let id = item.id;
-                self.retry(id, None, false, disk);
+                self.retry(id, None, RetryKind::Refresh, disk);
             }
         }
         self.items[index].state != before
@@ -494,7 +495,7 @@ impl AppState {
             ItemState::Running | ItemState::Publishing => self.cancel(now, update),
             ItemState::Cancelled | ItemState::Failed | ItemState::Lost | ItemState::Interrupted => {
                 if self.confirmation.is_none() {
-                    self.retry(id, None, true, disk);
+                    self.retry(id, None, RetryKind::Replay, disk);
                 }
             }
             ItemState::Completed => {
