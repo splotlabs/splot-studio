@@ -29,7 +29,7 @@ use slint::platform::{Key, Platform, WindowAdapter, WindowEvent};
 use slint::{ComponentHandle, Model, PhysicalSize, PlatformError, Rgb8Pixel, SharedString};
 use studio_app::analysis::{Input, Phase, ReadEnd};
 use studio_app::engine::{Delivery, ENGINE_NAME};
-use studio_app::jobs::State;
+use studio_app::jobs::{State, Work};
 use studio_app::journal;
 use studio_app::queue::ItemState;
 use studio_app::session::{Route, Session, UiEffect};
@@ -536,7 +536,14 @@ fn batch_report_refuses_rewritten_source(rig: &mut Rig, source: &Path) {
         .open(source)
         .and_then(|file| file.set_times(fs::FileTimes::new().set_modified(modified)))
         .unwrap_or_else(|error| unreachable!("{error}"));
-    rig.window.invoke_job_show(1);
+    let validation = rig
+        .session()
+        .jobs()
+        .iter()
+        .position(|job| job.state == State::Completed && matches!(job.work, Work::Validate(_)))
+        .and_then(|index| i32::try_from(index).ok())
+        .unwrap_or_else(|| unreachable!("completed validation"));
+    rig.window.invoke_job_show(validation);
     rig.settle(
         "the source is checked again without revalidating it",
         |session| {
