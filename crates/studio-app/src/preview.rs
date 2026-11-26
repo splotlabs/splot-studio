@@ -27,6 +27,7 @@
 //! from the shown picture's own origin.
 
 use studio_domain::analysis::SourceDigest;
+use studio_domain::layers::{LayerDecodeSelection, LayerDecodeStatus};
 use studio_domain::preview::{
     GrainPolicy, OutputEvent, PictureBox, PictureFailure, PictureFrame, PictureOptions,
     PictureOrigin, PictureSurface, PictureTarget, PictureView, SourceRef,
@@ -310,6 +311,7 @@ pub struct Preview {
     stage_failure: Option<String>,
     document_progress: String,
     document_notice: String,
+    layer_decode_feedback: Option<(u64, LayerDecodeSelection, LayerDecodeStatus)>,
     /// A newer prefix available for the next seek or playback request.
     document_digest: Option<Box<SourceDigest>>,
     /// The last output while Next checks for the end of a stream with an unknown count.
@@ -362,6 +364,7 @@ impl Preview {
             stage_failure: None,
             document_progress: String::new(),
             document_notice: String::new(),
+            layer_decode_feedback: None,
             document_digest: None,
             before_next: None,
             viewer: Viewer::default(),
@@ -408,17 +411,20 @@ impl Preview {
                 path,
                 fingerprint,
                 digest,
+                selection,
             }),
             Some(Subject::Document {
                 document: new_document,
                 path: new_path,
                 fingerprint: new_fingerprint,
                 digest: new_digest,
+                selection: new_selection,
             }),
         ) = (&mut self.scene.stage, &mut scene.stage)
             && document == new_document
             && path == new_path
             && fingerprint == new_fingerprint
+            && selection == new_selection
             && new_digest.bytes > digest.bytes
         {
             if new_digest.bytes == new_fingerprint.len {
@@ -431,7 +437,17 @@ impl Preview {
             }
         }
         if scene.stage != self.scene.stage {
+            let same_document = matches!(
+                (&self.scene.stage, &scene.stage),
+                (Some(Subject::Document {
+                    document: old, path: old_path, fingerprint: old_stamp, ..
+                }), Some(Subject::Document {
+                    document: new, path: new_path, fingerprint: new_stamp, ..
+                })) if old == new && old_path == new_path && old_stamp == new_stamp
+            );
+            let previous_grain = self.viewer.options.grain;
             self.release_document(&mut out);
+            self.layer_decode_feedback = None;
             let keep = matches!(
                 (&self.scene.stage, &scene.stage),
                 (Some(Subject::Source { item: a, .. }), Some(Subject::Live { item: b, .. })) if a == b
@@ -449,6 +465,9 @@ impl Preview {
             self.document_digest = None;
             self.before_next = None;
             self.viewer = Viewer::default();
+            if same_document {
+                self.viewer.options.grain = previous_grain;
+            }
             self.stage_failure = None;
             self.failed = None;
             self.live = None;
@@ -670,6 +689,7 @@ impl Preview {
                 if thumb {
                     self.thumb_failures.push(key);
                 } else if sent == self.stage_generation && self.on_side(&key.target) {
+                    self.reject_layer_decode(&key.target, code, message);
                     self.stage_failed(key, code, message);
                 }
             }
@@ -681,6 +701,9 @@ impl Preview {
                 self.deaths = 0;
                 self.inflight = None;
                 self.playing = false;
+                if self.on_side(&target) {
+                    self.reject_layer_decode(&target, code, message);
+                }
                 if matches!(target, PictureTarget::Document { .. }) {
                     let detail = if code == PictureFailure::SourceChanged {
                         text::DOCUMENT_CHANGED.to_owned()
@@ -957,6 +980,7 @@ impl Preview {
         self.before_next = None;
         if shown.picture.header.origin == PictureOrigin::Document {
             self.viewer.accept_picture(&shown.picture.header);
+            self.accept_layer_decode(&shown);
         }
         self.shown = Some(shown);
         self.stage_failure = None;
@@ -1305,6 +1329,7 @@ impl Preview {
             path,
             fingerprint,
             digest,
+            selection,
         } = shown.target.as_ref()?
         else {
             return None;
@@ -1332,6 +1357,7 @@ impl Preview {
                 chroma: info.chroma,
             },
             grain: header.options.grain,
+            selection: *selection,
         })
     }
 

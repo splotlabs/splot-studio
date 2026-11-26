@@ -65,6 +65,8 @@ pub struct ExportFrameSource {
     pub expected: ExportSampleFormat,
     /// The grain policy in use for this output.
     pub grain: GrainPolicy,
+    /// The decoder policy that produced this output.
+    pub selection: studio_domain::layers::LayerDecodeSelection,
 }
 
 /// A row in Jobs.
@@ -572,6 +574,7 @@ mod tests {
             range: ExportRange::All,
             layer: None,
             grain: GrainPolicy::Skip,
+            selection: studio_domain::layers::LayerDecodeSelection::Default,
             frame_rate: None,
             expected: ExportSampleFormat {
                 bit_depth: 8,
@@ -579,6 +582,22 @@ mod tests {
             },
             format,
         }
+    }
+
+    #[test]
+    fn old_export_journal_entries_use_the_default_decoder_policy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let scratch = Scratch::new("export-legacy-policy");
+        let path = WirePath::from_path(&scratch.path("out.y4m"));
+        let original = request(ExportFormat::Y4m { path }, &scratch);
+        let mut legacy = serde_json::to_value(&original)?;
+        legacy
+            .as_object_mut()
+            .ok_or("the export request did not serialize to an object")?
+            .remove("selection");
+        let restored: ExportRequest = serde_json::from_value(legacy)?;
+        assert_eq!(restored, original);
+        Ok(())
     }
 
     #[test]

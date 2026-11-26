@@ -58,6 +58,16 @@ codec is young.
   Use **Clear Index Cache** in Analyze to remove saved indexes. Opening the file again
   builds a new index when no valid copy exists. If an open document uses a saved
   index, close that document before you clear the cache.
+- Select an OBU and open **Layers** to inspect the layer declarations and metadata for
+  its position. Studio distinguishes global scope from numbered layers. When native
+  effective metadata is available, Studio shows its origin and inheritance. Use
+  **Show OBU** to open the source syntax. Declared profile, tier, and level describe
+  the stream. Use **Findings** to see what the validator checked.
+- The layer filter controls which navigator rows are visible. Use **Request Point**
+  on an operating-point declaration to change the playback request. Studio reports
+  whether a picture arrived for that request or why playback refused it. Use
+  **Use Stream Default** to return to the default playback policy. Build the timeline
+  again after a policy change. It uses the new operating-point request.
 - Use **File > Validate Files…** to validate several local IVF or Annex B files. The default
   policy treats errors as failures. Strict policy also treats warnings as failures and
   preserves their warning severity. You can supply local Annex B sequence headers and

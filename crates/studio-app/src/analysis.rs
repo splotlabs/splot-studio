@@ -62,6 +62,7 @@ mod timeline_links;
 use timeline_links::Request as TimelineRequest;
 pub use timeline_links::{Timeline, TimelineRange};
 pub(crate) mod evidence;
+pub(crate) mod layers;
 #[cfg(test)]
 mod tests;
 
@@ -71,6 +72,7 @@ pub use document::{
 };
 use document::{in_window, line_of};
 use evidence::{Pick, Request as EvidenceRequest, VIEW_ROWS};
+pub use layers::LayerInput;
 
 use crate::recovery::{Disk, Kind, RestoredView};
 
@@ -198,8 +200,10 @@ pub enum Input {
     LayerFilter(i32),
     /// Admit every element again.
     ClearFilters,
-    /// Show Properties, Syntax or Findings.
+    /// Show Properties, Syntax, Findings or Layers.
     EvidenceView(i32),
+    /// Operate the layer inspector.
+    Layer(LayerInput),
     /// Search the open evidence view.
     EvidenceSearch(String),
     /// Filter finding rule IDs.
@@ -253,6 +257,8 @@ enum Asked {
     Open,
     Evidence(EvidenceRequest),
     Timeline(TimelineRequest),
+    Layers(layers::Request),
+    CancelLayers,
     Cancel,
     Close,
     Page { generation: u64, first: u64 },
@@ -601,6 +607,7 @@ impl Analysis {
                 }
             }
         }
+        self.ensure_layers(&mut out);
         out
     }
 
@@ -672,6 +679,7 @@ impl Analysis {
             Input::TypeFilter(index) => self.choose_kind(at, index, out),
             Input::LayerFilter(index) => self.choose_layer(at, index, out),
             Input::ClearFilters => self.refilter(at, RowFilter::default(), out),
+            Input::Layer(input) => self.layer_input(at, input, out),
             Input::EvidenceView(_)
             | Input::EvidenceSearch(_)
             | Input::EvidenceRule(_)
@@ -731,6 +739,10 @@ impl Analysis {
     fn evidence_input(&mut self, at: usize, input: Input, out: &mut Vec<Effect>) {
         match input {
             Input::EvidenceView(tab) => {
+                self.documents[at].layers.shown = tab == layers::TAB;
+                if tab == layers::TAB {
+                    return;
+                }
                 let evidence = &mut self.documents[at].evidence;
                 evidence.tab = tab.clamp(0, 2);
                 let doc = &mut self.documents[at];
@@ -946,15 +958,7 @@ impl Analysis {
     pub fn event(&mut self, request_id: u64, event: Event) -> Vec<Effect> {
         let mut out = Vec::new();
         if self.cache_clear == Some(request_id) {
-            self.cache_clear = None;
-            self.dirty = true;
-            self.notice = Some(match event {
-                Event::AnalysisCacheCleared => "Studio cleared the index cache.".into(),
-                Event::Error { message, .. } => {
-                    format!("Studio could not clear the index cache. {message}")
-                }
-                _ => "Studio could not confirm that the engine cleared the index cache.".into(),
-            });
+            self.cache_clear_event(event);
             return out;
         }
         let Some(&(document, asked)) = self.pending.get(&request_id) else {
@@ -1035,14 +1039,30 @@ impl Analysis {
             (Asked::Timeline(request), event) => {
                 self.timeline_event(at, request_id, request, event, &mut out);
             }
+            (Asked::Layers(request), event) => {
+                self.layer_event(at, request_id, request, event, &mut out);
+            }
             (Asked::Evidence(request), event) => {
                 self.evidence_event(at, request_id, request, event, &mut out);
             }
             // An answer of the wrong kind breaks the protocol.
-            (Asked::Cancel | Asked::Close, _) => {}
+            (Asked::Cancel | Asked::Close | Asked::CancelLayers, _) => {}
             _ => self.broken(at, "an answer of the wrong kind", &mut out),
         }
+        self.ensure_layers(&mut out);
         out
+    }
+
+    fn cache_clear_event(&mut self, event: Event) {
+        self.cache_clear = None;
+        self.dirty = true;
+        self.notice = Some(match event {
+            Event::AnalysisCacheCleared => "Studio cleared the index cache.".into(),
+            Event::Error { message, .. } => {
+                format!("Studio could not clear the index cache. {message}")
+            }
+            _ => "Studio could not confirm that the engine cleared the index cache.".into(),
+        });
     }
 
     /// Apply the final summary and restore the view for this source.
@@ -1266,7 +1286,17 @@ impl Analysis {
                     doc.timeline.fail(request_id, request, message);
                 }
             }
-            Asked::Cancel | Asked::Close => {}
+            Asked::Layers(request) => {
+                if matches!(
+                    code,
+                    Some(AnalysisFailure::SourceChanged | AnalysisFailure::UnknownDocument)
+                ) {
+                    fail_or_notice(doc, code, &message);
+                } else {
+                    doc.layers.fail(request_id, request, message);
+                }
+            }
+            Asked::Cancel | Asked::Close | Asked::CancelLayers => {}
         }
     }
 
@@ -1675,6 +1705,8 @@ fn reply_document(event: &Event) -> Option<u64> {
         | Event::AnalysisIdentityScanned { document: d, .. }
         | Event::AnalysisTimeline { document: d, .. }
         | Event::AnalysisTimelineLocated { document: d, .. }
+        | Event::AnalysisLayersReady { document: d, .. }
+        | Event::AnalysisLayerPage { document: d, .. }
         | Event::AnalysisSyntaxReady { document: d, .. }
         | Event::AnalysisSyntaxPage { document: d, .. }
         | Event::AnalysisValidated { document: d, .. }

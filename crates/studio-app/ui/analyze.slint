@@ -10,6 +10,7 @@
 
 import { TimelinePane, TimelineUi } from "timeline.slint";
 import { Button, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
+import { LayerPanel, Layers } from "layers.slint";
 import { Tokens } from "tokens.slint";
 import { DecodeExport, ExportPurpose } from "export-setup.slint";
 import { FocusRing, KeyboardFocus } from "focus.slint";
@@ -1316,7 +1317,7 @@ export component AnalyzeView inherits VerticalLayout {
                 width: 180px;
                 model: Analysis.layer-labels;
                 current-index <=> Analysis.layer-index;
-                accessible-label: "Layer filter";
+                accessible-label: "Visible layers";
                 selected => {
                     Analysis.layer-filter(self.current-index);
                 }
@@ -1383,15 +1384,15 @@ export component AnalyzeView inherits VerticalLayout {
                 spacing: Tokens.space-1;
 
                 WorkspaceSwitch {
-                    options: ["Properties", "Syntax", "Findings"];
+                    options: ["Properties", "Syntax", "Findings", "Layers"];
                     accessible-label: "Inspector views";
-                    selected: Analysis.evidence-tab;
+                    selected: Layers.shown ? 3 : Analysis.evidence-tab;
                     chosen(index) => {
                         Analysis.evidence-view(index);
                     }
                 }
 
-                if Analysis.evidence-tab == 0: VerticalLayout {
+                if !Layers.shown && Analysis.evidence-tab == 0: VerticalLayout {
                     spacing: Tokens.space-1;
 
                     HorizontalLayout {
@@ -1450,11 +1451,13 @@ export component AnalyzeView inherits VerticalLayout {
                     }
                 }
 
-                if Analysis.evidence-tab != 0: EvidencePane {
+                if !Layers.shown && Analysis.evidence-tab != 0: EvidencePane {
                     copy(text) => {
                         root.copy(text);
                     }
                 }
+
+                if Layers.shown: LayerPanel { }
             }
         }
 

@@ -5,6 +5,7 @@
 
 use studio_domain::analysis::SourceDigest;
 use studio_domain::job::{SourceFingerprint, WirePath};
+use studio_domain::layers::LayerDecodeSelection;
 use studio_domain::preview::{PictureTarget, SourceRef};
 
 use crate::queue::{Item, ItemId, ItemState};
@@ -72,6 +73,8 @@ pub enum Subject {
         fingerprint: SourceFingerprint,
         /// The digest of the bytes that the inspection engine read.
         digest: Box<SourceDigest>,
+        /// The decoder policy requested for this document.
+        selection: LayerDecodeSelection,
     },
 }
 
@@ -113,11 +116,13 @@ impl Subject {
                 path,
                 fingerprint,
                 digest,
+                selection,
             } => Some(PictureTarget::Document {
                 document: *document,
                 path: path.clone(),
                 fingerprint: *fingerprint,
                 digest: digest.clone(),
+                selection: *selection,
             }),
             Self::Loading { .. } | Self::Unavailable { .. } | Self::Live { .. } => None,
         }

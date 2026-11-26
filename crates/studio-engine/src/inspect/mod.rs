@@ -16,6 +16,7 @@
 mod batch;
 pub mod document;
 mod identity;
+mod layers;
 mod report;
 mod syntax;
 mod validation;
@@ -35,6 +36,7 @@ use studio_domain::analysis::{
 };
 use studio_domain::identity::IdentityKind;
 use studio_domain::job::WirePath;
+use studio_domain::layers::LayerDecodeSelection;
 use studio_domain::preview::GrainPolicy;
 use studio_domain::protocol::{
     AnalysisEvidenceIdentity, Command, Envelope, ErrorCode, Event, ProtocolError, decode,
@@ -148,6 +150,11 @@ enum Query {
         scan: u64,
         query: TimelineQuery,
     },
+    LayerPage {
+        inspection: u64,
+        first: u64,
+        count: u32,
+    },
     IdentityPage {
         scan: u64,
         first: u64,
@@ -174,7 +181,14 @@ type ValidationResult = Result<(ValidationEvidence, SourceDigest), Refusal>;
 #[derive(Debug)]
 enum EvidenceRequest {
     Validate(ValidationSettings),
-    Identity(GrainPolicy),
+    Identity {
+        grain: GrainPolicy,
+        selection: LayerDecodeSelection,
+    },
+    Layers {
+        element: u64,
+        selection: LayerDecodeSelection,
+    },
 }
 
 impl EvidenceRequest {
@@ -184,7 +198,11 @@ impl EvidenceRequest {
                 document,
                 validation: id,
             },
-            Self::Identity(_) => Pending::Identity { document, scan: id },
+            Self::Identity { .. } => Pending::Identity { document, scan: id },
+            Self::Layers { .. } => Pending::Layers {
+                document,
+                inspection: id,
+            },
         }
     }
 
@@ -193,9 +211,13 @@ impl EvidenceRequest {
             Self::Validate(settings) => {
                 EvidenceTask::Validate(doc.prepare_validation(id)?, settings)
             }
-            Self::Identity(grain) => {
+            Self::Layers { element, selection } => {
+                let (file, query) = doc.prepare_layers(id, element, selection)?;
+                EvidenceTask::Layers(file, query)
+            }
+            Self::Identity { grain, selection } => {
                 let file = doc.open_evidence_source()?;
-                let index = doc.begin_identity(id, grain)?;
+                let index = doc.begin_identity(id, grain, selection)?;
                 let digest = doc.summary().digest.clone();
                 EvidenceTask::Identity {
                     file,
@@ -209,6 +231,7 @@ impl EvidenceRequest {
 
 enum EvidenceTask {
     Validate(File, ValidationSettings),
+    Layers(File, layers::Query),
     Identity {
         file: File,
         index: identity::IdentityIndex,
@@ -222,6 +245,9 @@ impl EvidenceTask {
             Self::Validate(mut file, settings) => EvidenceResult::Validation(Box::new(
                 validation::validate(&mut file, &settings, cancelled),
             )),
+            Self::Layers(file, query) => {
+                EvidenceResult::Layers(Box::new(layers::inspect(file, query, cancelled)))
+            }
             Self::Identity {
                 mut file,
                 index,
@@ -235,6 +261,7 @@ impl EvidenceTask {
 enum EvidenceResult {
     Validation(Box<ValidationResult>),
     Identity(Result<(), Refusal>),
+    Layers(Box<Result<layers::Report, Refusal>>),
     Aborted(Pending),
 }
 
@@ -246,6 +273,14 @@ impl EvidenceResult {
                 Ok(Event::AnalysisValidated {
                     document,
                     summary: Box::new(summary),
+                    total,
+                })
+            }
+            Self::Layers(result) => {
+                let (evidence, total) = doc.complete_layers(id, *result)?;
+                Ok(Event::AnalysisLayersReady {
+                    document,
+                    evidence: Box::new(evidence),
                     total,
                 })
             }
@@ -288,14 +323,15 @@ enum Pending {
     BatchValidation(u64),
     Validation { document: u64, validation: u64 },
     Identity { document: u64, scan: u64 },
+    Layers { document: u64, inspection: u64 },
 }
 
 impl Pending {
     fn belongs_to(self, member: u64) -> bool {
         match self {
-            Self::Validation { document, .. } | Self::Identity { document, .. } => {
-                document == member
-            }
+            Self::Validation { document, .. }
+            | Self::Identity { document, .. }
+            | Self::Layers { document, .. } => document == member,
             _ => false,
         }
     }
@@ -435,22 +471,7 @@ fn serve<W: Write>(
 
 fn route<W: Write>(shared: &Shared<W>, requests: &SyncSender<Queued>, id: u64, command: Command) {
     match command {
-        Command::Hello { .. } => {
-            shared.send(
-                id,
-                Event::Hello {
-                    engine: build_identity(),
-                    capabilities: studio_domain::protocol::Capabilities {
-                        analysis_evidence: Some(AnalysisEvidenceIdentity {
-                            syntax_schema: SYNTAX_SCHEMA,
-                            validation_schema: VALIDATION_SCHEMA,
-                            codec_revision: env!("SPLOT_CODEC_REVISION").into(),
-                        }),
-                        ..capabilities()
-                    },
-                },
-            );
-        }
+        Command::Hello { .. } => shared.send(id, analysis_hello()),
         Command::AnalysisClearCache => {
             if requests.try_send((id, 0, Request::ClearCache)).is_err() {
                 shared.send(
@@ -499,13 +520,42 @@ fn route<W: Write>(shared: &Shared<W>, requests: &SyncSender<Queued>, id: u64, c
                 EvidenceRequest::Validate(settings),
             );
         }
-        Command::AnalysisIdentityScan { document, grain } => {
+        Command::AnalysisIdentityScan {
+            document,
+            grain,
+            selection,
+        } => {
             queue_evidence(
                 shared,
                 requests,
                 id,
                 document,
-                EvidenceRequest::Identity(grain),
+                EvidenceRequest::Identity { grain, selection },
+            );
+        }
+        Command::AnalysisLayers {
+            document,
+            element,
+            selection,
+        } => {
+            queue_evidence(
+                shared,
+                requests,
+                id,
+                document,
+                EvidenceRequest::Layers { element, selection },
+            );
+        }
+        Command::AnalysisCancelLayers {
+            document,
+            inspection,
+        } => {
+            shared.cancel(
+                id,
+                Pending::Layers {
+                    document,
+                    inspection,
+                },
             );
         }
         Command::AnalysisCancelIdentity { document, scan } => {
@@ -514,23 +564,44 @@ fn route<W: Write>(shared: &Shared<W>, requests: &SyncSender<Queued>, id: u64, c
         Command::BatchCancel { validation } => {
             shared.cancel(id, Pending::BatchValidation(validation));
         }
-        command => {
-            if let Some(request) = batch::Request::from_command(&command) {
-                batch::queue(shared, requests, id, request);
-            } else if let Some((document, request)) = queued_request(&command) {
-                if requests.try_send((id, document, request)).is_err() {
-                    busy(shared, id, document);
-                }
-            } else {
-                shared.send(
-                    id,
-                    refusal(
-                        ErrorCode::WrongState,
-                        "Use an analysis command with the inspect process.",
-                    ),
-                );
-            }
+        command => queue_query(shared, requests, id, &command),
+    }
+}
+
+fn analysis_hello() -> Event {
+    Event::Hello {
+        engine: build_identity(),
+        capabilities: studio_domain::protocol::Capabilities {
+            analysis_evidence: Some(AnalysisEvidenceIdentity {
+                syntax_schema: SYNTAX_SCHEMA,
+                validation_schema: VALIDATION_SCHEMA,
+                codec_revision: env!("SPLOT_CODEC_REVISION").into(),
+            }),
+            ..capabilities()
+        },
+    }
+}
+
+fn queue_query<W: Write>(
+    shared: &Shared<W>,
+    requests: &SyncSender<Queued>,
+    id: u64,
+    command: &Command,
+) {
+    if let Some(request) = batch::Request::from_command(command) {
+        batch::queue(shared, requests, id, request);
+    } else if let Some((document, request)) = queued_request(command) {
+        if requests.try_send((id, document, request)).is_err() {
+            busy(shared, id, document);
         }
+    } else {
+        shared.send(
+            id,
+            refusal(
+                ErrorCode::WrongState,
+                "Use an analysis command with the inspect process.",
+            ),
+        );
     }
 }
 
@@ -584,6 +655,19 @@ fn queued_request(command: &Command) -> Option<(u64, Request)> {
             document,
             Request::Inspect(Query::Findings {
                 validation,
+                first,
+                count,
+            }),
+        ),
+        Command::AnalysisLayerPage {
+            document,
+            inspection,
+            first,
+            count,
+        } => (
+            document,
+            Request::Inspect(Query::LayerPage {
+                inspection,
                 first,
                 count,
             }),
@@ -1115,6 +1199,20 @@ fn serve_document(
             }
         }
         Query::Timeline { scan, query } => serve_timeline(doc, document, scan, query)?,
+        Query::LayerPage {
+            inspection,
+            first,
+            count,
+        } => {
+            let page = doc.layer_page(inspection, first, count)?;
+            Event::AnalysisLayerPage {
+                document,
+                inspection,
+                first,
+                total: page.total,
+                rows: page.entries,
+            }
+        }
         Query::IdentityPage {
             scan,
             first,

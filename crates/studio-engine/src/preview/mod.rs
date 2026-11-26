@@ -785,9 +785,10 @@ impl Target {
                 path,
                 fingerprint,
                 digest,
+                selection,
                 ..
             } => result::ResultPictures::open(path, None, Some((*fingerprint, digest)), context)
-                .map(|r| Self::Result(Box::new(r))),
+                .map(|r| Self::Result(Box::new(r.with_layer_selection(*selection)))),
         }
     }
 

@@ -22,11 +22,14 @@ use studio_domain::identity::{
     IdentitySummary, MAX_IDENTITY_PAGE,
 };
 use studio_domain::job::SourceFingerprint;
+use studio_domain::layers::LayerDecodeSelection;
 use studio_domain::preview::GrainPolicy;
 use studio_domain::timeline::TimelineQuantizer;
 
 use super::document::{Checked, HashReader, Refusal};
-use crate::stream::{MAX_UNIT_BYTES, PREVIEW_DECODE_THREADS, preview_decoder_settings};
+use crate::stream::{
+    MAX_UNIT_BYTES, PREVIEW_DECODE_THREADS, operating_point_selection, preview_decoder_settings,
+};
 
 const RECORD_BYTES: usize = 32;
 const MAX_INDEX_BYTES: u64 = 128 << 20;
@@ -134,6 +137,7 @@ struct State {
     timeline: TimelineIndex,
     fingerprint: SourceFingerprint,
     grain: GrainPolicy,
+    selection: LayerDecodeSelection,
     digest: Option<SourceDigest>,
     matches_structure: bool,
     changed: bool,
@@ -158,6 +162,7 @@ impl State {
             spec_revision: "AV2 v1.0.0".into(),
             fingerprint: self.fingerprint,
             grain: self.grain,
+            selection: self.selection,
             digest: self.digest.clone(),
             matches_structure: self.matches_structure,
             completion: self.completion.clone(),
@@ -194,7 +199,11 @@ impl State {
 pub(super) struct IdentityIndex(Arc<Mutex<State>>);
 
 impl IdentityIndex {
-    pub(super) fn new(grain: GrainPolicy, fingerprint: SourceFingerprint) -> Result<Self, Refusal> {
+    pub(super) fn new(
+        grain: GrainPolicy,
+        fingerprint: SourceFingerprint,
+        selection: LayerDecodeSelection,
+    ) -> Result<Self, Refusal> {
         Ok(Self(Arc::new(Mutex::new(State {
             temporal: Table::new().map_err(|error| storage(&error))?,
             coded: Table::new().map_err(|error| storage(&error))?,
@@ -203,6 +212,7 @@ impl IdentityIndex {
             timeline: TimelineIndex::new().map_err(|error| storage(&error))?,
             fingerprint,
             grain,
+            selection,
             digest: None,
             matches_structure: false,
             changed: false,
@@ -280,12 +290,12 @@ impl IdentityIndex {
         expected: Option<&SourceDigest>,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(), Refusal> {
-        let (grain, len) = {
+        let (grain, len, selection) = {
             let state = self.state();
-            (state.grain, state.fingerprint.len)
+            (state.grain, state.fingerprint.len, state.selection)
         };
         let mut hashed = HashReader::new(Checked::new(file.take(len), cancelled));
-        let result = self.decode(BufReader::new(&mut hashed), grain, cancelled);
+        let result = self.decode(BufReader::new(&mut hashed), grain, selection, cancelled);
         let digest = hashed.finish();
         let mut state = self.state();
         if let Some(expected) = expected.filter(|expected| expected.bytes == digest.bytes) {
@@ -324,11 +334,14 @@ impl IdentityIndex {
         &self,
         reader: impl Read,
         grain: GrainPolicy,
+        selection: LayerDecodeSelection,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(), String> {
         let observed = self.clone();
+        let selection = operating_point_selection(selection).map_err(|error| error.to_string())?;
         let settings =
-            preview_decoder_settings(PREVIEW_DECODE_THREADS, DecodeLimits::DEFAULT, grain);
+            preview_decoder_settings(PREVIEW_DECODE_THREADS, DecodeLimits::DEFAULT, grain)
+                .with_operating_point_selection(selection);
         let mut decoder = Decoder::new_with_coded_frame_observer(settings, move |event| {
             observed.observe(event);
         })
@@ -609,7 +622,12 @@ mod tests {
         let document = Document::open(&WirePath::from_path(&source), &|| false).map_err(refusal)?;
         let summary = document.summary();
         assert_eq!(summary.packets, 1);
-        let index = IdentityIndex::new(GrainPolicy::Skip, summary.fingerprint).map_err(refusal)?;
+        let index = IdentityIndex::new(
+            GrainPolicy::Skip,
+            summary.fingerprint,
+            LayerDecodeSelection::Default,
+        )
+        .map_err(refusal)?;
         assert_eq!(
             index
                 .page(IdentityKind::Temporal, 0, 1)
@@ -684,7 +702,8 @@ mod tests {
             len: unit.offset.get() + unit.bytes.len() as u64,
             modified: None,
         };
-        let index = IdentityIndex::new(GrainPolicy::Skip, source).map_err(refusal)?;
+        let index = IdentityIndex::new(GrainPolicy::Skip, source, LayerDecodeSelection::Default)
+            .map_err(refusal)?;
         index.index_unit(&unit, &|| false)?;
         let page = index
             .timeline(None, TimelineView::Coded, 0, 1, 1)
@@ -707,7 +726,12 @@ mod tests {
         let (_directory, source) = source_fixture(BRIDGE_IVF)?;
         let document = Document::open(&WirePath::from_path(&source), &|| false).map_err(refusal)?;
         let summary = document.summary();
-        let index = IdentityIndex::new(GrainPolicy::Skip, summary.fingerprint).map_err(refusal)?;
+        let index = IdentityIndex::new(
+            GrainPolicy::Skip,
+            summary.fingerprint,
+            LayerDecodeSelection::Default,
+        )
+        .map_err(refusal)?;
         index
             .scan(
                 &mut File::open(&source)?,
@@ -806,7 +830,12 @@ mod tests {
         ))?;
         let document = Document::open(&WirePath::from_path(&source), &|| false).map_err(refusal)?;
         let summary = document.summary();
-        let index = IdentityIndex::new(GrainPolicy::Skip, summary.fingerprint).map_err(refusal)?;
+        let index = IdentityIndex::new(
+            GrainPolicy::Skip,
+            summary.fingerprint,
+            LayerDecodeSelection::Default,
+        )
+        .map_err(refusal)?;
         index
             .scan(
                 &mut File::open(&source)?,
@@ -846,7 +875,12 @@ mod tests {
         let (_directory, source) = source_fixture(LAYERED_10_BIT)?;
         let document = Document::open(&WirePath::from_path(&source), &|| false).map_err(refusal)?;
         let summary = document.summary();
-        let index = IdentityIndex::new(GrainPolicy::Skip, summary.fingerprint).map_err(refusal)?;
+        let index = IdentityIndex::new(
+            GrainPolicy::Skip,
+            summary.fingerprint,
+            LayerDecodeSelection::Default,
+        )
+        .map_err(refusal)?;
         index
             .scan(
                 &mut File::open(&source)?,
@@ -891,7 +925,12 @@ mod tests {
 
         let mut wrong = summary.digest.clone().ok_or("Missing source digest.")?;
         wrong.sha256 = "wrong".into();
-        let index = IdentityIndex::new(GrainPolicy::Skip, summary.fingerprint).map_err(refusal)?;
+        let index = IdentityIndex::new(
+            GrainPolicy::Skip,
+            summary.fingerprint,
+            LayerDecodeSelection::Default,
+        )
+        .map_err(refusal)?;
         assert!(matches!(
             index.scan(&mut File::open(&source)?, Some(&wrong), &|| false),
             Err(Refusal {
@@ -913,7 +952,12 @@ mod tests {
     fn an_index_at_its_disk_limit_does_not_append() -> TestResult {
         let source = tempfile::tempfile()?;
         let fingerprint = SourceFingerprint::of(&source.metadata()?);
-        let index = IdentityIndex::new(GrainPolicy::Skip, fingerprint).map_err(refusal)?;
+        let index = IdentityIndex::new(
+            GrainPolicy::Skip,
+            fingerprint,
+            LayerDecodeSelection::Default,
+        )
+        .map_err(refusal)?;
         let mut state = index.state();
         state.coded.count = MAX_INDEX_BYTES / RECORD_BYTES as u64 - 1;
         state.append(IdentityKind::Temporal, [1, 0, 0, 0]);
@@ -928,7 +972,12 @@ mod tests {
     fn cancellation_returns_an_unverified_partial_index() -> TestResult {
         let (_directory, source) = source_fixture(BRIDGE_IVF)?;
         let fingerprint = SourceFingerprint::of(&std::fs::metadata(&source)?);
-        let index = IdentityIndex::new(GrainPolicy::Skip, fingerprint).map_err(refusal)?;
+        let index = IdentityIndex::new(
+            GrainPolicy::Skip,
+            fingerprint,
+            LayerDecodeSelection::Default,
+        )
+        .map_err(refusal)?;
         index
             .scan(&mut File::open(&source)?, None, &|| true)
             .map_err(refusal)?;

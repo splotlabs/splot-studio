@@ -320,6 +320,8 @@ impl Activity {
             | Event::ExportPublishReady { .. }
             | Event::ExportPublished { .. }
             | Event::ExportFinished { .. }
+            | Event::AnalysisLayersReady { .. }
+            | Event::AnalysisLayerPage { .. }
             | Event::AnalysisFailed { .. } => Step::IGNORED,
         }
     }

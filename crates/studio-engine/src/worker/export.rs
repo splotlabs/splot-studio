@@ -595,6 +595,7 @@ mod tests {
                 range: ExportRange::All,
                 layer: None,
                 grain: GrainPolicy::Skip,
+                selection: studio_domain::layers::LayerDecodeSelection::Default,
                 frame_rate: None,
                 expected: ExportSampleFormat {
                     bit_depth: 10,

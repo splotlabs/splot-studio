@@ -316,13 +316,12 @@ impl Session {
     /// The user did something to the picture area or the window. The
     /// picture area is visible when the window is visible.
     pub fn preview_input(&mut self, input: preview::Input) -> Outcome {
-        let mut outcome = Outcome::nothing();
-        if !self.shut_down {
-            let effects = self.preview.input(input);
-            self.send_preview(effects);
-            outcome.preview = self.preview.take_dirty();
+        if self.shut_down {
+            return Outcome::nothing();
         }
-        outcome
+        let effects = self.preview.input(input);
+        self.send_preview(effects);
+        self.preview_outcome()
     }
 
     /// Sends the startup `Hello`.
@@ -444,6 +443,7 @@ impl Session {
                         path: WirePath::from_path(doc.path()),
                         fingerprint: summary.fingerprint,
                         digest: summary.digest.clone()?,
+                        selection: doc.layer_decode_selection(),
                     })
                 });
             if stage.is_none() {
@@ -846,7 +846,17 @@ impl Session {
     }
 
     fn preview_outcome(&mut self) -> Outcome {
+        let analysis = if let Some((document, selection, status)) =
+            self.preview.take_layer_decode_feedback()
+        {
+            self.analysis
+                .update_layer_decode_status(document, selection, status);
+            self.analysis.take_dirty()
+        } else {
+            false
+        };
         Outcome {
+            analysis,
             preview: self.preview.take_dirty(),
             ..Outcome::nothing()
         }

@@ -12,6 +12,7 @@ use studio_domain::export::{
     ExportFormat, ExportLayer, ExportRange, ExportRequest, ExportSampleFormat,
 };
 use studio_domain::job::{ChromaLayout, Rational, WirePath};
+use studio_domain::layers::LayerDecodeSelection;
 use studio_domain::preview::GrainPolicy;
 
 use crate::export_jobs::{ExportFrameSource, ExportSource};
@@ -30,6 +31,7 @@ pub struct Draft {
 struct SelectedFrame {
     ordinal: u64,
     layer: ExportLayer,
+    selection: LayerDecodeSelection,
 }
 
 struct Source {
@@ -47,6 +49,7 @@ pub struct Plan {
     range: ExportRange,
     layer: Option<ExportLayer>,
     grain: GrainPolicy,
+    selection: LayerDecodeSelection,
     frame_rate: Option<Rational>,
     sources: Vec<PlannedSource>,
 }
@@ -90,6 +93,7 @@ impl Draft {
                     .map(|frame| SelectedFrame {
                         ordinal: frame.ordinal,
                         layer: frame.layer,
+                        selection: frame.selection,
                     })
                     .ok_or("Pause on an output picture to export it.")?,
             )
@@ -282,6 +286,9 @@ impl Draft {
             range,
             layer,
             grain,
+            selection: self
+                .frame
+                .map_or(LayerDecodeSelection::Default, |frame| frame.selection),
             frame_rate,
             sources,
         })
@@ -384,6 +391,7 @@ impl Plan {
                     range: self.range,
                     layer: self.layer,
                     grain: self.grain,
+                    selection: self.selection,
                     frame_rate: self.frame_rate,
                     expected: source.expected,
                     format,
@@ -483,6 +491,11 @@ mod tests {
                 chroma: ChromaLayout::Yuv422,
             },
             grain: GrainPolicy::Skip,
+            selection: LayerDecodeSelection::OperatingPoint {
+                scope: studio_domain::layers::LayerScope::Global,
+                set: 1,
+                point: 0,
+            },
         }
     }
 
@@ -510,6 +523,7 @@ mod tests {
         assert_eq!(request.layer, Some(displayed.layer));
         assert_eq!(request.expected, displayed.expected);
         assert_eq!(request.grain, GrainPolicy::Skip);
+        assert_eq!(request.selection, displayed.selection);
         assert_eq!(
             request.format,
             ExportFormat::Raw {

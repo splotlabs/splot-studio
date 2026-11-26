@@ -7,7 +7,9 @@ use std::fs::File;
 
 use serde::Serialize;
 use studio_domain::analysis::{AnalysisFailure, Element, Framing, MAX_PAGE_ELEMENTS, SourceDigest};
+use studio_domain::analysis::{LocateTarget, RowFilter};
 use studio_domain::identity::{IdentityKind, IdentityPage, IdentitySummary};
+use studio_domain::layers::{LayerDecodeSelection, LayerEvidence, LayerRow};
 use studio_domain::preview::GrainPolicy;
 use studio_domain::syntax::{SyntaxEvent, SyntaxSummary};
 use studio_domain::timeline::{TimelinePage, TimelineSelection, TimelineTarget, TimelineView};
@@ -16,11 +18,13 @@ use studio_domain::validation::{
 };
 
 use super::{Document, Item, PAGE_BUDGET, Refusal, Seek, SeekFrom, read_file_range};
-use crate::inspect::{ValidationResult, identity::IdentityIndex, syntax, validation};
+use crate::inspect::{ValidationResult, identity::IdentityIndex, layers, syntax, validation};
 use crate::output::FileId;
 
 #[derive(Debug, Default)]
 pub(super) struct Evidence {
+    layer_request: u64,
+    layer_rows: Option<Vec<LayerRow>>,
     trace: Option<(u64, u64, Vec<SyntaxEvent>)>,
     report: Option<(u64, Vec<Finding>)>,
     identity: Option<(u64, IdentityIndex)>,
@@ -32,6 +36,67 @@ pub(in crate::inspect) struct EvidencePage<T> {
 }
 
 impl Document {
+    pub(in crate::inspect) fn prepare_layers(
+        &mut self,
+        request: u64,
+        element: u64,
+        selection: LayerDecodeSelection,
+    ) -> Result<(File, layers::Query), Refusal> {
+        if request <= self.evidence.layer_request {
+            return Err(invalid("Use a new layer inspection request ID."));
+        }
+        let (_, row) = self.locate(
+            RowFilter::default(),
+            LocateTarget::Element { index: element },
+        )?;
+        let Element::Obu { obu } = row.element else {
+            return Err(invalid("Select an indexed OBU for layer inspection."));
+        };
+        let file = self.open_evidence_source()?;
+        self.evidence.layer_request = request;
+        self.evidence.layer_rows = None;
+        Ok((
+            file,
+            layers::Query {
+                element,
+                offset: obu.header.offset,
+                source_len: self.summary.fingerprint.len,
+                selection,
+            },
+        ))
+    }
+
+    pub(in crate::inspect) fn complete_layers(
+        &mut self,
+        request: u64,
+        result: Result<layers::Report, Refusal>,
+    ) -> Result<(LayerEvidence, u64), Refusal> {
+        self.check()?;
+        if request != self.evidence.layer_request {
+            return Err(invalid("The layer inspection was superseded."));
+        }
+        let (summary, rows) = result?;
+        let total = rows.len() as u64;
+        self.evidence.layer_rows = Some(rows);
+        Ok((summary, total))
+    }
+
+    pub(in crate::inspect) fn layer_page(
+        &self,
+        inspection: u64,
+        first: u64,
+        count: u32,
+    ) -> Result<EvidencePage<LayerRow>, Refusal> {
+        self.check()?;
+        let rows = self
+            .evidence
+            .layer_rows
+            .as_deref()
+            .filter(|_| inspection == self.evidence.layer_request)
+            .ok_or_else(|| invalid("The requested layer inspection is unavailable."))?;
+        page(rows, first, count)
+    }
+
     pub(in crate::inspect) fn syntax(
         &mut self,
         request: u64,
@@ -138,6 +203,7 @@ impl Document {
         &mut self,
         request: u64,
         grain: GrainPolicy,
+        selection: LayerDecodeSelection,
     ) -> Result<IdentityIndex, Refusal> {
         if self
             .evidence
@@ -149,7 +215,7 @@ impl Document {
                 "Use a request ID greater than the last identity scan request ID.",
             ));
         }
-        let index = IdentityIndex::new(grain, self.summary.fingerprint)?;
+        let index = IdentityIndex::new(grain, self.summary.fingerprint, selection)?;
         self.evidence.identity = Some((request, index.clone()));
         Ok(index)
     }

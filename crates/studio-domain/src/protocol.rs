@@ -28,6 +28,7 @@ use crate::export::{
 };
 use crate::identity::{IdentityKind, IdentityPage, IdentitySummary};
 use crate::job::{Failure, JobReport, JobSpec, Progress, SourceFacts, Stage, WirePath};
+use crate::layers::{LayerDecodeSelection, LayerEvidence, LayerRow};
 use crate::options::{EffectiveOption, FieldError, OptionDescriptor, OptionRequest};
 use crate::preview::{
     GrainPolicy, MAX_PICTURE_BYTES, PictureBox, PictureFailure, PictureFrame, PictureHeader,
@@ -41,7 +42,7 @@ use crate::validation::{
 };
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -418,6 +419,8 @@ pub enum Command {
         document: u64,
         /// The decoder's film grain policy.
         grain: GrainPolicy,
+        /// The operating point requested for the identity scan.
+        selection: LayerDecodeSelection,
     },
     /// Inspect process only. Stop a pending identity scan.
     AnalysisCancelIdentity {
@@ -462,6 +465,33 @@ pub enum Command {
         scan: u64,
         /// The row or time to resolve.
         target: TimelineTarget,
+    },
+    /// Inspect process only. Replay native AV2 layer evidence at an indexed OBU.
+    AnalysisLayers {
+        /// Document generation.
+        document: u64,
+        /// Indexed OBU element.
+        element: u64,
+        /// Decoder operating-point request to evaluate.
+        selection: LayerDecodeSelection,
+    },
+    /// Inspect process only. Cancel a layer inspection.
+    AnalysisCancelLayers {
+        /// Document generation.
+        document: u64,
+        /// Request ID of the layer inspection.
+        inspection: u64,
+    },
+    /// Inspect process only. Read retained layer evidence.
+    AnalysisLayerPage {
+        /// Document generation.
+        document: u64,
+        /// Request ID of the layer inspection.
+        inspection: u64,
+        /// First row.
+        first: u64,
+        /// Maximum number of rows.
+        count: u32,
     },
     /// Inspect process only. Checks validation options before starting a batch.
     BatchCheckSettings {
@@ -828,6 +858,28 @@ pub enum Event {
         scan: u64,
         /// Linked identities and clock evidence.
         selection: Box<TimelineSelection>,
+    },
+    /// Terminal answer to [`Command::AnalysisLayers`].
+    AnalysisLayersReady {
+        /// Document generation.
+        document: u64,
+        /// Position and coverage of the completed inspection.
+        evidence: Box<LayerEvidence>,
+        /// Number of retained rows.
+        total: u64,
+    },
+    /// Answers [`Command::AnalysisLayerPage`].
+    AnalysisLayerPage {
+        /// Document generation.
+        document: u64,
+        /// Request ID of the layer inspection.
+        inspection: u64,
+        /// First row.
+        first: u64,
+        /// Number of retained rows.
+        total: u64,
+        /// Rows from the inspection.
+        rows: Vec<LayerRow>,
     },
     /// Answers [`Command::BatchCheckSettings`] when the options are valid.
     BatchSettingsChecked,

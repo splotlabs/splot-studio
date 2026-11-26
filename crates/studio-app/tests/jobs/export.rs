@@ -26,6 +26,7 @@ pub(super) fn shared_worker_and_restore(rig: &mut Rig) -> Result<(), Box<dyn std
         range: ExportRange::Inclusive { first: 1, last: 2 },
         layer: None,
         grain: GrainPolicy::Skip,
+        selection: studio_domain::layers::LayerDecodeSelection::Default,
         frame_rate: None,
         expected: ExportSampleFormat {
             bit_depth: 8,

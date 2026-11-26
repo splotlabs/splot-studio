@@ -14,6 +14,7 @@ use studio_domain::timeline::{
     TimelineQuantizer, TimelineSelection, TimelineTarget, TimelineTime, TimelineView,
 };
 
+use crate::analysis::layers::selection_name;
 use crate::analysis::{Analysis, Input, Phase};
 use crate::present::count;
 use crate::ui::{AppWindow, TimelineBar, TimelineUi};
@@ -45,7 +46,14 @@ pub(super) fn render(window: &AppWindow, analysis: &Analysis) {
     ui.set_order(i32::from(view == TimelineView::Output));
     ui.set_first(first.to_string().into());
     ui.set_count(limit.to_string().into());
-    ui.set_scope(scope(view).into());
+    ui.set_scope(
+        format!(
+            "{} Operating-point request {}.",
+            scope(view),
+            selection_name(doc.layer_decode_selection())
+        )
+        .into(),
+    );
     let selection = timeline.selection().copied();
     ui.set_selected(selection.is_some());
     ui.set_selected_index(
@@ -360,8 +368,9 @@ fn report(
     completion: Option<&IdentityCompletion>,
 ) -> String {
     let mut report = format!(
-        "Source {}\n{label}\n{}\n{}\n{summary}\n",
+        "Source {}\n{label}\nOperating-point request {}\n{}\n{}\n{summary}\n",
         source.display(),
+        selection_name(page.decode_selection),
         status(Some(page), false, completion),
         scope(page.view)
     );

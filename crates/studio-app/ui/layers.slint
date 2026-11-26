@@ -1,0 +1,148 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+import { ScrollView } from "std-widgets.slint";
+import { Caption, LinkButton } from "controls.slint";
+import { Tokens } from "tokens.slint";
+
+export struct LayerDetail {
+    label: string,
+    value: string,
+    context: string,
+    origin: string,
+    can-request: bool,
+}
+
+export global Layers {
+    in property <bool> shown;
+    in property <string> status;
+    in property <string> request;
+    in property <string> decode;
+    in property <bool> can-reset;
+    in property <[LayerDetail]> rows;
+    in property <string> page;
+    in property <bool> has-previous;
+    in property <bool> has-next;
+    callback move-page(int);
+    callback open-origin(int);
+    callback request-point(int);
+    callback reset-point();
+}
+
+export component LayerPanel inherits VerticalLayout {
+    spacing: Tokens.space-2;
+
+    Caption {
+        text: Layers.status;
+        accessible-live-region: polite;
+    }
+
+    HorizontalLayout {
+        spacing: Tokens.space-2;
+        Caption {
+            horizontal-stretch: 1;
+            text: Layers.request;
+            vertical-alignment: center;
+        }
+        if Layers.can-reset: LinkButton {
+            min-height: 20px;
+            text: "Use Stream Default";
+            quiet: true;
+            description: "Request the default decoder operating point";
+            clicked => { Layers.reset-point(); }
+        }
+    }
+
+    Caption {
+        text: Layers.decode;
+        accessible-live-region: polite;
+    }
+
+    if Layers.rows.length > 0: scroller := ScrollView {
+        property <string> page-key: Layers.status + Layers.page;
+        changed page-key => { self.content-y = 0px; }
+        min-height: 178px;
+        preferred-height: 222px;
+        accessible-role: list;
+        accessible-label: "Layer and metadata records";
+
+        function reveal(top: length, height: length) {
+            if self.content-y + top < 0px {
+                self.content-y = -top;
+            } else if self.content-y + top + height > self.visible-height {
+                self.content-y = self.visible-height - top - height;
+            }
+        }
+        VerticalLayout {
+            width: parent.width;
+            padding-left: Tokens.space-2;
+            padding-right: Tokens.space-3;
+            spacing: Tokens.space-2;
+            for row[index] in Layers.rows: entry := VerticalLayout {
+                spacing: Tokens.space-1;
+                accessible-role: list-item;
+                accessible-label: row.label + ". " + row.value + ". " + row.context;
+
+                Text {
+                    text: row.label;
+                    color: Tokens.text;
+                    font-size: Tokens.type-body * 1rem;
+                    font-weight: Tokens.weight-semibold;
+                    wrap: word-wrap;
+                }
+                Caption { text: row.value; color: Tokens.text; }
+                if row.context != "": Caption { text: row.context; }
+                actions := HorizontalLayout {
+                    alignment: start;
+                    spacing: Tokens.space-3;
+                    if row.origin != "": LinkButton {
+                        min-height: 20px;
+                        text: row.origin;
+                        quiet: true;
+                        description: "Open the source OBU in Syntax";
+                        changed has-focus => {
+                            if self.has-focus { scroller.reveal(entry.y + actions.y, actions.height); }
+                        }
+                        clicked => { Layers.open-origin(index); }
+                    }
+                    if row.can-request: LinkButton {
+                        min-height: 20px;
+                        text: "Request Point";
+                        quiet: true;
+                        description: "Request this operating point for playback";
+                        changed has-focus => {
+                            if self.has-focus { scroller.reveal(entry.y + actions.y, actions.height); }
+                        }
+                        clicked => { Layers.request-point(index); }
+                    }
+                }
+                Rectangle { height: 1px; background: Tokens.border; }
+            }
+        }
+    }
+
+    if Layers.page != "": HorizontalLayout {
+        spacing: Tokens.space-2;
+        if Layers.has-previous || Layers.has-next: LinkButton {
+            min-height: 20px;
+            text: "Previous";
+            quiet: true;
+            description: "Show the previous layer records";
+            enabled: Layers.has-previous;
+            clicked => { Layers.move-page(-1); }
+        }
+        Caption {
+            horizontal-stretch: 1;
+            text: Layers.page;
+            vertical-alignment: center;
+        }
+        if Layers.has-previous || Layers.has-next: LinkButton {
+            min-height: 20px;
+            text: "Next";
+            quiet: true;
+            description: "Show the next layer records";
+            enabled: Layers.has-next;
+            clicked => { Layers.move-page(1); }
+        }
+    }
+}

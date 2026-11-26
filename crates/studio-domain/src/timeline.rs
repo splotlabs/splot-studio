@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::layers::LayerDecodeSelection;
+
 /// Maximum number of buckets in a timeline response.
 pub const MAX_TIMELINE_BUCKETS: u32 = 96;
 
@@ -172,6 +174,8 @@ pub struct TimelineBucket {
 /// A bounded timeline response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimelinePage {
+    /// The operating point requested for this timeline.
+    pub decode_selection: LayerDecodeSelection,
     /// Order and byte scope.
     pub view: TimelineView,
     /// Index of the requested first row.
@@ -242,6 +246,7 @@ mod tests {
             quantizer: TimelineQuantizer::InheritedBase { value: u32::MAX },
         });
         let page = TimelinePage {
+            decode_selection: LayerDecodeSelection::Default,
             view: TimelineView::Output,
             first: u64::MAX,
             total: u64::MAX,

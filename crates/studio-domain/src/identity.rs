@@ -20,10 +20,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{analysis::SourceDigest, job::SourceFingerprint, preview::GrainPolicy};
+use crate::{
+    analysis::SourceDigest, job::SourceFingerprint, layers::LayerDecodeSelection,
+    preview::GrainPolicy,
+};
 
 /// The identity index schema.
-pub const IDENTITY_SCHEMA: u32 = 1;
+pub const IDENTITY_SCHEMA: u32 = 2;
 
 /// Maximum records per identity page.
 pub const MAX_IDENTITY_PAGE: u32 = 128;
@@ -122,8 +125,9 @@ pub struct IdentitySummary {
     /// The source fingerprint checked at the document boundary.
     pub fingerprint: SourceFingerprint,
     /// The film grain policy used during decoding.
-    /// All layers are enabled. The decoder does not select an operating point.
     pub grain: GrainPolicy,
+    /// The operating point requested for this identity scan.
+    pub selection: LayerDecodeSelection,
     /// Contiguous prefix read during the identity scan. Read-ahead can include bytes
     /// beyond the decoded prefix. The digest is available after the scan stops.
     pub digest: Option<SourceDigest>,

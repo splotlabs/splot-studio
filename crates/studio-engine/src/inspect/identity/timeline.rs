@@ -508,6 +508,7 @@ impl IdentityIndex {
         let classified = state.timeline.through;
         let obu = state.timeline.obu_bytes;
         Ok(TimelinePage {
+            decode_selection: state.selection,
             view,
             first,
             total,
