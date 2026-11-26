@@ -5,7 +5,6 @@
 
 use std::fmt::Write as _;
 
-use studio_domain::layers::LayerDecodeSelection;
 use studio_domain::references::{
     ReferenceEvidence, ReferenceFrame, ReferenceOrigin, ReferenceSlotState,
 };
@@ -43,9 +42,6 @@ pub(super) fn render_document(view: &References<'_>, document: Option<&Document>
 }
 
 fn output_text(document: &Document, evidence: &ReferenceEvidence) -> String {
-    if evidence.query.selection != LayerDecodeSelection::Default {
-        return "Output identity is unavailable for this operating point.".to_owned();
-    }
     let Some(selection) = document
         .reference_timeline()
         .filter(|frame| frame.coded_offset == evidence.frame.coded_offset)

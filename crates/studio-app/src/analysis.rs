@@ -1505,21 +1505,24 @@ impl Analysis {
         doc.evidence.tab = place.evidence_tab;
         doc.bytes.shown = place.bytes_shown;
         let mut filter = None;
+        let mut policy_changed = false;
         if let Some(reference) = place.reference {
             doc.layers.shown = false;
             if doc.layer_decode_selection() != reference.selection {
                 doc.layers.selection = reference.selection;
                 doc.layers.decode = None;
+                policy_changed = true;
             }
             self.reference_view = reference.view.map(|view| (doc.id, view));
             filter = Some(reference.filter).filter(|filter| *filter != doc.filter);
         }
+        if policy_changed {
+            self.invalidate_timeline_policy(at, out);
+        }
+        let doc = &mut self.documents[at];
         let timeline = place
             .timeline
-            .filter(|(scan, _)| Some(*scan) == doc.timeline.scan())
-            .filter(|_| {
-                doc.layer_decode_selection() == studio_domain::layers::LayerDecodeSelection::Default
-            });
+            .filter(|(scan, _)| Some(*scan) == doc.timeline.scan());
         doc.timeline.restore_selection(timeline);
         if let Some((_, selection)) = timeline {
             self.timeline_picture = Some((doc.id, selection.output_ordinal));

@@ -74,11 +74,10 @@ impl Document {
     }
 
     pub(crate) fn reference_timeline(&self) -> Option<&TimelineSelection> {
-        if self.layer_decode_selection() == LayerDecodeSelection::Default {
-            self.timeline.selection()
-        } else {
-            None
-        }
+        self.timeline
+            .page()
+            .filter(|page| page.decode_selection == self.layer_decode_selection())?;
+        self.timeline.selection()
     }
 }
 
@@ -160,11 +159,9 @@ impl Analysis {
             return;
         };
         let document = doc.id;
-        let indexed = doc.layer_decode_selection() == LayerDecodeSelection::Default
-            && doc
-                .timeline
-                .page()
-                .is_some_and(|page| page.complete && page.verified);
+        let indexed = doc.timeline.page().is_some_and(|page| {
+            page.decode_selection == doc.layer_decode_selection() && page.complete && page.verified
+        });
         self.cancel_references(at, out);
         if indexed {
             self.timeline_input(
