@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
+use splot_encode::PixelFormat;
 use splot_encode::y4m::{Y4mHeader, Y4mReader};
 use studio_domain::export::{
     ExportArtifactKind, ExportDurability, ExportFormat, ExportLayer, ExportOutcome, ExportRange,
@@ -292,21 +293,13 @@ fn y4m_reopens_with_avm_samples_and_declared_geometry() -> TestResult {
         assert_eq!(header.bit_depth, depth);
         assert_eq!(actual, frames);
         assert_eq!(header.frame_rate, (if frames == 1 { 25 } else { 30 }, 1));
-        assert_eq!(
-            header.format.is_monochrome(),
-            layout == ChromaLayout::Monochrome
-        );
-        assert_eq!(
-            header.format.subsampling_x(),
-            u8::from(matches!(
-                layout,
-                ChromaLayout::Yuv420 | ChromaLayout::Yuv422
-            ))
-        );
-        assert_eq!(
-            header.format.subsampling_y(),
-            u8::from(layout == ChromaLayout::Yuv420)
-        );
+        let format = match layout {
+            ChromaLayout::Monochrome => PixelFormat::Monochrome,
+            ChromaLayout::Yuv420 => PixelFormat::Yuv420,
+            ChromaLayout::Yuv422 => PixelFormat::Yuv422,
+            ChromaLayout::Yuv444 => PixelFormat::Yuv444,
+        };
+        assert_eq!(header.format, format);
         assert_eq!(fs::read(source)?, bytes);
     }
     Ok(())
