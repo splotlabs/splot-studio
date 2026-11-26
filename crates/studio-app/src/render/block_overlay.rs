@@ -83,7 +83,7 @@ pub(super) fn render(view: &BlockOverlay<'_>, overlay: &Overlay) {
         let mut labelled = HashSet::with_capacity(outlines.len());
         for outline in outlines.iter_mut().rev() {
             if !labelled.insert((outline.x, outline.y)) {
-                outline.label.clear();
+                outline.label = slint::SharedString::new();
             }
         }
     }
