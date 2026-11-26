@@ -957,7 +957,8 @@ fn timeline_controls(rig: &mut Rig, scratch: &Scratch) {
             .contains("framing")
     );
     assert!(
-        timeline
+        rig.window
+            .global::<TimelineUi>()
             .get_exact_statistics()
             .contains("Header base quantizer")
     );
