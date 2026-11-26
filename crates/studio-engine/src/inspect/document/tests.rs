@@ -1428,7 +1428,11 @@ fn progressive_pages_keep_packet_links_and_source_coordinates()
     export.write(&mut cached)?;
     assert_eq!(cached.stream_position()?, end);
     cached.seek(SeekFrom::Start(start))?;
-    let warm = Index::open_cache(cached, doc.summary(), end)?;
+    let warm = Index::open_cache(
+        super::cache::FileLease::unleased(cached),
+        doc.summary(),
+        end,
+    )?;
     assert_eq!(
         warm.page(filter, 128, 4).map_err(|reason| reason.message)?,
         doc.page(filter, 128, 4).map_err(|reason| reason.message)?,

@@ -614,7 +614,9 @@ pub(crate) fn open_verified(path: &Path) -> io::Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
 
         // A replacement between the regular-file check and open can be a FIFO.
-        options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+        options.custom_flags(i32::from_ne_bytes(
+            rustix::fs::OFlags::NONBLOCK.bits().to_ne_bytes(),
+        ));
     }
     #[cfg(windows)]
     {
