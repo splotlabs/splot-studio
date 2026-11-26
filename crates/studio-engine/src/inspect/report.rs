@@ -154,15 +154,6 @@ pub(super) fn export(
     }
     temp.as_file().sync_all().map_err(write_failed)?;
     check_cancelled(cancelled)?;
-    #[cfg(windows)]
-    if let Some(name) = destination.file_name() {
-        let name = name.to_string_lossy();
-        if name.ends_with([' ', '.']) || name.contains(':') {
-            return Err(output::output(
-                "Choose a report name without trailing spaces, periods, or a colon.",
-            ));
-        }
-    }
     check_source_slot(report.source, destination)?;
     output::publish(temp, destination)
 }

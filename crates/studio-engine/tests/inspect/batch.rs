@@ -430,12 +430,13 @@ fn validation_hashes_an_ivf_tail_beyond_the_index_limit() -> TestResult {
     let mut contents = Vec::new();
     write_ivf_header(
         &mut contents,
-        &IvfHeader::new(*b"AV02", 16, 16, 24, 1, empty + 1),
+        &IvfHeader::new(*b"AV02", 16, 16, 24, 1, empty + 2),
     )?;
-    for pts in 0..u64::from(empty) {
+    write_ivf_frame(&mut contents, 0, &[0x02, 0x88, 0x05])?;
+    for pts in 1..=u64::from(empty) {
         write_ivf_frame(&mut contents, pts, &[])?;
     }
-    write_ivf_frame(&mut contents, u64::from(empty), &[0x02, 0x88, 0x05])?;
+    write_ivf_frame(&mut contents, u64::from(empty) + 1, &[0x02, 0x88, 0x05])?;
     fs::write(&path, &contents)?;
     let modified = fs::metadata(&path)?.modified()?;
     let mut inspect = Inspect::spawn()?;
@@ -455,7 +456,21 @@ fn validation_hashes_an_ivf_tail_beyond_the_index_limit() -> TestResult {
     else {
         return Err("expected native validation evidence".into());
     };
-    assert_eq!(summary.checked_obus, 1);
+    assert_eq!(summary.checked_obus, 2);
+    assert!(summary.scope.contains("Derived stream offsets"));
+    let Event::BatchFindings { findings, .. } = inspect.ask(findings(latest, 0))? else {
+        return Err("expected findings from the native pass".into());
+    };
+    assert!(findings.iter().any(|finding| {
+        finding
+            .file_offset
+            .is_some_and(|offset| offset < indexed_digest.bytes)
+    }));
+    assert!(
+        findings.iter().all(|finding| {
+            finding.stream_offset.is_none() && finding.extended_layer_id.is_none()
+        })
+    );
     assert_eq!(digest.bytes, contents.len() as u64);
     assert_eq!(digest.sha256, sha256(&contents));
 

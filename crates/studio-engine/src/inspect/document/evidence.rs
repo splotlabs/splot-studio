@@ -147,12 +147,18 @@ impl Document {
             .and_then(|_| validation::validate(&mut self.file, settings, cancelled));
         self.check()?;
         let (mut report, digest) = result?;
-        if self
+        let Some(indexed) = self
             .summary
             .digest
-            .as_ref()
-            .is_some_and(|indexed| indexed.bytes == digest.bytes && indexed.sha256 != digest.sha256)
-        {
+            .as_deref()
+            .filter(|indexed| indexed.bytes == digest.bytes)
+        else {
+            report.summary.scope.push_str(
+                " Inspection and validation read different byte ranges. Derived stream offsets and layer IDs are unavailable.",
+            );
+            return Ok((report, digest));
+        };
+        if indexed != &digest {
             return Err(Refusal::new(
                 AnalysisFailure::SourceChanged,
                 "The source bytes changed between inspection and validation.",
