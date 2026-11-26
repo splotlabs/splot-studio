@@ -324,6 +324,16 @@ fn wrong_or_incomplete_passes_fail_before_opening_output() -> TestResult {
     pass_error(incomplete);
     fs::write(&path, original)?;
 
+    // Restore the modification time to isolate the content check from the fingerprint.
+    let modified = fs::metadata(&input)?.modified()?;
+    fs::write(&input, fs::read(&other)?)?;
+    fs::File::options()
+        .write(true)
+        .open(&input)?
+        .set_times(fs::FileTimes::new().set_modified(modified))?;
+    assert_eq!(fingerprint(&input), final_job.fingerprint);
+    pass_error(final_job.clone());
+
     Clip::new(64, 48, "420", FRAMES - 1).write(&input)?;
     refused(final_job, FailureCode::SourceChanged, None);
     assert!(leftovers(dir.path(), &[&input, &path, &other]).is_empty());
