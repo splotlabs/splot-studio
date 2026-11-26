@@ -68,3 +68,6 @@ provides the expected mode, geometry, quantizer, and motion facts.
 - `syn-lossless-sdp-nondc-chroma-v-intra-64x64-10bit.ivf` has distinct
   64 × 64 luma and chroma tree leaves at (0, 0).
   SHA-256 `3882ab66f3adc69279d8db24faa0511b850012858d1d6fa473cf6a76c80d190f`.
+- `syn-gdf-xtile-lr-512x256-q190.ivf` has four tiles and 1,288 partition tree
+  nodes in its first coded frame. It exercises capture limits and point queries.
+  SHA-256 `5dd6f512faa08c00a8594e33a94f7484082c99445fdeee484011af7c987e54aa`.

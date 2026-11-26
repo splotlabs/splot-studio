@@ -4,6 +4,7 @@
 use std::cell::RefCell;
 use std::fs;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use slint::platform::Key;
 use slint::{ComponentHandle, Model};
@@ -18,6 +19,9 @@ const RECTANGLE: &[u8] =
     include_bytes!("../../../studio-engine/tests/inspect/fixtures/syn-hrect-intra-64x64-q120.ivf");
 const CHROMA_TREE: &[u8] = include_bytes!(
     "../../../studio-engine/tests/inspect/fixtures/syn-lossless-sdp-nondc-chroma-v-intra-64x64-10bit.ivf"
+);
+const DENSE: &[u8] = include_bytes!(
+    "../../../studio-engine/tests/inspect/fixtures/syn-gdf-xtile-lr-512x256-q190.ivf"
 );
 
 fn open(rig: &mut Rig, scratch: &Scratch, name: &str, bytes: &[u8]) {
@@ -130,6 +134,12 @@ pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch) {
         1
     );
 
+    zoom_and_pan(rig, &settle);
+    inspect_chroma(rig, scratch, &settle);
+    inspect_dense(rig, scratch, &settle);
+}
+
+fn zoom_and_pan(rig: &mut Rig, settle: impl Fn(&mut Rig, &str)) {
     rig.session.preview_input(PreviewInput::Zoom(4));
     settle(rig, "zoomed transform geometry");
     rig.session
@@ -146,7 +156,9 @@ pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch) {
         PictureView::Zoom { factor: 4, .. }
     ));
     assert!(view(rig).get_outlines().iter().any(|item| item.x < 0));
+}
 
+fn inspect_chroma(rig: &mut Rig, scratch: &Scratch, settle: impl Fn(&mut Rig, &str)) {
     open(rig, scratch, "overlapping trees.ivf", CHROMA_TREE);
     view(rig).invoke_choose(1);
     settle(rig, "the luma tree");
@@ -159,6 +171,54 @@ pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch) {
     settle(rig, "the overlapping chroma block");
     assert!(view(rig).get_picked().contains("chroma tree"));
     assert!(view(rig).get_picked().contains("Coded luma (0, 0) 64×64"));
+}
+
+fn inspect_dense(rig: &mut Rig, scratch: &Scratch, settle: impl Fn(&mut Rig, &str)) {
+    use studio_domain::blocks::MAX_BLOCK_RECORDS;
+
+    open(rig, scratch, "dense multi-tile blocks.ivf", DENSE);
+    settle(rig, "the dense picture without an overlay");
+    let redraw_without_evidence = redraw_time(rig);
+    let capture = Instant::now();
+    view(rig).invoke_choose(3);
+    settle(rig, "bounded quantizer map");
+    let capture_elapsed = capture.elapsed();
+    assert!(view(rig).get_status().contains("Capture limit reached"));
+    assert!(
+        view(rig)
+            .get_rows()
+            .iter()
+            .any(|row| row.label.starts_with("Q "))
+    );
+    let outlined = view(rig).get_outlines().row_count();
+    let max_records = MAX_BLOCK_RECORDS as usize;
+    assert!((1..=max_records).contains(&outlined));
+    let redraw_with_evidence = redraw_time(rig);
+    eprintln!(
+        "Dense overlay. {outlined} outlines. Capture {capture_elapsed:?}. Median software redraw off {redraw_without_evidence:?}, on {redraw_with_evidence:?}."
+    );
+
+    view(rig).invoke_pick(172, 24, 200, 100);
+    settle(rig, "a point in the uncovered part of the dense map");
+    assert!(view(rig).get_picked().contains("Tile 1"));
+    assert!(view(rig).get_outlines().row_count() <= 2 * max_records);
+
+    rig.session.block_overlay_input(BlockOverlayInput::Mode(2));
+    rig.session.block_overlay_input(BlockOverlayInput::Stop);
+    settle(rig, "the stopped transform query");
+    assert!(view(rig).get_status().contains("capture stopped"));
+    assert_eq!(view(rig).get_outlines().row_count(), 0);
+}
+
+fn redraw_time(rig: &Rig) -> Duration {
+    let _ = rig.pixels();
+    let mut elapsed: [Duration; 5] = std::array::from_fn(|_| {
+        let draw = Instant::now();
+        let _ = rig.pixels();
+        draw.elapsed()
+    });
+    elapsed.sort_unstable();
+    elapsed[2]
 }
 
 fn view(rig: &Rig) -> BlockOverlay<'_> {

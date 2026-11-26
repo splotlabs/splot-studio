@@ -295,10 +295,12 @@ impl Analysis {
                 if self.overlay.mode != mode {
                     let replace = self.overlay.mode == Mode::Off
                         || mode == Mode::Off
-                        || self.overlay.mode.kind() != mode.kind();
+                        || self.overlay.mode.kind() != mode.kind()
+                        || (self.overlay.viewport.is_none() && !self.overlay.busy());
                     self.overlay.mode = mode;
                     self.overlay.selected = None;
                     self.overlay.details = None;
+                    self.overlay.notice = None;
                     if replace {
                         self.cancel_overlay(&mut out);
                         self.overlay.clear_picture();
