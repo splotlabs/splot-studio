@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::settings::EncoderSettings;
+use crate::options::OptionRequest;
+use crate::protocol::OptionsIdentity;
 
 /// A native filesystem path in a form that survives JSON.
 ///
@@ -307,7 +308,14 @@ pub struct JobSpec {
     /// The file to create. An existing file is never replaced.
     pub destination: WirePath,
     /// The requested encoder settings, including the output kind.
-    pub settings: EncoderSettings,
+    pub settings: OptionRequest,
+    /// Option schema and codec revision used to preflight this job.
+    /// Historical Simple jobs did not record an identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<OptionsIdentity>,
+    /// Local first-pass artifact selected for this job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_artifact: Option<WirePath>,
 }
 
 /// Where a running job is.

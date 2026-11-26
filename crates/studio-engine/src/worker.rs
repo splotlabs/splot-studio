@@ -42,13 +42,13 @@ use std::time::{Duration, Instant};
 
 use splot_encode::CancelToken;
 use studio_domain::job::{Failure, FailureCode, JobSpec, SourceFacts};
-use studio_domain::options::{OPTIONS_SCHEMA_VERSION, OptionRequest};
+use studio_domain::options::OptionRequest;
 use studio_domain::preview::{
     MAX_PICTURE_HEIGHT, MAX_PICTURE_WIDTH, PictureBox, PictureFailure, PictureHeader,
 };
 use studio_domain::protocol::{
-    Command, Envelope, ErrorCode, Event, OptionsIdentity, ProtocolError, decode, read_frame,
-    write_message, write_picture,
+    Command, Envelope, ErrorCode, Event, ProtocolError, decode, read_frame, write_message,
+    write_picture,
 };
 use thiserror::Error;
 
@@ -306,10 +306,7 @@ fn hello() -> Event {
     Event::Hello {
         engine: build_identity(),
         capabilities: studio_domain::protocol::Capabilities {
-            options: Some(OptionsIdentity {
-                schema: OPTIONS_SCHEMA_VERSION,
-                codec_revision: env!("SPLOT_CODEC_REVISION").into(),
-            }),
+            options: Some(job::options_identity()),
             ..capabilities()
         },
     }

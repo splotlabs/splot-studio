@@ -253,13 +253,28 @@ fn start_with(
     settings: EncoderSettings,
 ) -> (Worker, Receiver<Delivery>) {
     let (mut worker, rx) = spawn();
+    let sent = worker.send(
+        0,
+        Command::Hello {
+            client: BuildIdentity {
+                name: "studio-app-test".into(),
+                version: "0".into(),
+            },
+        },
+    );
+    assert!(sent.is_ok(), "{sent:?}");
+    let Event::Hello { capabilities, .. } = event(&rx, 0, ANSWER_TIMEOUT) else {
+        unreachable!("the worker must report its option identity")
+    };
     let job = JobSpec {
         source: WirePath::from_path(source),
         fingerprint: facts.fingerprint,
         video_stream: facts.video_stream,
         omissions_acknowledged,
         destination: WirePath::from_path(destination),
-        settings,
+        settings: settings.into(),
+        identity: capabilities.options,
+        pass_artifact: None,
     };
     let sent = worker.send(1, Command::Start { job, live: None });
     assert!(sent.is_ok(), "{sent:?}");

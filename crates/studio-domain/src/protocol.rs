@@ -32,7 +32,7 @@ use crate::preview::{
 use crate::settings::OutputKind;
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -353,6 +353,15 @@ pub enum Event {
     Probed {
         /// What the source's header says.
         facts: SourceFacts,
+    },
+    /// The engine resolved this policy against the actual job source.
+    JobPolicy {
+        /// Index of the first option on this page.
+        first: u32,
+        /// Total number of effective options.
+        total: u32,
+        /// Effective options in canonical order.
+        values: Vec<EffectiveOption>,
     },
     /// The job created its temporary file, beside the destination. Sent once,
     /// before any output is written. If the worker dies without a terminal

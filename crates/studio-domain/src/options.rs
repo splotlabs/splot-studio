@@ -35,12 +35,45 @@ pub enum OptionValue {
 
 /// The Simple controls and the user's explicit overrides.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "StoredRequest")]
 pub struct OptionRequest {
     /// Output, base preset and Simple rate factor.
     pub base: EncoderSettings,
     /// Explicit overrides indexed by canonical key.
     pub values: BTreeMap<String, OptionValue>,
+}
+
+// Old journals contain the three Simple controls directly.
+#[derive(Deserialize)]
+#[serde(
+    untagged,
+    deny_unknown_fields,
+    expecting = "Simple settings or a typed request with base and values. Check the Studio version."
+)]
+enum StoredRequest {
+    Typed {
+        base: EncoderSettings,
+        values: BTreeMap<String, OptionValue>,
+    },
+    Simple(EncoderSettings),
+}
+
+impl From<EncoderSettings> for OptionRequest {
+    fn from(base: EncoderSettings) -> Self {
+        Self {
+            base,
+            values: BTreeMap::new(),
+        }
+    }
+}
+
+impl From<StoredRequest> for OptionRequest {
+    fn from(request: StoredRequest) -> Self {
+        match request {
+            StoredRequest::Typed { base, values } => Self { base, values },
+            StoredRequest::Simple(base) => base.into(),
+        }
+    }
 }
 
 /// The structure of an editable value.
@@ -230,6 +263,24 @@ impl FieldError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn historical_settings_upgrade_and_unknown_formats_fail() -> Result<(), serde_json::Error> {
+        let base = serde_json::json!({"output":"ivf","preset":6,"crf":20});
+        let request: OptionRequest = serde_json::from_value(base.clone())?;
+        assert!(request.values.is_empty());
+        assert_eq!(
+            serde_json::to_value(request)?,
+            serde_json::json!({"base":base,"values":{}})
+        );
+        for future in [
+            serde_json::json!({"output":"ivf","preset":6,"crf":20,"future":1}),
+            serde_json::json!({"base":base,"values":{},"version":99}),
+        ] {
+            assert!(serde_json::from_value::<OptionRequest>(future).is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn explicit_empty_value_survives_the_protocol() -> Result<(), serde_json::Error> {
