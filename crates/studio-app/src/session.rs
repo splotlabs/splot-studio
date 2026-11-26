@@ -321,6 +321,9 @@ impl Session {
         }
         let effects = self.preview.input(input);
         self.send_preview(effects);
+        if matches!(input, preview::Input::Surface(_) | preview::Input::Grain(_)) {
+            self.sync_reference_preview();
+        }
         self.preview_outcome()
     }
 
@@ -438,16 +441,7 @@ impl Session {
                 .analysis
                 .shown()
                 .filter(|doc| Some(doc.id()) == self.playback_document)
-                .and_then(|doc| {
-                    let summary = doc.summary()?;
-                    Some(preview::Subject::Document {
-                        document: doc.id(),
-                        path: WirePath::from_path(doc.path()),
-                        fingerprint: summary.fingerprint,
-                        digest: summary.digest.clone()?,
-                        selection: doc.layer_decode_selection(),
-                    })
-                });
+                .and_then(document_subject);
             if stage.is_none() {
                 self.playback_document = None;
             }
@@ -457,6 +451,26 @@ impl Session {
             }
         };
         let effects = self.preview.sync(scene);
+        self.send_preview(effects);
+        self.sync_reference_preview();
+    }
+
+    fn sync_reference_preview(&mut self) {
+        let source = self
+            .analysis
+            .shown()
+            .filter(|_| self.state.workspace() == Workspace::Analyze)
+            .and_then(|doc| {
+                let (frame, index) = doc.reference_preview_picture()?;
+                let target = document_subject(doc)?.target()?;
+                Some((target, frame, index))
+            });
+        let effects = match source {
+            Some((target, frame, index)) => {
+                self.preview.request_reference_preview(target, frame, index)
+            }
+            None => self.preview.clear_reference_preview(),
+        };
         self.send_preview(effects);
     }
 
@@ -1225,6 +1239,17 @@ const fn more(a: Changed, b: Changed) -> Changed {
         (Changed::Counters, _) | (_, Changed::Counters) => Changed::Counters,
         (Changed::Nothing, Changed::Nothing) => Changed::Nothing,
     }
+}
+
+fn document_subject(doc: &analysis::Document) -> Option<preview::Subject> {
+    let summary = doc.summary()?;
+    Some(preview::Subject::Document {
+        document: doc.id(),
+        path: WirePath::from_path(doc.path()),
+        fingerprint: summary.fingerprint,
+        digest: summary.digest.clone()?,
+        selection: doc.layer_decode_selection(),
+    })
 }
 
 fn int(index: usize) -> i32 {

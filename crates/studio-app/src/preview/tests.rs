@@ -930,6 +930,99 @@ fn output_picture(generation: u64, frame: u64, interval: Option<MediaTime>) -> P
 }
 
 #[test]
+fn reference_preview_verifies_the_coded_source_without_replacing_the_main_picture() {
+    use studio_domain::identity::DecodeLayers;
+    use studio_domain::references::ReferenceFrame;
+
+    let subject = document_subject(7);
+    let target = subject.target().unwrap();
+    let frame = ReferenceFrame {
+        coded_offset: 15,
+        sequence_offset: 5,
+        layers: DecodeLayers {
+            extended: 0,
+            embedded: 0,
+            temporal: 1,
+        },
+        width: 1924,
+        height: 1084,
+    };
+    let (mut preview, opening) = shown(subject);
+    preview.picture(output_picture(only(&opening).request_id, 0, None));
+    let request = preview.request_reference_preview(target.clone(), frame, 1);
+    let request = only(&request);
+    assert!(matches!(
+        request.command,
+        Command::Picture {
+            frame: PictureFrame::Index { index: 1 },
+            view: PictureView::Fit,
+            size: PictureBox {
+                width: 240,
+                height: 136
+            },
+            ..
+        }
+    ));
+    assert_eq!(preview.document_request_generation(), None);
+    preview.picture(output_picture(request.request_id, 1, None));
+    assert_eq!(
+        preview.reference_preview().unwrap().unwrap().header.frame,
+        1
+    );
+    assert_eq!(preview.view().frame_text, "Output 1");
+
+    let request = preview.request_reference_preview(
+        target,
+        ReferenceFrame {
+            coded_offset: 16,
+            ..frame
+        },
+        1,
+    );
+    preview.picture(output_picture(only(&request).request_id, 1, None));
+    assert!(matches!(preview.reference_preview(), Some(Err(_))));
+    assert_eq!(preview.view().frame_text, "Output 1");
+}
+
+#[test]
+fn reference_preview_cancellation_rejects_late_pictures() {
+    use studio_domain::identity::DecodeLayers;
+    use studio_domain::references::ReferenceFrame;
+
+    let subject = document_subject(7);
+    let target = subject.target().unwrap();
+    let (mut preview, opening) = shown(subject);
+    preview.picture(output_picture(only(&opening).request_id, 0, None));
+    let request = preview.request_reference_preview(
+        target,
+        ReferenceFrame {
+            coded_offset: 15,
+            sequence_offset: 5,
+            layers: DecodeLayers {
+                extended: 0,
+                embedded: 0,
+                temporal: 1,
+            },
+            width: 1924,
+            height: 1084,
+        },
+        1,
+    );
+    let generation = only(&request).request_id;
+    let cancel = preview.clear_reference_preview();
+    assert_eq!(
+        only(&cancel),
+        &Effect {
+            request_id: generation,
+            command: Command::StopPlayback
+        }
+    );
+    none(preview.picture(output_picture(generation, 1, None)));
+    assert!(preview.reference_preview().is_none());
+    assert_eq!(preview.view().frame_text, "Output 1");
+}
+
+#[test]
 fn next_at_a_partial_boundary_preserves_the_picture_with_no_frame_count() {
     let (mut preview, opening) = shown(document_subject(7));
     preview.picture(output_picture(only(&opening).request_id, 0, None));

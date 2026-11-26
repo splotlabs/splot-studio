@@ -111,7 +111,16 @@ impl Preview {
     }
 
     pub(super) fn document_request_generation(&self) -> Option<u64> {
-        if matches!(self.inflight, Some(Sent::Play { stopping: true, .. })) {
+        if matches!(
+            self.inflight,
+            Some(
+                Sent::Play { stopping: true, .. }
+                    | Sent::Picture {
+                        purpose: super::Purpose::Reference,
+                        ..
+                    }
+            )
+        ) {
             return None;
         }
         self.document_request().map(|(generation, _)| generation)

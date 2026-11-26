@@ -276,6 +276,7 @@ enum Asked {
     References(studio_domain::references::ReferenceQuery),
     Blocks(studio_domain::blocks::BlockQuery),
     Overlay(studio_domain::blocks::BlockQuery),
+    ReferencePreview(references::ReferencePreviewQuery),
     Cancel,
     Close,
     Page { generation: u64, first: u64 },
@@ -1107,6 +1108,12 @@ impl Analysis {
             (Asked::Overlay(query), Event::AnalysisBlocksReady { evidence, .. }) => {
                 self.accept_overlay(request_id, query, evidence, out);
             }
+            (
+                Asked::ReferencePreview(query),
+                Event::AnalysisTimelineLocated {
+                    scan, selection, ..
+                },
+            ) => self.accept_reference_preview(at, request_id, query, scan, *selection),
             (_, Event::AnalysisFailed { code, message, .. }) => {
                 self.failed(at, request_id, asked, Some(code), message);
                 self.retry_timeline_after_failure(at, asked, out);
@@ -1403,6 +1410,16 @@ impl Analysis {
                     fail_or_notice(doc, code, &message);
                 }
                 self.fail_overlay(request_id, code, &message);
+            }
+            Asked::ReferencePreview(_) => {
+                if matches!(
+                    code,
+                    Some(AnalysisFailure::SourceChanged | AnalysisFailure::UnknownDocument)
+                ) {
+                    fail_or_notice(doc, code, &message);
+                } else {
+                    self.fail_reference_preview(at, request_id, message);
+                }
             }
             Asked::Cancel | Asked::Close | Asked::CancelLayers => {}
         }
