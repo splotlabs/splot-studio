@@ -601,16 +601,16 @@ impl Session {
             }
             Route::Job(id) => self.deliver_job(id, delivery, now),
             Route::Journal(id) => {
-                if !self
+                if self
                     .prepared
                     .as_ref()
-                    .is_some_and(|(current, _)| *current == id)
+                    .is_none_or(|(current, _)| *current != id)
                 {
                     return nothing;
                 }
                 match delivery {
                     Delivery::JournalSaved(Ok(())) => self.start_prepared(id, now),
-                    Delivery::JournalSaved(Err(message)) => self.journal_failed(id, message, now),
+                    Delivery::JournalSaved(Err(message)) => self.journal_failed(id, &message, now),
                     _ => nothing,
                 }
             }

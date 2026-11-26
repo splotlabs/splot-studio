@@ -314,7 +314,7 @@ impl Session {
         );
         let bytes = match journal::encode(&journal) {
             Ok(bytes) => bytes,
-            Err(error) => return self.journal_failed(id, error.to_string(), now),
+            Err(error) => return self.journal_failed(id, &error.to_string(), now),
         };
         let post = Arc::clone(&self.post);
         writer.submit_confirmed(bytes, move |result| {
@@ -323,7 +323,7 @@ impl Session {
         Outcome::nothing()
     }
 
-    pub(super) fn journal_failed(&mut self, id: u64, message: String, now: Instant) -> Outcome {
+    pub(super) fn journal_failed(&mut self, id: u64, message: &str, now: Instant) -> Outcome {
         self.state.pause_after_current();
         self.preflight_failed(
             id,

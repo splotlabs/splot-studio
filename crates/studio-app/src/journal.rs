@@ -818,7 +818,7 @@ impl Writer {
                     let result = write_atomically(&path, &bytes).map_err(|e| e.to_string());
                     if result != last {
                         report(result.clone());
-                        last = result.clone();
+                        last.clone_from(&result);
                     }
                     lock(&worker).settled = upto;
                     worker.1.notify_all();

@@ -395,7 +395,7 @@ fn concurrent_encode_and_inspection(rig: &mut Rig, scratch: &Scratch) {
     let journal::Loaded::Found(saved) = journal::load(&scratch.journal()) else {
         unreachable!("the submitted batch was not saved");
     };
-    assert!(!saved.items[0].attempt_policy.is_empty());
+    assert_ne!(saved.items[0].attempt_policy.as_slice(), &[]);
     let next_policy = saved.items[1]
         .submitted
         .as_ref()
