@@ -153,6 +153,7 @@ pub(super) struct Index {
     tail: Vec<Entry>,
     loaded: RefCell<Option<(usize, Vec<Entry>)>>,
     bytes: u64,
+    budget: u64,
     end: u64,
     packet: Option<(usize, u64)>,
     facts: Facts,
@@ -167,6 +168,7 @@ impl Index {
             tail: Vec::with_capacity(PAGE_ROWS),
             loaded: RefCell::new(None),
             bytes: 0,
+            budget: MAX_INDEX_BYTES,
             end: 0,
             packet: None,
             facts: Facts::default(),
@@ -257,11 +259,17 @@ impl Index {
             tail,
             loaded: RefCell::new(None),
             bytes,
+            budget: MAX_INDEX_BYTES,
             end: summary.fingerprint.len,
             packet: None,
             facts: Facts::default(),
         };
         Ok(index)
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_disk_budget(&mut self, budget: u64) {
+        self.budget = budget;
     }
 
     pub(super) fn len(&self) -> usize {
@@ -325,9 +333,7 @@ impl Index {
     fn flush(&mut self) -> Result<(), Refusal> {
         let bytes = serde_json::to_vec(&self.tail).map_err(io_error)?;
         let end = self.bytes + bytes.len() as u64;
-        if self.pages.len() >= MAX_INDEX_PAGES
-            || end > MAX_INDEX_BYTES
-            || bytes.len() > MAX_PAGE_BYTES
+        if self.pages.len() >= MAX_INDEX_PAGES || end > self.budget || bytes.len() > MAX_PAGE_BYTES
         {
             return Err(limit());
         }

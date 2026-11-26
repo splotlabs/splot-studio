@@ -20,6 +20,87 @@ fn never() -> bool {
     false
 }
 
+#[derive(Debug)]
+pub(super) struct Scanned {
+    framing: Framing,
+    header: Option<IvfHeader>,
+    pub(super) items: Vec<Item>,
+    outcome: ScanOutcome,
+    facts: Index,
+}
+
+impl Scanned {
+    fn summary(&self, fingerprint: SourceFingerprint) -> DocumentSummary {
+        self.facts.facts().summary(
+            fingerprint,
+            self.framing,
+            self.header,
+            self.outcome.clone(),
+            None,
+        )
+    }
+}
+
+pub(super) fn scan(
+    input: impl Read,
+    len: u64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Scanned, Refusal> {
+    scan_with_index(input, len, cancelled, Index::new()?)
+}
+
+fn scan_with_index(
+    input: impl Read,
+    len: u64,
+    cancelled: &dyn Fn() -> bool,
+    mut facts: Index,
+) -> Result<Scanned, Refusal> {
+    let mut scan = Scan::new(input);
+    loop {
+        if let Some(outcome) = scan.step(len, &mut facts, cancelled)? {
+            let items = (0..facts.len())
+                .map(|at| {
+                    facts
+                        .item(at)
+                        .map(|item| item.unwrap_or_else(|| unreachable!("missing indexed item")))
+                })
+                .collect::<Result<_, _>>()?;
+            return Ok(Scanned {
+                framing: scan.builder.framing.unwrap_or(Framing::AnnexB),
+                header: scan.header,
+                items,
+                outcome,
+                facts,
+            });
+        }
+    }
+}
+
+fn index_items(items: &[Item]) -> Result<Index, Refusal> {
+    let mut index = Index::new()?;
+    for item in items {
+        index.push(item.clone())?;
+    }
+    Ok(index)
+}
+
+fn page(
+    items: &[Item],
+    filter: RowFilter,
+    first: u64,
+    count: u32,
+) -> Result<(u64, Vec<Row>), Refusal> {
+    index_items(items)?.page(filter, first, count)
+}
+
+fn locate(
+    items: &[Item],
+    filter: RowFilter,
+    target: LocateTarget,
+) -> Result<(Option<u64>, Row), Refusal> {
+    index_items(items)?.locate(filter, target)
+}
+
 fn scanned(bytes: &[u8]) -> Result<Scanned, Refusal> {
     scan(bytes, bytes.len() as u64, &never)
 }
@@ -557,25 +638,6 @@ fn a_declared_unit_over_the_cap_is_a_limit_and_at_the_cap_is_not() -> Result<(),
             scanned.outcome
         );
     }
-    Ok(())
-}
-
-#[test]
-fn the_element_limit_is_exact() -> Result<(), Refusal> {
-    let small = scanned(&annex_b())?;
-    assert_eq!(small.items.capacity(), 64);
-    let full = [0x01, 0x08].repeat(MAX_RETAINED_ELEMENTS);
-    let scanned = scanned(&full)?;
-    assert_eq!(scanned.outcome, ScanOutcome::Complete);
-    assert_eq!(scanned.items.len(), MAX_RETAINED_ELEMENTS);
-    assert_eq!(scanned.items.capacity(), ELEMENT_SLOTS);
-    let over = [0x01, 0x08].repeat(MAX_RETAINED_ELEMENTS + 1);
-    let scanned = self::scanned(&over)?;
-    let end = 2 * MAX_RETAINED_ELEMENTS as u64;
-    assert_eq!(stopped(&scanned), Some((ProblemKind::LimitReached, end, 2)));
-    assert_eq!(scanned.items.len(), ELEMENT_SLOTS);
-    // The final region took the last slot; the list never grew past it.
-    assert_eq!(scanned.items.capacity(), ELEMENT_SLOTS);
     Ok(())
 }
 
@@ -1125,7 +1187,7 @@ fn a_changed_or_replaced_source_is_refused() -> Result<(), Box<dyn std::error::E
     Ok(())
 }
 
-/// The memory bound documented on [`MAX_RETAINED_ELEMENTS`].
+/// Verify the framing fact size used in a resident page.
 #[test]
 fn a_kept_element_takes_at_most_64_bytes() {
     assert!(size_of::<Item>() <= 64, "{}", size_of::<Item>());
@@ -1217,50 +1279,22 @@ fn a_source_that_changes_during_the_open_is_refused() -> Result<(), Box<dyn std:
     Ok(())
 }
 
+/// A disk limit inside a payload leaves a region from the last indexed OBU to EOF.
 #[test]
-fn the_ivf_element_limit_counts_the_header() -> Result<(), Refusal> {
-    let records = |n: usize| {
-        let mut bytes = ivf_header(*b"AV02", 32);
-        for pts in 0..n as u64 {
-            bytes.extend(record(pts, &[]));
-        }
-        bytes
-    };
-    let full = records(MAX_RETAINED_ELEMENTS - 1);
-    let scanned = scanned(&full)?;
-    assert_eq!(scanned.outcome, ScanOutcome::Complete);
-    assert_eq!(scanned.items.len(), MAX_RETAINED_ELEMENTS);
-    let over = records(MAX_RETAINED_ELEMENTS);
-    let scanned = self::scanned(&over)?;
-    assert_eq!(scanned.items.len(), ELEMENT_SLOTS);
-    assert_eq!(scanned.items.capacity(), ELEMENT_SLOTS);
-    assert_eq!(
-        stopped(&scanned),
-        Some((
-            ProblemKind::LimitReached,
-            over.len() as u64 - IVF_FRAME_HEADER_SIZE as u64,
-            IVF_FRAME_HEADER_SIZE as u64
-        ))
-    );
-    Ok(())
-}
-
-/// The element limit reached inside a payload leaves a region that starts
-/// in that payload and ends past it: it belongs to no packet.
-#[test]
-fn the_region_after_an_element_limit_in_a_payload_has_no_packet() -> Result<(), Refusal> {
+fn the_region_after_a_disk_limit_in_a_payload_has_no_packet() -> Result<(), Refusal> {
     let mut bytes = ivf_header(*b"AV02", 32);
-    // The header and these records take all but three slots.
-    let empty = MAX_RETAINED_ELEMENTS - 3;
-    for pts in 0..empty as u64 {
+    let empty = 252;
+    for pts in 0..empty {
         bytes.extend(record(pts, &[]));
     }
-    // A packet and one OBU fit; the second OBU is over the limit.
-    bytes.extend(record(empty as u64, &[0x01, 0x08, 0x01, 0x08, 0x01, 0x08]));
-    bytes.extend(record(empty as u64 + 1, &TD_SH));
-    let scanned = scanned(&bytes)?;
+    bytes.extend(record(empty, &[0x01, 0x08, 0x01, 0x08, 0x01, 0x08]));
+    bytes.extend(record(empty + 1, &TD_SH));
+    let mut index = Index::new()?;
+    index.set_disk_budget(0);
+    let scanned = scan_with_index(bytes.as_slice(), bytes.len() as u64, &never, index)?;
     let last = scanned.items.len() - 1;
     let packet = last - 2;
+    assert_eq!(last, 255);
     assert!(matches!(scanned.items[packet], Item::Packet { .. }));
     assert!(matches!(
         scanned.items[last],
@@ -1269,11 +1303,16 @@ fn the_region_after_an_element_limit_in_a_payload_has_no_packet() -> Result<(), 
             ..
         }
     ));
-    // It starts inside the packet's payload and ends at the end of the file.
     assert!(scanned.items[last].start() < scanned.items[packet].end());
     assert_eq!(scanned.items[last].end(), bytes.len() as u64);
-    assert_eq!(parent(&scanned.items, last), None);
-    assert_eq!(parent(&scanned.items, last - 1), Some(packet));
+    let row = |index| {
+        scanned
+            .facts
+            .locate(RowFilter::default(), LocateTarget::Element { index })
+            .map(|(_, row)| row)
+    };
+    assert_eq!(row(last as u64)?.parent, None);
+    assert_eq!(row(last as u64 - 1)?.parent, Some(packet as u64));
     Ok(())
 }
 
@@ -1379,7 +1418,7 @@ fn progressive_pages_keep_packet_links_and_source_coordinates()
             locate(&reference.items, filter, target).map_err(|reason| reason.message)?,
         );
     }
-    let export = doc.index().map_err(|reason| reason.message)?.export()?;
+    let export = doc.index.export()?;
     let mut cached = tempfile::tempfile()?;
     cached.write_all(b"external header")?;
     let start = cached.stream_position()?;
@@ -1392,5 +1431,61 @@ fn progressive_pages_keep_packet_links_and_source_coordinates()
         warm.page(filter, 128, 4).map_err(|reason| reason.message)?,
         doc.page(filter, 128, 4).map_err(|reason| reason.message)?,
     );
+    Ok(())
+}
+
+#[test]
+fn a_large_ivf_record_yields_and_cancels_during_payload_indexing()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("large-record.ivf");
+    let mut file = File::create(&path)?;
+    let header = ivf_header(*b"AV02", 16 << 10);
+    file.write_all(&header)?;
+    file.write_all(&u32::try_from(MAX_UNIT_BYTES)?.to_le_bytes())?;
+    file.write_all(&0_u64.to_le_bytes())?;
+    let chunk = [0x01, 0x08].repeat(1 << 19);
+    for _ in 0..MAX_UNIT_BYTES / chunk.len() {
+        file.write_all(&chunk)?;
+    }
+    drop(file);
+
+    let mut doc = Document::open_progressive(&WirePath::from_path(&path), &never)
+        .map_err(|error| error.message)?;
+    let digest = doc
+        .summary()
+        .digest
+        .as_deref()
+        .ok_or("missing IVF header digest")?;
+    assert_eq!(digest.bytes, header.len() as u64);
+    assert_eq!(
+        digest.sha256,
+        crate::artifact::hex(&Sha256::digest(&header))
+    );
+    assert!(!doc.advance(&never).map_err(|error| error.message)?);
+    assert!(!doc.advance(&never).map_err(|error| error.message)?);
+    assert_eq!(doc.summary().outcome, ScanOutcome::Scanning);
+    assert_eq!(doc.summary().obus, 256);
+    let (_, rows) = doc
+        .page(RowFilter::default(), 256, 1)
+        .map_err(|error| error.message)?;
+    assert_eq!(rows[0].parent, Some(1));
+
+    let polls = Cell::new(0);
+    let cancel = || {
+        polls.set(polls.get() + 1);
+        polls.get() > 16
+    };
+    assert!(doc.advance(&cancel).map_err(|error| error.message)?);
+    assert!(matches!(&doc.summary().outcome,
+        ScanOutcome::Stopped { problem } if problem.kind == ProblemKind::Cancelled));
+    assert!((257..=272).contains(&doc.summary().obus));
+    let last = doc.summary().elements - 1;
+    let (_, rows) = doc
+        .page(RowFilter::default(), last, 1)
+        .map_err(|error| error.message)?;
+    assert!(matches!(&rows[0].element, Element::Unparsed { span, .. }
+        if span.offset == header.len() as u64 + IVF_FRAME_HEADER_SIZE as u64 + doc.summary().obus * 2
+            && span.len + span.offset == doc.summary().fingerprint.len));
     Ok(())
 }

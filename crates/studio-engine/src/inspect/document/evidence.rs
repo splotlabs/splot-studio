@@ -48,7 +48,7 @@ impl Document {
             ));
         }
         let index = usize::try_from(element).unwrap_or(usize::MAX);
-        let entry = self.index()?.item(index)?;
+        let entry = self.index.item(index)?;
         let Some(Element::Obu { obu }) = entry.as_ref().map(Item::element) else {
             return Err(invalid("Select an indexed OBU for syntax observation."));
         };
@@ -297,7 +297,7 @@ impl Document {
         }
         for finding in &mut report.findings {
             if let Some(byte) = finding.file_offset {
-                let index = self.index()?;
+                let index = &self.index;
                 let item = match index.preceding(byte)? {
                     Some(at) => index.item(at)?,
                     None => None,

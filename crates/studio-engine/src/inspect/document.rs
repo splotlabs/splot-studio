@@ -33,7 +33,13 @@ use studio_domain::protocol::MAX_MESSAGE_BYTES;
 use crate::output::FileId;
 use crate::source;
 
+mod cache;
+mod cache_session;
 pub(super) mod evidence;
+
+pub(crate) use cache_session::clear_cache;
+
+use cache_session::{CacheSession, Progress};
 mod index;
 
 use index::Index;
@@ -45,25 +51,8 @@ use evidence::Evidence;
 /// reading as [`ProblemKind::LimitReached`].
 pub const MAX_UNIT_BYTES: usize = 64 << 20;
 
-/// The most elements kept for one document, besides the final unparsed
-/// region.
-///
-/// Their list never has more than [`ELEMENT_SLOTS`] slots of at most 64
-/// bytes, 16 MiB: it doubles up to [`GROWTH_STEP_LIMIT`] slots (1 MiB) and
-/// then grows once to the full size, so it holds at most 17 MiB while it
-/// moves. Messages come on top: at most [`MAX_KEPT_MESSAGE_BYTES`] for the
-/// regions inside IVF payloads, and two of at most [`MAX_PROBLEM_MESSAGE`]
-/// bytes: the final region's and the summary's problem (the stop, or the
-/// first damage).
+/// The number of OBUs validation reads by default.
 pub const MAX_RETAINED_ELEMENTS: usize = 1 << 18;
-
-/// The slots of the element list at its full size: the elements and the
-/// final unparsed region.
-pub const ELEMENT_SLOTS: usize = MAX_RETAINED_ELEMENTS + 1;
-
-/// Below this many slots the element list doubles; above it, it grows once
-/// to [`ELEMENT_SLOTS`].
-const GROWTH_STEP_LIMIT: usize = 1 << 14;
 
 /// The longest problem message kept, in bytes.
 pub const MAX_PROBLEM_MESSAGE: usize = 512;
@@ -106,9 +95,10 @@ pub struct Document {
     file: File,
     id: FileId,
     summary: DocumentSummary,
-    index: Option<Index>,
+    index: Index,
     scan: Option<Scan<BufReader<HashReader<File>>>>,
     evidence: Evidence,
+    cache: Option<CacheSession>,
 }
 
 impl Document {
@@ -121,7 +111,7 @@ impl Document {
     /// nor Annex B, [`AnalysisFailure::Cancelled`], and
     /// [`AnalysisFailure::SourceChanged`] when it changed while being read.
     pub fn open(source: &WirePath, cancelled: &dyn Fn() -> bool) -> Result<Self, Refusal> {
-        let mut document = Self::open_progressive(source, cancelled)?;
+        let mut document = Self::open_impl(source, cancelled, false)?;
         while !document.advance(cancelled)? {}
         Ok(document)
     }
@@ -133,6 +123,14 @@ impl Document {
     pub fn open_progressive(
         source: &WirePath,
         cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, Refusal> {
+        Self::open_impl(source, cancelled, true)
+    }
+
+    fn open_impl(
+        source: &WirePath,
+        cancelled: &dyn Fn() -> bool,
+        cached: bool,
     ) -> Result<Self, Refusal> {
         let io =
             |what: &str, e: io::Error| Refusal::new(AnalysisFailure::Io, format!("{what}: {e}"));
@@ -181,17 +179,10 @@ impl Document {
         reader
             .seek(SeekFrom::Start(0))
             .map_err(|e| io("Cannot read the file", e))?;
-        let mut input = BufReader::new(HashReader::new(reader));
         let mut index = Index::new()?;
         let mut header = None;
         if ivf {
-            // The first IVF record can itself contain more than one index page.
-            // Insert the file header before parsing that record.
-            let mut reader = input
-                .get_ref()
-                .inner
-                .try_clone()
-                .map_err(|e| io("Cannot inspect the IVF header", e))?;
+            // Insert the file header before the first record fills an index page.
             let mut wire = Vec::new();
             (&mut reader)
                 .take(u64::from(u16::MAX))
@@ -207,6 +198,8 @@ impl Document {
                 })?;
             }
         }
+        let buffer_bytes = header.map_or(8192, |header| usize::from(header.header_len).max(8192));
+        let mut input = BufReader::with_capacity(buffer_bytes, HashReader::new(reader));
         // Seed the digest for the IVF header even before the first record.
         if header.is_some() {
             use std::io::BufRead;
@@ -217,7 +210,6 @@ impl Document {
         let mut scan = Scan::new(input);
         scan.builder.framing = header.map(|_| Framing::Ivf);
         scan.header = header;
-        scan.builder.index = Some(index);
         let outcome = match header {
             Some(header) if header.fourcc != *b"AV02" => scan
                 .builder
@@ -230,23 +222,31 @@ impl Document {
                         ),
                     )),
                     fingerprint.len,
+                    &mut index,
+                    None,
                 )
                 .map(Some)?,
             Some(_) => None,
-            None => scan.step(fingerprint.len, cancelled)?,
+            None => scan.step(fingerprint.len, &mut index, cancelled)?,
         };
-        let index = scan.builder.index.take().ok_or_else(index_unavailable)?;
         let summary = scan.summary(fingerprint, &index, outcome.as_ref());
+        let cache = cached
+            .then(|| CacheSession::new(&path, &id, &summary))
+            .flatten();
         let document = Self {
             summary,
             path,
             file,
             id,
-            index: Some(index),
+            index,
             scan: outcome.is_none().then_some(scan),
             evidence: Evidence::default(),
+            cache,
         };
         document.check()?;
+        if document.scan.is_none() {
+            document.publish_cache();
+        }
         Ok(document)
     }
 
@@ -256,37 +256,51 @@ impl Document {
     /// The source changed or the scan could not continue.
     pub fn advance(&mut self, cancelled: &dyn Fn() -> bool) -> Result<bool, Refusal> {
         self.check()?;
+        if self.scan.is_none() {
+            return Ok(true);
+        }
+        // Cache verification gets one bounded step per scan batch. Cold
+        // discovery continues while a candidate is verified.
+        if let Some(cache) = &mut self.cache
+            && let Progress::Warm(index, summary) = cache.advance(&self.summary, cancelled)?
+        {
+            self.check()?;
+            self.index = index;
+            self.summary = summary;
+            self.scan = None;
+            return Ok(true);
+        }
         let Some(scan) = &mut self.scan else {
             return Ok(true);
         };
         let fingerprint = self.summary.fingerprint;
         let start = scan.units.get_ref().get_ref().bytes;
+        let rows = self.index.len();
         let mut outcome = None;
-        scan.builder.index = self.index.take();
-        let result = (|| {
-            for _ in 0..256 {
-                outcome = scan.step(fingerprint.len, cancelled)?;
-                if outcome.is_some() || scan.units.get_ref().get_ref().bytes - start >= 4 << 20 {
-                    break;
-                }
+        for _ in 0..256 {
+            outcome = scan.step(fingerprint.len, &mut self.index, cancelled)?;
+            if outcome.is_some()
+                || self.index.len() - rows >= 256
+                || scan.units.get_ref().get_ref().bytes - start >= 4 << 20
+            {
+                break;
             }
-            Ok::<_, Refusal>(())
-        })();
-        self.index = scan.builder.index.take();
-        result?;
-        let Some(index) = &self.index else {
-            return Err(index_unavailable());
-        };
-        self.summary = scan.summary(fingerprint, index, outcome.as_ref());
+        }
+        self.summary = scan.summary(fingerprint, &self.index, outcome.as_ref());
         if outcome.is_some() {
             self.scan = None;
         }
         self.check()?;
+        if self.scan.is_none() {
+            self.publish_cache();
+        }
         Ok(self.scan.is_none())
     }
 
-    fn index(&self) -> Result<&Index, Refusal> {
-        self.index.as_ref().ok_or_else(index_unavailable)
+    fn publish_cache(&self) {
+        if let Some(cache) = &self.cache {
+            cache.publish(&self.summary, &self.index);
+        }
     }
 
     pub(super) const fn identity(&self) -> &FileId {
@@ -314,7 +328,7 @@ impl Document {
         count: u32,
     ) -> Result<(u64, Vec<Row>), Refusal> {
         self.check()?;
-        self.index()?.page(filter, first, count)
+        self.index.page(filter, first, count)
     }
 
     /// The element `target` names and its row among those `filter` admits.
@@ -328,7 +342,7 @@ impl Document {
         target: LocateTarget,
     ) -> Result<(Option<u64>, Row), Refusal> {
         self.check()?;
-        self.index()?.locate(filter, target)
+        self.index.locate(filter, target)
     }
 
     /// The file's bytes `offset..offset + len`.
@@ -355,10 +369,6 @@ impl Document {
             )
         })
     }
-}
-
-fn index_unavailable() -> Refusal {
-    Refusal::new(AnalysisFailure::Io, "The framing index is unavailable.")
 }
 
 /// Fails reads once `cancelled` says so.
@@ -594,39 +604,10 @@ impl Item {
     }
 }
 
-/// What reading a file found.
-#[cfg(test)]
-#[derive(Debug)]
-struct Scanned {
-    framing: Framing,
-    header: Option<IvfHeader>,
-    items: Vec<Item>,
-    outcome: ScanOutcome,
-}
-
-#[cfg(test)]
-impl Scanned {
-    fn summary(&self, fingerprint: SourceFingerprint) -> DocumentSummary {
-        let mut facts = index::Facts::default();
-        for item in &self.items {
-            facts.add(item);
-        }
-        facts.summary(
-            fingerprint,
-            self.framing,
-            self.header,
-            self.outcome.clone(),
-            None,
-        )
-    }
-}
-
 /// The facts gathered so far.
 #[derive(Debug, Default)]
 struct Builder {
     framing: Option<Framing>,
-    items: Vec<Item>,
-    index: Option<Index>,
     obus: u64,
     /// The elementary-stream offset of the next IVF payload.
     stream: u64,
@@ -639,6 +620,7 @@ struct Builder {
 /// What one unit did to the reading.
 enum Step {
     Continue,
+    RecordDone,
     End,
     Stop(ProblemKind, String),
 }
@@ -648,45 +630,8 @@ fn problem(kind: ProblemKind, message: impl Into<String>) -> Step {
 }
 
 impl Builder {
-    /// The first byte after the last element.
-    fn end(&self) -> u64 {
-        self.index
-            .as_ref()
-            .map_or_else(|| self.items.last().map_or(0, Item::end), Index::end)
-    }
-
-    /// Keeps `item`, unless the limit is reached.
-    fn push(&mut self, item: Item) -> Result<(), Step> {
-        if let Some(index) = &mut self.index {
-            if let Err(error) = index.push(item) {
-                let kind = match error.code {
-                    AnalysisFailure::LimitReached => ProblemKind::LimitReached,
-                    _ => ProblemKind::Io,
-                };
-                return Err(problem(kind, error.message));
-            }
-            return Ok(());
-        }
-        // Until an IVF document has its framing, its header still needs a slot.
-        let room = MAX_RETAINED_ELEMENTS - usize::from(self.framing.is_none());
-        if self.items.len() >= room {
-            return Err(problem(
-                ProblemKind::LimitReached,
-                format!("only the first {MAX_RETAINED_ELEMENTS} elements are kept"),
-            ));
-        }
-        if !make_room(&mut self.items) {
-            return Err(problem(
-                ProblemKind::LimitReached,
-                "no memory for more elements",
-            ));
-        }
-        self.items.push(item);
-        Ok(())
-    }
-
     /// One Annex B unit: exactly one OBU, or the bytes that did not parse.
-    fn annex_b(&mut self, offset: ByteOffset, bytes: &[u8]) -> Step {
+    fn annex_b(&mut self, index: &mut Index, offset: ByteOffset, bytes: &[u8]) -> Step {
         let first = self.framing.is_none();
         let parsed = AnnexBObuCursor::new(bytes, offset).next_obu();
         if first {
@@ -701,7 +646,9 @@ impl Builder {
         match parsed {
             Ok(Some(obu)) => {
                 let at = offset.get();
-                self.obu(at, &obu, None, at).err().unwrap_or(Step::Continue)
+                self.obu(index, at, &obu, None, at)
+                    .err()
+                    .unwrap_or(Step::Continue)
             }
             // The reader yields no empty unit.
             Ok(None) => Step::Continue,
@@ -712,49 +659,74 @@ impl Builder {
         }
     }
 
-    /// One IVF frame record and the OBUs of its payload.
+    /// Insert one record. Parse the payload in later steps.
     fn ivf_frame(
         &mut self,
+        facts: &mut Index,
         index: usize,
         pts: u64,
         payload_offset: ByteOffset,
+        len: usize,
+    ) -> Result<PendingRecord, Step> {
+        let start = payload_offset.get();
+        let len = len as u64;
+        let stream = self.stream;
+        self.stream = stream.saturating_add(len);
+        if self.framing.is_none() {
+            self.framing = Some(Framing::Ivf);
+            push(
+                facts,
+                Item::IvfHeader {
+                    len: start - IVF_FRAME_HEADER_SIZE as u64,
+                },
+            )?;
+        }
+        push(
+            facts,
+            Item::Packet {
+                index: index as u64,
+                pts,
+                payload_offset: start,
+                len,
+                stream_offset: stream,
+            },
+        )?;
+        Ok(PendingRecord {
+            index: index as u64,
+            start,
+            stream,
+            consumed: 0,
+        })
+    }
+
+    fn ivf_payload(
+        &mut self,
+        facts: &mut Index,
+        record: &mut PendingRecord,
         payload: &[u8],
         cancelled: &dyn Fn() -> bool,
     ) -> Step {
-        let start = payload_offset.get();
-        let len = payload.len() as u64;
-        let stream = self.stream;
-        self.stream = stream.saturating_add(len);
-        let packet = Item::Packet {
-            index: index as u64,
-            pts,
-            payload_offset: start,
-            len,
-            stream_offset: stream,
-        };
-        if let Err(stop) = self.push(packet) {
-            return stop;
-        }
-        let mut obus = AnnexBObuCursor::new(payload, payload_offset);
-        // The next OBU's length prefix: the payload start, then the end of
-        // each OBU.
-        let mut at = start;
-        loop {
-            if self.index.is_some() && cancelled() {
+        let mut at = record.start + record.consumed as u64;
+        let mut obus = AnnexBObuCursor::new(&payload[record.consumed..], ByteOffset::new(at));
+        for _ in 0..256 {
+            if cancelled() {
                 return cancel();
             }
+            let stream_offset = record.stream + (at - record.start);
             match obus.next_obu() {
                 Ok(Some(obu)) => {
-                    let stream_offset = stream.saturating_add(at - start);
-                    if let Err(stop) = self.obu(at, &obu, Some(index as u64), stream_offset) {
+                    if let Err(stop) = self.obu(facts, at, &obu, Some(record.index), stream_offset)
+                    {
                         return stop;
                     }
                     at = obu.offset.get().saturating_add(u64::from(obu.size));
+                    record.consumed = (at - record.start) as usize;
                 }
-                Ok(None) => return Step::Continue,
+                Ok(None) => return Step::RecordDone,
                 Err(e) => {
                     let mut message = clip(format!(
-                        "IVF record {index}: the OBU does not parse: {e}; the rest of its payload is not read"
+                        "IVF record {}: the OBU does not parse: {e}; the rest of its payload is not read",
+                        record.index
                     ));
                     self.damaged.get_or_insert_with(|| Problem {
                         kind: ProblemKind::Malformed,
@@ -768,35 +740,44 @@ impl Builder {
                     } else {
                         self.message_bytes = kept;
                     }
-                    let region = Item::Unparsed {
-                        offset: at,
-                        len: start.saturating_add(len).saturating_sub(at),
-                        stream_offset: Some(stream.saturating_add(at - start)),
-                        kind: ProblemKind::Malformed,
-                        message,
-                    };
-                    return self.push(region).err().unwrap_or(Step::Continue);
+                    return push(
+                        facts,
+                        Item::Unparsed {
+                            offset: at,
+                            len: payload.len() as u64 - (at - record.start),
+                            stream_offset: Some(stream_offset),
+                            kind: ProblemKind::Malformed,
+                            message,
+                        },
+                    )
+                    .err()
+                    .unwrap_or(Step::RecordDone);
                 }
             }
         }
+        Step::Continue
     }
 
     fn obu(
         &mut self,
+        facts: &mut Index,
         prefix: u64,
         obu: &splot_core::annexb::ObuEnvelope<'_>,
         packet: Option<u64>,
         stream_offset: u64,
     ) -> Result<(), Step> {
-        self.push(Item::Obu {
-            index: self.obus,
-            packet,
-            prefix,
-            offset: obu.offset.get(),
-            size: obu.size,
-            header: obu.header,
-            stream_offset,
-        })?;
+        push(
+            facts,
+            Item::Obu {
+                index: self.obus,
+                packet,
+                prefix,
+                offset: obu.offset.get(),
+                size: obu.size,
+                header: obu.header,
+                stream_offset,
+            },
+        )?;
         self.obus += 1;
         Ok(())
     }
@@ -806,6 +787,8 @@ impl Builder {
         &mut self,
         stop: Option<(ProblemKind, String)>,
         len: u64,
+        index: &mut Index,
+        partial_record_end: Option<u64>,
     ) -> Result<ScanOutcome, Refusal> {
         if self.framing.is_none() {
             return Err(match stop {
@@ -821,7 +804,7 @@ impl Builder {
                 ),
             });
         }
-        let end = self.end();
+        let end = partial_record_end.unwrap_or_else(|| index.end());
         // Splot read every byte up to `len` unless it stopped; anything left
         // is reported, never dropped.
         let stop = stop.or_else(|| {
@@ -835,8 +818,7 @@ impl Builder {
         Ok(match stop {
             Some((kind, message)) => {
                 let message = clip(message);
-                // `push` left its slot free; only an allocation failure in
-                // a small list can make this grow beyond it.
+                // The pager keeps space for the terminal region.
                 if len > end {
                     let item = Item::Unparsed {
                         offset: end,
@@ -845,11 +827,7 @@ impl Builder {
                         kind,
                         message: message.clone(),
                     };
-                    if let Some(index) = &mut self.index {
-                        index.push_tail(item);
-                    } else if make_room(&mut self.items) {
-                        self.items.push(item);
-                    }
+                    index.push_tail(item);
                 }
                 ScanOutcome::Stopped {
                     problem: Problem {
@@ -875,10 +853,29 @@ fn cancel() -> Step {
 }
 
 #[derive(Debug)]
+struct PendingRecord {
+    index: u64,
+    start: u64,
+    stream: u64,
+    consumed: usize,
+}
+
+fn push(index: &mut Index, item: Item) -> Result<(), Step> {
+    index.push(item).map_err(|error| {
+        let kind = match error.code {
+            AnalysisFailure::LimitReached => ProblemKind::LimitReached,
+            _ => ProblemKind::Io,
+        };
+        problem(kind, error.message)
+    })
+}
+
+#[derive(Debug)]
 struct Scan<R: Read> {
     units: TemporalUnitReader<R>,
     builder: Builder,
     header: Option<IvfHeader>,
+    pending: Option<PendingRecord>,
 }
 
 impl<R: Read> Scan<R> {
@@ -887,28 +884,46 @@ impl<R: Read> Scan<R> {
             units: TemporalUnitReader::with_max_unit_bytes(input, MAX_UNIT_BYTES),
             builder: Builder::default(),
             header: None,
+            pending: None,
         }
     }
 
     fn step(
         &mut self,
         len: u64,
+        facts: &mut Index,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Option<ScanOutcome>, Refusal> {
         let units = &mut self.units;
         let doc = &mut self.builder;
         let step = if cancelled() {
             cancel()
+        } else if let Some(record) = &mut self.pending {
+            let payload = units.last_ivf_payload().ok_or_else(|| {
+                Refusal::new(
+                    AnalysisFailure::Io,
+                    "The IVF record payload is unavailable.",
+                )
+            })?;
+            doc.ivf_payload(facts, record, payload, cancelled)
         } else {
             match units.next_unit() {
                 Ok(None) => Step::End,
-                Ok(Some(StreamUnit::AnnexBObu { offset, bytes })) => doc.annex_b(offset, bytes),
+                Ok(Some(StreamUnit::AnnexBObu { offset, bytes })) => {
+                    doc.annex_b(facts, offset, bytes)
+                }
                 Ok(Some(StreamUnit::IvfFrame {
                     index,
                     pts,
                     payload_offset,
                     payload,
-                })) => doc.ivf_frame(index, pts, payload_offset, payload, cancelled),
+                })) => match doc.ivf_frame(facts, index, pts, payload_offset, payload.len()) {
+                    Ok(record) => {
+                        self.pending = Some(record);
+                        Step::Continue
+                    }
+                    Err(stop) => stop,
+                },
                 Ok(Some(StreamUnit::IvfWarning(warning))) => problem(
                     ProblemKind::Malformed,
                     format!(
@@ -920,7 +935,6 @@ impl<R: Read> Scan<R> {
                     ProblemKind::LimitReached,
                     format!("a unit declares {declared} bytes; at most {cap} are read"),
                 ),
-                // Splot reads a file as IVF exactly when it starts with `DKIF`.
                 Err(ReaderError::Ivf(e)) => {
                     doc.framing = Some(Framing::Ivf);
                     problem(ProblemKind::Malformed, format!("{e} ({})", e.rule_id()))
@@ -931,50 +945,51 @@ impl<R: Read> Scan<R> {
                 }
             }
         };
-        // Splot reads the IVF file header with the first record; it goes in
-        // front of what was read with it.
-        if doc.framing != Some(Framing::AnnexB)
-            && self.header.is_none()
+        if self.header.is_none()
             && let Some(found) = units.ivf_header()
         {
             self.header = Some(found);
             doc.framing = Some(Framing::Ivf);
-            let item = Item::IvfHeader {
+            let header = Item::IvfHeader {
                 len: u64::from(found.header_len),
             };
             if found.fourcc != *b"AV02" {
-                doc.items = vec![item];
+                *facts = Index::new()?;
+                facts.push(header)?;
                 return doc
                     .finish(
                         Some((
                             ProblemKind::Unsupported,
                             format!(
-                                "the IVF codec is {:?}, not AV02; its records are not read",
+                                "The IVF codec is {:?}. Open an AV02 stream.",
                                 String::from_utf8_lossy(&found.fourcc)
                             ),
                         )),
                         len,
+                        facts,
+                        None,
                     )
                     .map(Some);
             }
-            if make_room(&mut doc.items) {
-                doc.items.insert(0, item);
-            } else {
-                return doc
-                    .finish(
-                        Some((
-                            ProblemKind::LimitReached,
-                            "Cannot allocate space for more elements.".to_owned(),
-                        )),
-                        len,
-                    )
-                    .map(Some);
+            if facts.len() == 0 {
+                facts.push(header)?;
             }
         }
         match step {
-            Step::Stop(kind, message) => doc.finish(Some((kind, message)), len).map(Some),
-            Step::End => doc.finish(None, len).map(Some),
-            Step::Continue if doc.framing.is_none() => doc.finish(None, len).map(Some),
+            Step::Stop(kind, message) => {
+                let partial_end = self
+                    .pending
+                    .as_ref()
+                    .map(|record| record.start + record.consumed as u64);
+                doc.finish(Some((kind, message)), len, facts, partial_end)
+                    .map(Some)
+            }
+            Step::End => doc.finish(None, len, facts, None).map(Some),
+            Step::Continue if doc.framing.is_none() => doc.finish(None, len, facts, None).map(Some),
+            Step::RecordDone => {
+                self.pending = None;
+                Ok(None)
+            }
             Step::Continue => Ok(None),
         }
     }
@@ -992,42 +1007,14 @@ impl Scan<BufReader<HashReader<File>>> {
             self.builder.framing.unwrap_or(Framing::AnnexB),
             self.header,
             outcome.cloned().unwrap_or(ScanOutcome::Scanning),
-            Some(self.units.get_ref().snapshot()),
+            (self.units.get_ref().get_ref().bytes >= index.end() || outcome.is_some())
+                .then(|| self.units.get_ref().get_ref().snapshot()),
         )
     }
 }
 
 #[cfg(test)]
-fn scan(input: impl Read, len: u64, cancelled: &dyn Fn() -> bool) -> Result<Scanned, Refusal> {
-    let mut scan = Scan::new(input);
-    loop {
-        if let Some(outcome) = scan.step(len, cancelled)? {
-            return Ok(Scanned {
-                framing: scan.builder.framing.unwrap_or(Framing::AnnexB),
-                header: scan.header,
-                items: scan.builder.items,
-                outcome,
-            });
-        }
-    }
-}
-
-/// Makes room for one more element without the list ever passing
-/// [`ELEMENT_SLOTS`] slots; `false` when it is full or the memory is not
-/// there.
-fn make_room(items: &mut Vec<Item>) -> bool {
-    let capacity = items.capacity();
-    if items.len() < capacity {
-        return true;
-    }
-    let wanted = if capacity < GROWTH_STEP_LIMIT {
-        (capacity * 2).max(64)
-    } else {
-        ELEMENT_SLOTS
-    };
-    let wanted = wanted.min(ELEMENT_SLOTS);
-    wanted > items.len() && items.try_reserve_exact(wanted - items.len()).is_ok()
-}
+use tests::scan;
 
 /// Keeps a message to [`MAX_PROBLEM_MESSAGE`] bytes, on a character boundary.
 fn clip(mut message: String) -> String {
@@ -1039,131 +1026,6 @@ fn clip(mut message: String) -> String {
         message.truncate(at);
     }
     message
-}
-
-/// The packet whose payload holds the element at `at`, if any. Only the
-/// OBUs and unparsed regions after a packet and wholly inside its payload
-/// have one.
-#[cfg(test)]
-fn parent(items: &[Item], at: usize) -> Option<usize> {
-    let item = items.get(at)?;
-    if !matches!(
-        item,
-        Item::Obu {
-            packet: Some(_),
-            ..
-        } | Item::Unparsed { .. }
-    ) {
-        return None;
-    }
-    let packet = items[..at]
-        .iter()
-        .rposition(|i| matches!(i, Item::Packet { .. }))?;
-    let inside = item.start() < items[packet].end() && item.end() <= items[packet].end();
-    inside.then_some(packet)
-}
-
-#[cfg(test)]
-fn row(items: &[Item], at: usize) -> Row {
-    Row {
-        index: at as u64,
-        parent: parent(items, at).map(|p| p as u64),
-        element: items[at].element(),
-    }
-}
-
-#[cfg(test)]
-fn page(
-    items: &[Item],
-    filter: RowFilter,
-    first: u64,
-    count: u32,
-) -> Result<(u64, Vec<Row>), Refusal> {
-    if count == 0 || count > MAX_PAGE_ELEMENTS {
-        return Err(Refusal::new(
-            AnalysisFailure::InvalidRequest,
-            format!("a page holds 1 to {MAX_PAGE_ELEMENTS} rows, not {count}"),
-        ));
-    }
-    // The indices of up to `count` admitted elements from row `first` on,
-    // and how many rows there are. Without a filter, rows are elements.
-    let skip = usize::try_from(first).unwrap_or(usize::MAX);
-    let take = count as usize;
-    let (total, wanted): (u64, Vec<usize>) = if filter.is_all() {
-        let start = skip.min(items.len());
-        (
-            items.len() as u64,
-            (start..items.len()).take(take).collect(),
-        )
-    } else {
-        let admitted = || (0..items.len()).filter(|at| items[*at].admitted(filter));
-        (
-            admitted().count() as u64,
-            admitted().skip(skip).take(take).collect(),
-        )
-    };
-    if first >= total && !(first == 0 && total == 0) {
-        return Err(Refusal::new(
-            AnalysisFailure::InvalidRequest,
-            format!("there is no row {first}; the filter admits {total}"),
-        ));
-    }
-    let mut rows = Vec::new();
-    let mut used: usize = 0;
-    for at in wanted {
-        let row = row(items, at);
-        // A comma between rows; an unencodable row cannot occur.
-        let size = serde_json::to_vec(&row).map_or(usize::MAX, |bytes| bytes.len() + 1);
-        if !rows.is_empty() && used.saturating_add(size) > PAGE_BUDGET {
-            break;
-        }
-        used = used.saturating_add(size);
-        rows.push(row);
-    }
-    Ok((total, rows))
-}
-
-#[cfg(test)]
-fn locate(
-    items: &[Item],
-    filter: RowFilter,
-    target: LocateTarget,
-) -> Result<(Option<u64>, Row), Refusal> {
-    let invalid = |message: String| Refusal::new(AnalysisFailure::InvalidRequest, message);
-    let at = match target {
-        LocateTarget::Element { index } => usize::try_from(index)
-            .ok()
-            .filter(|at| *at < items.len())
-            .ok_or_else(|| {
-                invalid(format!(
-                    "there is no element {index}; the document has {}",
-                    items.len()
-                ))
-            })?,
-        LocateTarget::Offset { offset } => {
-            let holds = |at: usize| {
-                let item = &items[at];
-                (item.start()..item.end()).contains(&offset)
-            };
-            // The last element that starts at or before the byte holds it,
-            // unless the byte is past its end inside its packet's payload.
-            items
-                .partition_point(|i| i.start() <= offset)
-                .checked_sub(1)
-                .and_then(|at| {
-                    if holds(at) {
-                        Some(at)
-                    } else {
-                        parent(items, at).filter(|p| holds(*p))
-                    }
-                })
-                .ok_or_else(|| invalid(format!("no element holds byte {offset}")))?
-        }
-    };
-    let row_index = items[at]
-        .admitted(filter)
-        .then(|| items[..at].iter().filter(|i| i.admitted(filter)).count() as u64);
-    Ok((row_index, row(items, at)))
 }
 
 /// Reads `offset..offset + len` of a file of `file_len` bytes.

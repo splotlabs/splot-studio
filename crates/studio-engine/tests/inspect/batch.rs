@@ -417,15 +417,14 @@ fn a_stopped_scan_digests_only_the_bytes_read() -> TestResult {
 }
 
 #[test]
-fn validation_hashes_an_ivf_tail_beyond_the_index_limit() -> TestResult {
+fn validation_matches_the_index_beyond_the_old_resident_limit() -> TestResult {
     use splot_core::ivf::{IvfHeader, write_ivf_frame, write_ivf_header};
-    use studio_domain::analysis::{ProblemKind, ScanOutcome};
+    use studio_domain::analysis::ScanOutcome;
     use studio_engine::inspect::document::MAX_RETAINED_ELEMENTS;
 
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("tail.ivf");
-    // Empty records consume Studio index slots without consuming the native OBU limit.
-    // Keep the tail beyond the scan buffer's read-ahead.
+    // Empty records extend the framing index without using the native OBU budget.
     let empty = u32::try_from(MAX_RETAINED_ELEMENTS + 2048)?;
     let mut contents = Vec::new();
     write_ivf_header(
@@ -441,10 +440,9 @@ fn validation_hashes_an_ivf_tail_beyond_the_index_limit() -> TestResult {
     let modified = fs::metadata(&path)?.modified()?;
     let mut inspect = Inspect::spawn()?;
     let indexed = inspect.open(1, &path)?;
-    assert!(matches!(indexed.outcome, ScanOutcome::Stopped { problem }
-        if problem.kind == ProblemKind::LimitReached));
+    assert_eq!(indexed.outcome, ScanOutcome::Complete);
     let indexed_digest = indexed.digest.ok_or("expected index digest")?;
-    assert!(indexed_digest.bytes < contents.len() as u64);
+    assert_eq!(indexed_digest.bytes, contents.len() as u64);
     let latest = inspect.next_id;
     inspect.send(vec![validate(&path)])?;
     let BatchOutcome::Validated {
@@ -457,14 +455,14 @@ fn validation_hashes_an_ivf_tail_beyond_the_index_limit() -> TestResult {
         return Err("expected native validation evidence".into());
     };
     assert_eq!(summary.checked_obus, 2);
-    assert!(summary.scope.contains("Derived stream offsets"));
+    assert_eq!(indexed_digest, Box::new(digest.clone()));
     let Event::BatchFindings { findings, .. } = inspect.ask(findings(latest, 0))? else {
         return Err("expected findings from the native pass".into());
     };
     assert!(findings.iter().any(|finding| {
         finding
             .file_offset
-            .is_some_and(|offset| offset < indexed_digest.bytes)
+            .is_some_and(|offset| offset >= contents.len() as u64 - 3)
     }));
     assert!(
         findings.iter().all(|finding| {
