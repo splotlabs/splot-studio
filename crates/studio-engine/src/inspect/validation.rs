@@ -79,6 +79,8 @@ pub(super) fn validate(
             },
             spec_section: d.spec_section,
             file_offset: d.byte_offset.map(ByteOffset::get),
+            stream_offset: None,
+            extended_layer_id: None,
             bit_offset: d.bit_offset.map(BitOffset::get),
         })
         .collect();

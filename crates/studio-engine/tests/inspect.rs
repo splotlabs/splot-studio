@@ -282,6 +282,79 @@ fn real_outputs_in_both_framings_and_depths() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn external_sequence_header_changes_validation_through_inspect() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let source = dir.path().join("source.y4m");
+    Clip::new(32, 32, "420", 3).write(&source)?;
+    let encoded = dir.path().join("encoded.obu");
+    let (_, end) = run_job(spec(&source, &encoded, OutputKind::Av2AnnexB), |_, _| {});
+    assert!(matches!(end, Event::Completed { .. }), "{end:?}");
+
+    let mut inspect = Inspect::spawn()?;
+    let summary = inspect.open(1, &encoded)?;
+    let elements = inspect.all(1, summary.elements)?;
+    let mut stream = fs::read(&encoded)?;
+    let mut context = None;
+    for obu in obus(&elements).into_iter().rev() {
+        if obu.type_name == "OBU_SEQUENCE_HEADER" {
+            let start = usize::try_from(obu.length_prefix.offset)?;
+            let end = usize::try_from(obu.obu.offset + obu.obu.len)?;
+            let bytes: Vec<_> = stream.drain(start..end).collect();
+            if let Some(previous) = &context {
+                assert_eq!(&bytes, previous);
+            }
+            context = Some(bytes);
+        }
+    }
+    let context = context.ok_or("no sequence header")?;
+    let stripped = dir.path().join("without-sequence.obu");
+    fs::write(&stripped, stream)?;
+    inspect.open(2, &stripped)?;
+
+    for external_hls in [None, Some(context)] {
+        let supplied = external_hls.is_some();
+        let validation = inspect.next_id;
+        let event = inspect.ask(Command::AnalysisValidate {
+            document: 2,
+            settings: ValidationSettings {
+                strict: false,
+                external_hls,
+            },
+        })?;
+        let Event::AnalysisValidated { summary, total, .. } = event else {
+            return Err(format!("validation answered {event:?}").into());
+        };
+        assert_eq!(summary.completion, ValidationCompletion::EndOfInput);
+        assert_eq!(summary.context.is_some(), supplied);
+        if let Some(identity) = summary.context {
+            assert_eq!(identity.sequence_headers.len(), 1);
+            assert_eq!(identity.sha256.len(), 64);
+        }
+
+        let event = inspect.ask(Command::AnalysisFindings {
+            document: 2,
+            validation,
+            first: 0,
+            count: MAX_PAGE_ELEMENTS,
+        })?;
+        let Event::AnalysisFindings { findings, .. } = event else {
+            return Err(format!("findings answered {event:?}").into());
+        };
+        assert_eq!(findings.len() as u64, total);
+        let missing = findings
+            .iter()
+            .find(|finding| finding.rule_id == "hls/unavailable-sequence-header");
+        assert_eq!(missing.is_none(), supplied, "{findings:?}");
+        if let Some(finding) = missing {
+            assert!(finding.file_offset.is_some());
+            assert_eq!(finding.file_offset, finding.stream_offset);
+            assert_eq!(finding.extended_layer_id, Some(0));
+        }
+    }
+    Ok(())
+}
+
 fn check_sequence_syntax(inspect: &mut Inspect, document: u64, elements: &[Element]) -> TestResult {
     let (element, obu) = elements
         .iter()

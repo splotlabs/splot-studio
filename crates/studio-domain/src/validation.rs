@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Version of the validation evidence format.
-pub const VALIDATION_SCHEMA: u16 = 1;
+pub const VALIDATION_SCHEMA: u16 = 2;
 /// Largest external Annex B context accepted in a request.
 pub const MAX_EXTERNAL_HLS_BYTES: usize = 8192;
 
@@ -55,6 +55,8 @@ pub struct Finding {
     pub spec_section: Option<String>,
     /// Absolute file byte offset, including any IVF wrapper.
     pub file_offset: Option<u64>,
+    /// Elementary-stream byte offset when the finding points into a known payload.
+    pub stream_offset: Option<u64>,
     /// Bit index in the indicated byte, most significant bit first.
     pub bit_offset: Option<u8>,
     /// Extended layer ID of the indexed OBU that contains the finding's byte.

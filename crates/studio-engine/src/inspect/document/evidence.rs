@@ -4,7 +4,7 @@
 //! Evidence retained for one generation of an open source.
 
 use serde::Serialize;
-use studio_domain::analysis::{AnalysisFailure, Element, MAX_PAGE_ELEMENTS};
+use studio_domain::analysis::{AnalysisFailure, Element, Framing, MAX_PAGE_ELEMENTS};
 use studio_domain::syntax::{SyntaxEvent, SyntaxSummary};
 use studio_domain::validation::{Finding, ValidationSettings, ValidationSummary};
 
@@ -126,9 +126,15 @@ impl Document {
         self.check()?;
         let mut report = result?;
         for finding in &mut report.findings {
-            finding.extended_layer_id = finding
-                .file_offset
-                .and_then(|offset| indexed_extended_layer(&self.items, offset));
+            if let Some(byte) = finding.file_offset {
+                let (stream, layer) = indexed_location(&self.items, byte);
+                finding.stream_offset = if self.summary.framing == Framing::AnnexB {
+                    (byte < self.summary.fingerprint.len).then_some(byte)
+                } else {
+                    stream
+                };
+                finding.extended_layer_id = layer;
+            }
         }
         let total = report.findings.len() as u64;
         self.evidence.report = Some((request, report.findings));
@@ -154,16 +160,28 @@ impl Document {
     }
 }
 
-fn indexed_extended_layer(items: &[Item], byte: u64) -> Option<u8> {
-    let at = items
-        .partition_point(|item| item.start() <= byte)
-        .checked_sub(1)?;
-    let item = &items[at];
+fn indexed_location(items: &[Item], byte: u64) -> (Option<u64>, Option<u8>) {
+    let end = items.partition_point(|item| item.start() <= byte);
+    let Some(item) = items[..end].last().filter(|item| byte < item.end()) else {
+        return (None, None);
+    };
     match item {
-        Item::Obu { offset, header, .. } if (*offset..item.end()).contains(&byte) => {
-            Some(header.extended_layer_id.get())
-        }
-        _ => None,
+        Item::Obu {
+            prefix,
+            offset,
+            header,
+            stream_offset,
+            ..
+        } => (
+            stream_offset.checked_add(byte - prefix),
+            (byte >= *offset).then(|| header.extended_layer_id.get()),
+        ),
+        Item::Unparsed {
+            offset,
+            stream_offset: Some(stream),
+            ..
+        } => (stream.checked_add(byte - offset), None),
+        _ => (None, None),
     }
 }
 
@@ -221,25 +239,37 @@ fn page<T: Clone + Serialize>(
 
 #[cfg(test)]
 mod tests {
-    use super::{PAGE_BUDGET, indexed_extended_layer, page};
+    use super::{PAGE_BUDGET, indexed_location, page};
     use crate::inspect::document::Refusal;
     use studio_domain::analysis::{AnalysisFailure, MAX_PAGE_ELEMENTS};
 
     #[test]
-    fn finding_layer_requires_a_byte_in_an_indexed_obu() -> Result<(), Refusal> {
+    fn finding_coordinates_require_a_known_payload_byte() -> Result<(), Refusal> {
         let mut stream = b"DKIF\x00\x00\x20\x00AV02".to_vec();
         stream.resize(32, 0);
         // One IVF record: an extended OBU on layer 5, then unparsed bytes.
         stream.extend_from_slice(&5_u32.to_le_bytes());
         stream.extend_from_slice(&0_u64.to_le_bytes());
         stream.extend_from_slice(&[3, 0x9D, 0x45, 0x11, 0x80]);
+        stream.extend_from_slice(&2_u32.to_le_bytes());
+        stream.extend_from_slice(&1_u64.to_le_bytes());
+        stream.extend_from_slice(&[1, 0x08]);
+        // The next IVF record header ends early. These bytes are unclassified.
+        stream.extend_from_slice(&[4, 0]);
         let scanned = super::super::scan(stream.as_slice(), stream.len() as u64, &|| false)?;
 
+        assert_eq!(indexed_location(&scanned.items, 44), (Some(0), None));
         for byte in [45, 46, 47] {
-            assert_eq!(indexed_extended_layer(&scanned.items, byte), Some(5));
+            assert_eq!(
+                indexed_location(&scanned.items, byte),
+                (Some(byte - 44), Some(5))
+            );
         }
-        for byte in [0, 32, 44, 48, 49] {
-            assert_eq!(indexed_extended_layer(&scanned.items, byte), None);
+        assert_eq!(indexed_location(&scanned.items, 48), (Some(4), None));
+        assert_eq!(indexed_location(&scanned.items, 61), (Some(5), None));
+        assert_eq!(indexed_location(&scanned.items, 62), (Some(6), Some(0)));
+        for byte in [0, 32, 49, 60, 63, 64, 65] {
+            assert_eq!(indexed_location(&scanned.items, byte), (None, None));
         }
         Ok(())
     }

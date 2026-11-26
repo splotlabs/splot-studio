@@ -286,6 +286,7 @@ enum Item {
     Unparsed {
         offset: u64,
         len: u64,
+        stream_offset: Option<u64>,
         kind: ProblemKind,
         message: String,
     },
@@ -413,6 +414,7 @@ impl Item {
                 len,
                 kind,
                 message,
+                ..
             } => Element::Unparsed {
                 span: span(*offset, *len, Provenance::Derived),
                 kind: *kind,
@@ -648,6 +650,7 @@ impl Builder {
                     let region = Item::Unparsed {
                         offset: at,
                         len: start.saturating_add(len).saturating_sub(at),
+                        stream_offset: Some(stream.saturating_add(at - start)),
                         kind: ProblemKind::Malformed,
                         message,
                     };
@@ -718,6 +721,7 @@ impl Builder {
                     self.items.push(Item::Unparsed {
                         offset: end,
                         len: len - end,
+                        stream_offset: None,
                         kind,
                         message: message.clone(),
                     });

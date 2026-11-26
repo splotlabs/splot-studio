@@ -708,6 +708,7 @@ fn pages_are_bounded_by_count_range_and_message_size() -> Result<(), Refusal> {
         .map(|i| Item::Unparsed {
             offset: u64::MAX - 1000 + i,
             len: 1,
+            stream_offset: None,
             kind: ProblemKind::Malformed,
             message: "\"".repeat(MAX_PROBLEM_MESSAGE),
         })
