@@ -779,6 +779,28 @@ fn the_scene_follows_the_file_from_source_to_live_to_result() {
     ));
 }
 
+#[test]
+fn scanning_keeps_the_decode_request_until_the_user_seeks() {
+    let full = document_subject(1);
+    let mut partial = full.clone();
+    let Subject::Document { digest, .. } = &mut partial else {
+        unreachable!("a document subject")
+    };
+    digest.bytes /= 2;
+    let (mut preview, initial) = shown(partial);
+    none(preview.sync(stage(full.clone())));
+    assert_eq!(
+        preview.document_request_generation(),
+        Some(only(&initial).request_id)
+    );
+    let seek = preview.input(Input::SeekOutput(2));
+    let Command::Picture { target, frame, .. } = &only(&seek).command else {
+        unreachable!("a picture request")
+    };
+    assert_eq!(Some(target.clone()), full.target());
+    assert_eq!(*frame, PictureFrame::Index { index: 1 });
+}
+
 fn document_subject(document: u64) -> Subject {
     let source = source("clip.obu");
     Subject::Document {

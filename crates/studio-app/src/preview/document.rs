@@ -147,6 +147,16 @@ impl Preview {
         }]
     }
 
+    pub(super) fn partial_coverage(&mut self, message: String) {
+        self.playing = false;
+        self.document_progress.clear();
+        self.document_notice = message;
+        if let Some(Want::Picture(key)) = self.want() {
+            self.failed = Some(key);
+        }
+        self.dirty.view = true;
+    }
+
     pub(super) fn fail_document(&mut self, message: String) {
         self.viewer.clear_sample();
         self.playing = false;

@@ -26,6 +26,7 @@
 //! A source picture never stands in for a result: the side label is taken
 //! from the shown picture's own origin.
 
+use studio_domain::analysis::SourceDigest;
 use studio_domain::preview::{
     GrainPolicy, OutputEvent, PictureBox, PictureFailure, PictureFrame, PictureOptions,
     PictureOrigin, PictureSurface, PictureTarget, PictureView, SourceRef,
@@ -309,6 +310,8 @@ pub struct Preview {
     stage_failure: Option<String>,
     document_progress: String,
     document_notice: String,
+    /// A newer prefix available for the next seek or playback request.
+    document_digest: Option<Box<SourceDigest>>,
     /// The last output while Next checks for the end of a stream with an unknown count.
     before_next: Option<Shown>,
     viewer: Viewer,
@@ -359,6 +362,7 @@ impl Preview {
             stage_failure: None,
             document_progress: String::new(),
             document_notice: String::new(),
+            document_digest: None,
             before_next: None,
             viewer: Viewer::default(),
             failed: None,
@@ -393,10 +397,32 @@ impl Preview {
     }
 
     /// The app state changed: follow the selected file and the list.
-    pub fn sync(&mut self, scene: Scene) -> Vec<Effect> {
+    pub fn sync(&mut self, mut scene: Scene) -> Vec<Effect> {
         let mut out = Vec::new();
         if scene.thumbs != self.scene.thumbs {
             self.dirty.thumbs = true;
+        }
+        if let (
+            Some(Subject::Document {
+                document,
+                path,
+                fingerprint,
+                digest,
+            }),
+            Some(Subject::Document {
+                document: new_document,
+                path: new_path,
+                fingerprint: new_fingerprint,
+                digest: new_digest,
+            }),
+        ) = (&self.scene.stage, &mut scene.stage)
+            && document == new_document
+            && path == new_path
+            && fingerprint == new_fingerprint
+            && new_digest.bytes > digest.bytes
+        {
+            // A progress message must not restart an in-flight decode or replace the view.
+            self.document_digest = Some(std::mem::replace(new_digest, digest.clone()));
         }
         if scene.stage != self.scene.stage {
             self.release_document(&mut out);
@@ -414,6 +440,7 @@ impl Preview {
             self.play_note = None;
             self.document_progress.clear();
             self.document_notice.clear();
+            self.document_digest = None;
             self.before_next = None;
             self.viewer = Viewer::default();
             self.stage_failure = None;
@@ -507,6 +534,7 @@ impl Preview {
                     }
                     self.playing = false;
                 } else if self.can_play() {
+                    self.promote_document_digest();
                     self.before_next = None;
                     if let (Some(frame), Some(count)) = (self.current_frame(), self.frames)
                         && frame.saturating_add(1) >= count
@@ -653,7 +681,11 @@ impl Preview {
                     } else {
                         text::playback_failure(code, message)
                     };
-                    self.fail_document(detail);
+                    if code == PictureFailure::PartialCoverage {
+                        self.partial_coverage(detail);
+                    } else {
+                        self.fail_document(detail);
+                    }
                 } else {
                     self.play_note = Some(text::playback_failure(code, message));
                     self.dirty.view = true;
@@ -665,6 +697,14 @@ impl Preview {
     }
 
     fn stage_failed(&mut self, key: Key, code: PictureFailure, message: &str) {
+        if code == PictureFailure::PartialCoverage {
+            if let Some(previous) = self.before_next.take() {
+                self.position = Some(previous.picture.header.frame);
+                self.show(previous);
+            }
+            self.partial_coverage(message.to_owned());
+            return;
+        }
         if let (PictureFailure::OutOfRange, PictureFrame::Index { index }) = (code, key.frame)
             && let Some(previous) = self.before_next.take()
             && previous.picture.header.frame.checked_add(1) == Some(index)
@@ -865,6 +905,14 @@ impl Preview {
         self.dirty.view = true;
     }
 
+    fn promote_document_digest(&mut self) {
+        if let Some(Subject::Document { digest, .. }) = &mut self.scene.stage
+            && let Some(next) = self.document_digest.take()
+        {
+            *digest = next;
+        }
+    }
+
     fn seek(&mut self, frame: u64) {
         if !self.navigable() {
             return;
@@ -873,6 +921,7 @@ impl Preview {
             .frames
             .map_or(frame, |count| frame.min(count.saturating_sub(1)));
         if self.document_id().is_some() {
+            self.promote_document_digest();
             self.before_next = None;
             if self.current_frame() != Some(frame) {
                 self.viewer.clear_sample();

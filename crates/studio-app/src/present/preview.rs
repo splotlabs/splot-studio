@@ -46,6 +46,7 @@ pub fn picture_failure(code: PictureFailure, message: &str, result: bool) -> Str
             "No preview: the source changed since it was read. Remove it and add it again.".into()
         }
         PictureFailure::Unsupported => format!("No preview: {what} cannot be shown. ({message})"),
+        PictureFailure::PartialCoverage => message.to_owned(),
         PictureFailure::OutOfRange => "There is no such frame.".into(),
         PictureFailure::NoTiming => NO_TIMING.into(),
         PictureFailure::MediaToolMissing => {
