@@ -29,7 +29,7 @@ const CODED_ORDINAL_SHIFT: u32 = 8;
 pub(super) struct TimelineIndex {
     // Header offset, OBU bytes, packet PTS, flags and coded ordinal + 1.
     obus: Table,
-    // Coded header offset, frame OBU bytes, first output ordinal + 1, random-access flag.
+    // Coded header offset, frame OBU bytes, first output ordinal + 1, packed access and quantizer evidence.
     coded: Track<4>,
     // Coded ordinal, display OBU bytes, packet PTS, interval numerator and denominator, PTS flag.
     output: Track<6>,
@@ -78,7 +78,7 @@ impl TimelineIndex {
         Ok(())
     }
 
-    pub(super) fn frame(&mut self, offset: u64) -> io::Result<()> {
+    pub(super) fn frame(&mut self, offset: u64, quantizer: TimelineQuantizer) -> io::Result<()> {
         self.budget(Table::<4>::BYTES)?;
         let ordinal = self.coded.rows.count;
         let flags = CODED_COUNTED | ((ordinal + 1) << CODED_ORDINAL_SHIFT);
@@ -86,8 +86,8 @@ impl TimelineIndex {
         if obu[3] >> CODED_ORDINAL_SHIFT != ordinal + 1 {
             return Err(io::Error::other("The decoder reported a coded OBU twice."));
         }
-        self.coded
-            .append([offset, obu[1], 0, obu[3] & RANDOM_ACCESS])
+        let evidence = (obu[3] & RANDOM_ACCESS) | pack_quantizer(quantizer);
+        self.coded.append([offset, obu[1], 0, evidence])
     }
 
     pub(super) fn continuation(&mut self, coded: u64, offset: u64) -> io::Result<()> {
@@ -290,6 +290,28 @@ fn merge(summary: &mut Option<ByteDistribution>, next: ByteDistribution) {
     *summary = Some(summary.map_or(next, |previous| combine(previous, next)));
 }
 
+// Keep access flags in the first byte and the origin in the second byte.
+fn pack_quantizer(quantizer: TimelineQuantizer) -> u64 {
+    let (origin, value) = match quantizer {
+        TimelineQuantizer::Unavailable => (0, 0),
+        TimelineQuantizer::HeaderBase { value } => (1, value),
+        TimelineQuantizer::DerivedBase { value } => (2, value),
+        TimelineQuantizer::InheritedBase { value } => (3, value),
+    };
+    (origin << 8) | (u64::from(value) << 16)
+}
+
+fn unpack_quantizer(packed: u64) -> TimelineQuantizer {
+    let [_, origin, a, b, c, d, ..] = packed.to_le_bytes();
+    let value = u32::from_le_bytes([a, b, c, d]);
+    match origin {
+        1 => TimelineQuantizer::HeaderBase { value },
+        2 => TimelineQuantizer::DerivedBase { value },
+        3 => TimelineQuantizer::InheritedBase { value },
+        _ => TimelineQuantizer::Unavailable,
+    }
+}
+
 fn missing() -> io::Error {
     io::Error::other("A decoder identity has no matching source record.")
 }
@@ -374,8 +396,8 @@ impl State {
             bytes: coded_bytes,
             time: None,
             interval: None,
-            random_access: access != 0,
-            quantizer: TimelineQuantizer::Unavailable,
+            random_access: access & RANDOM_ACCESS != 0,
+            quantizer: unpack_quantizer(access),
         };
         if let Some(output) = output_ordinal {
             let [_, showing, ..] = self.output.at(output)?;
@@ -581,8 +603,8 @@ mod tests {
         let mut timeline = TimelineIndex::new()?;
         timeline.obu(12, 3, Some(0), false, false)?;
         timeline.obu(24, 6, Some(1), false, false)?;
-        timeline.frame(24)?;
-        timeline.frame(12)?;
+        timeline.frame(24, TimelineQuantizer::Unavailable)?;
+        timeline.frame(12, TimelineQuantizer::Unavailable)?;
         timeline.output(12, 24, None)?;
         timeline.output(24, 24, None)?;
         assert_eq!(timeline.output.rows.at(0)?[0], 1);

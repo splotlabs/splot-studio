@@ -13,7 +13,8 @@ use splot_core::annexb::AnnexBObuCursor;
 use splot_core::stream_reader::{TemporalUnit, TemporalUnitReader, is_random_access_point};
 use splot_core::types::ObuType;
 use splot_decode::{
-    CodedFrameEvent, DataProps, DecodeLimits, Decoder, ObuLocation, Picture, SendStatus,
+    BaseQuantizer, BaseQuantizerOrigin, CodedFrameEvent, DataProps, DecodeLimits, Decoder,
+    ObuLocation, Picture, SendStatus,
 };
 use studio_domain::analysis::{AnalysisFailure, SourceDigest};
 use studio_domain::identity::{
@@ -22,6 +23,7 @@ use studio_domain::identity::{
 };
 use studio_domain::job::SourceFingerprint;
 use studio_domain::preview::GrainPolicy;
+use studio_domain::timeline::TimelineQuantizer;
 
 use super::document::{Checked, HashReader, Refusal};
 use crate::stream::{MAX_UNIT_BYTES, PREVIEW_DECODE_THREADS, preview_decoder_settings};
@@ -449,13 +451,14 @@ impl IdentityIndex {
     }
 
     fn observe(&self, event: CodedFrameEvent) {
-        let (kind, record) = match event {
+        let (kind, record, quantizer) = match event {
             CodedFrameEvent::Frame {
                 coded,
                 sequence_header,
                 extended_layer_id,
                 embedded_layer_id,
                 temporal_layer_id,
+                base_quantizer,
                 ..
             } => (
                 IdentityKind::Coded,
@@ -469,10 +472,12 @@ impl IdentityIndex {
                     ),
                     0,
                 ],
+                timeline_quantizer(base_quantizer),
             ),
             CodedFrameEvent::Continuation { coded, obu, .. } => (
                 IdentityKind::Continuation,
                 [file_offset(coded), file_offset(obu), 0, 0],
+                TimelineQuantizer::Unavailable,
             ),
             _ => return,
         };
@@ -480,12 +485,24 @@ impl IdentityIndex {
         state.append(kind, record);
         if state.write_error.is_none() {
             let result = match kind {
-                IdentityKind::Coded => state.timeline.frame(record[0]),
+                IdentityKind::Coded => state.timeline.frame(record[0], quantizer),
                 IdentityKind::Continuation => state.timeline.continuation(record[0], record[1]),
                 _ => return,
             };
             state.timeline_result(result);
         }
+    }
+}
+
+fn timeline_quantizer(native: Option<BaseQuantizer>) -> TimelineQuantizer {
+    let Some(BaseQuantizer { index, origin, .. }) = native else {
+        return TimelineQuantizer::Unavailable;
+    };
+    match origin {
+        BaseQuantizerOrigin::Signaled => TimelineQuantizer::HeaderBase { value: index },
+        BaseQuantizerOrigin::Derived => TimelineQuantizer::DerivedBase { value: index },
+        BaseQuantizerOrigin::Inherited => TimelineQuantizer::InheritedBase { value: index },
+        _ => TimelineQuantizer::Unavailable,
     }
 }
 
@@ -681,6 +698,18 @@ mod tests {
             })
         );
         assert_eq!(coded.clock, TimelineClock::Conflicting);
+        assert_eq!(
+            coded
+                .buckets
+                .iter()
+                .map(|bucket| bucket.entry.map(|entry| entry.quantizer))
+                .collect::<Vec<_>>(),
+            [
+                Some(TimelineQuantizer::HeaderBase { value: 21 }),
+                Some(TimelineQuantizer::InheritedBase { value: 21 }),
+                Some(TimelineQuantizer::HeaderBase { value: 57 }),
+            ]
+        );
         assert!(
             coded.buckets[0]
                 .entry
