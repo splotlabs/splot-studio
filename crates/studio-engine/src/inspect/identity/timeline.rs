@@ -83,6 +83,9 @@ impl TimelineIndex {
         let ordinal = self.coded.rows.count;
         let flags = CODED_COUNTED | ((ordinal + 1) << CODED_ORDINAL_SHIFT);
         let obu = self.claim(offset, flags)?;
+        if obu[3] >> CODED_ORDINAL_SHIFT != ordinal + 1 {
+            return Err(io::Error::other("The decoder reported a coded OBU twice."));
+        }
         self.coded
             .append([offset, obu[1], 0, obu[3] & RANDOM_ACCESS])
     }

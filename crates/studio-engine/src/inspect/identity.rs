@@ -728,6 +728,46 @@ mod tests {
     }
 
     #[test]
+    fn annex_b_timeline_links_show_existing_without_inventing_time() -> TestResult {
+        use studio_domain::timeline::{TimelineClock, TimelineTarget, TimelineView};
+
+        let mut source = tempfile::NamedTempFile::new()?;
+        source.write_all(include_bytes!(
+            "../../tests/preview/fixtures/syn-mlayer2-derived-sef-8bit.obu"
+        ))?;
+        let document =
+            Document::open(&WirePath::from_path(source.path()), &|| false).map_err(refusal)?;
+        let summary = document.summary();
+        let index = IdentityIndex::new(GrainPolicy::Skip, summary.fingerprint).map_err(refusal)?;
+        index
+            .scan(&mut source.reopen()?, summary.digest.as_deref(), &|| false)
+            .map_err(refusal)?;
+        let page = index
+            .timeline(None, TimelineView::Output, 0, u64::MAX, 2)
+            .map_err(refusal)?;
+        assert!(page.complete);
+        assert_eq!(page.total, 4);
+        assert_eq!(page.clock, TimelineClock::Unavailable);
+        assert_eq!(page.rate, None);
+        assert_eq!(
+            page.file_bytes.obu + page.file_bytes.framing,
+            page.file_bytes.file
+        );
+        let selection = index
+            .timeline_locate(None, TimelineTarget::Output { index: 3 })
+            .map_err(refusal)?;
+        assert_eq!(
+            (
+                selection.coded_offset,
+                selection.showing_offset,
+                selection.time
+            ),
+            (787, Some(1328), None)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn ten_bit_output_paging_and_source_verification() -> TestResult {
         use studio_domain::timeline::{TimelineClock, TimelineTarget, TimelineTime, TimelineView};
 
