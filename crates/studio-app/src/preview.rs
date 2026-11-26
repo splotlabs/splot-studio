@@ -51,7 +51,7 @@ use reference::ReferencePreview;
 pub use scene::{Scene, Subject, scene};
 pub(crate) use viewer::HistoryView;
 use viewer::Viewer;
-pub(crate) use viewer::blocks::BlockPicture;
+pub(crate) use viewer::blocks::{BlockPicture, BlockViewport};
 pub use viewer::{ViewerView, ZOOMS};
 
 /// The memory answered pictures may hold, in bytes: about a dozen

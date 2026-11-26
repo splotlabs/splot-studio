@@ -67,6 +67,7 @@ use crate::session::Session;
 use crate::simple::{Priority, Quality};
 use crate::state::{AppState, JournalProblem, Startup};
 
+pub use render::block_motion::render_reference as render_block_reference;
 pub use render::{render, render_analysis, render_counters, render_jobs, render_preview};
 pub use ui::{
     Analysis, AnalysisState, AppWindow, BlockMotionView, BlockOverlay, Blocks, ByteRegion,

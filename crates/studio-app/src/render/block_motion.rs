@@ -11,7 +11,10 @@ use studio_domain::blocks::{
 
 use super::model;
 use crate::analysis::{Analysis, Input, SelectedMotion};
-use crate::ui::{AppWindow, BlockMotionView, PredictionFact, PredictorRow};
+use crate::preview::{BlockViewport, Preview};
+use crate::ui::{
+    AppWindow, BlockMotionView, MotionGlyph, MotionRegion, PredictionFact, PredictorRow,
+};
 
 pub(crate) fn bind(window: &AppWindow, send: impl Fn(Input) + Clone + 'static) {
     let motion = window.global::<BlockMotionView>();
@@ -41,11 +44,19 @@ pub(super) fn render(window: &AppWindow, analysis: &Analysis) {
         view.set_can_inspect_references(false);
         view.set_reference_status("".into());
         view.set_can_show_overlay(false);
+        view.set_vectors(model(Vec::new()));
+        view.set_copy_source(MotionRegion::default());
         return;
     };
     view.set_facts(model(facts(selected.prediction, selected.motion)));
     view.set_predictors(model(predictors(&selected)));
-    view.set_can_show_overlay(selected.motion.is_some());
+    let (vectors, copy_source) = analysis.overlay().picture.map_or_else(
+        || (Vec::new(), MotionRegion::default()),
+        |picture| picture_marks(&selected, picture.viewport),
+    );
+    view.set_can_show_overlay(!vectors.is_empty() || copy_source.width > 0.0);
+    view.set_vectors(model(vectors));
+    view.set_copy_source(copy_source);
     let has_frame = matches!(selected.prediction, Some(BlockPrediction::Inter { references, .. })
         if references.iter().any(|reference| matches!(reference, Some(BlockReference::Frame { .. }))));
     let references = &selected.document.references;
@@ -61,6 +72,134 @@ pub(super) fn render(window: &AppWindow, analysis: &Analysis) {
         selected.document.reference_preview_notice().unwrap_or("")
     };
     view.set_reference_status(message.into());
+}
+
+/// Updates the illustrative extent on a compact reference picture.
+pub fn render_reference(window: &AppWindow, analysis: &Analysis, preview: &Preview) {
+    window
+        .global::<BlockMotionView>()
+        .set_preview_extent(reference_extent(analysis, preview).unwrap_or_default());
+}
+
+fn reference_extent(analysis: &Analysis, preview: &Preview) -> Option<MotionRegion> {
+    let selected = analysis.selected_motion()?;
+    let position = analysis.motion_preview_position()?;
+    let BlockPrediction::Inter { references, .. } = selected.prediction? else {
+        return None;
+    };
+    let reference = (*references.get(position)?)?;
+    let motion = selected.motion?;
+    let block = selected.block.coded;
+    let origin = translated_origin(block, reference, motion, position)?;
+    let picture = preview.reference_preview()?.ok()?;
+    let viewport = BlockViewport::from_header(&picture.header)?;
+    Some(project_region(viewport, origin, block))
+}
+
+fn picture_marks(
+    selected: &SelectedMotion<'_>,
+    viewport: BlockViewport,
+) -> (Vec<MotionGlyph>, MotionRegion) {
+    let block = selected.block.coded;
+    let center = (
+        i64::from(block.x) * 8 + i64::from(block.width) * 4,
+        i64::from(block.y) * 8 + i64::from(block.height) * 4,
+    );
+    let start = viewport.project_eighths(center.0, center.1);
+    let glyph = |vector: BlockVector, label: &str| {
+        let endpoint = viewport.project_eighths(
+            center.0 + i64::from(vector.col),
+            center.1 + i64::from(vector.row),
+        );
+        let (end, mark) = clip_motion(start, endpoint)?;
+        Some(MotionGlyph {
+            line: format!(
+                "M {} {} L {} {}",
+                start.0 * 1000.0,
+                start.1 * 1000.0,
+                end.0 * 1000.0,
+                end.1 * 1000.0
+            )
+            .into(),
+            endpoint_x: end.0,
+            endpoint_y: end.1,
+            mark,
+            label: label.into(),
+        })
+    };
+    let mut copy = MotionRegion::default();
+    let vectors = match (selected.prediction, selected.motion) {
+        (
+            Some(BlockPrediction::Inter { references, .. }),
+            Some(BlockMotion::Inter { vectors, warp, .. }),
+        ) => (0..2)
+            .filter_map(|position| {
+                let BlockReference::Frame {
+                    scaled: Some(false),
+                    ..
+                } = references[position]?
+                else {
+                    return None;
+                };
+                if warp[position].is_some() {
+                    return None;
+                }
+                glyph(vectors[position]?, ["1", "2"][position])
+            })
+            .collect(),
+        (_, Some(BlockMotion::IntraBlockCopy { vector, source, .. })) => {
+            if let Some(source) = source {
+                copy = project_region(
+                    viewport,
+                    (i64::from(source.x) * 8, i64::from(source.y) * 8),
+                    source,
+                );
+            }
+            glyph(vector, "").into_iter().collect()
+        }
+        _ => Vec::new(),
+    };
+    (vectors, copy)
+}
+
+fn clip_motion(start: (f32, f32), end: (f32, f32)) -> Option<((f32, f32), bool)> {
+    if !(0.0..=1.0).contains(&start.0) || !(0.0..=1.0).contains(&start.1) {
+        return None;
+    }
+    let reach = |start: f32, end: f32| {
+        if end < 0.0 {
+            start / (start - end)
+        } else if end > 1.0 {
+            (1.0 - start) / (end - start)
+        } else {
+            1.0
+        }
+    };
+    let fraction = reach(start.0, end.0).min(reach(start.1, end.1));
+    Some((
+        (
+            start.0 + (end.0 - start.0) * fraction,
+            start.1 + (end.1 - start.1) * fraction,
+        ),
+        fraction >= 1.0,
+    ))
+}
+
+fn project_region(viewport: BlockViewport, origin: (i64, i64), shape: BlockRect) -> MotionRegion {
+    let (x, y) = viewport.project_eighths(origin.0, origin.1);
+    let (right, bottom) = viewport.project_eighths(
+        origin.0 + i64::from(shape.width) * 8,
+        origin.1 + i64::from(shape.height) * 8,
+    );
+    if x >= 1.0 || y >= 1.0 || right <= 0.0 || bottom <= 0.0 {
+        return MotionRegion::default();
+    }
+    MotionRegion {
+        x,
+        y,
+        width: right - x,
+        height: bottom - y,
+    }
 }
 
 fn predictors(selected: &SelectedMotion<'_>) -> Vec<PredictorRow> {
@@ -94,7 +233,10 @@ fn predictors(selected: &SelectedMotion<'_>) -> Vec<PredictorRow> {
                         None => "Scale unavailable",
                     };
                     detail.push(scale.to_owned());
-                    format!("Reference {list_index} · slot {slot}")
+                    format!(
+                        "Predictor {} · reference {list_index} · slot {slot}",
+                        position + 1
+                    )
                 }
                 BlockReference::Tip => {
                     detail
@@ -418,6 +560,19 @@ mod tests {
             None
         );
         assert_eq!(translated_origin(coded, reference(None), motion, 0), None);
+    }
+
+    #[test]
+    fn visual_line_stops_at_the_crop_without_marking_a_false_endpoint() {
+        assert_eq!(
+            clip_motion((0.5, 0.5), (-0.5, 1.25)),
+            Some(((0.0, 0.875), false))
+        );
+        assert_eq!(
+            clip_motion((0.25, 0.5), (0.125, 0.25)),
+            Some(((0.125, 0.25), true))
+        );
+        assert_eq!(clip_motion((-0.25, 0.5), (0.125, 0.25)), None);
     }
 
     #[test]

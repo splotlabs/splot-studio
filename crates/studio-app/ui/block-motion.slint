@@ -16,6 +16,21 @@ export struct PredictorRow {
     available: bool,
 }
 
+export struct MotionRegion {
+    x: float,
+    y: float,
+    width: float,
+    height: float,
+}
+
+export struct MotionGlyph {
+    line: string,
+    endpoint-x: float,
+    endpoint-y: float,
+    mark: bool,
+    label: string,
+}
+
 export global BlockMotionView {
     in property <bool> active;
     in property <[PredictionFact]> facts;
@@ -24,12 +39,88 @@ export global BlockMotionView {
     in property <string> reference-status;
     in property <string> preview-status;
     in property <image> preview-picture;
+    in property <MotionRegion> preview-extent;
+    in property <MotionRegion> copy-source;
+    in property <[MotionGlyph]> vectors;
     in property <bool> can-show-overlay;
     in property <bool> show-overlay;
     callback inspect-references();
     callback preview-reference(int);
     callback follow-reference(int);
     callback set-overlay(bool);
+}
+
+component RegionOutline inherits Rectangle {
+    in property <MotionRegion> region;
+    in property <length> frame-width;
+    in property <length> frame-height;
+    x: root.frame-width * root.region.x;
+    y: root.frame-height * root.region.y;
+    width: root.frame-width * root.region.width;
+    height: root.frame-height * root.region.height;
+    border-width: 2px;
+    border-color: Tokens.on-stage;
+    accessible-role: none;
+
+    Rectangle {
+        x: 2px;
+        y: 2px;
+        width: max(0px, parent.width - 4px);
+        height: max(0px, parent.height - 4px);
+        border-width: 1px;
+        border-color: Tokens.stage;
+    }
+}
+
+export component MotionDrawing inherits Rectangle {
+    clip: true;
+    accessible-role: none;
+
+    if BlockMotionView.copy-source.width > 0: RegionOutline {
+        region: BlockMotionView.copy-source;
+        frame-width: root.width;
+        frame-height: root.height;
+    }
+
+    for glyph in BlockMotionView.vectors: Rectangle {
+        Path {
+            width: parent.width;
+            height: parent.height;
+            viewbox-width: 1000;
+            viewbox-height: 1000;
+            commands: glyph.line;
+            stroke: Tokens.stage;
+            stroke-width: 4px;
+        }
+        Path {
+            width: parent.width;
+            height: parent.height;
+            viewbox-width: 1000;
+            viewbox-height: 1000;
+            commands: glyph.line;
+            stroke: Tokens.on-stage;
+            stroke-width: 2px;
+        }
+        if glyph.mark: Rectangle {
+            x: parent.width * glyph.endpoint-x - self.width / 2;
+            y: parent.height * glyph.endpoint-y - self.height / 2;
+            width: glyph.label == "" ? 7px : 16px;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: Tokens.on-stage;
+            border-color: Tokens.stage;
+            border-width: 1px;
+
+            if glyph.label != "": Text {
+                color: Tokens.stage;
+                text: glyph.label;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                font-size: Tokens.type-caption * 1rem;
+                accessible-role: none;
+            }
+        }
+    }
 }
 
 export component BlockMotionPane inherits VerticalLayout {
@@ -44,6 +135,16 @@ export component BlockMotionPane inherits VerticalLayout {
             description: "Show or hide the selected block's motion on the picture.";
             clicked => { BlockMotionView.set-overlay(!BlockMotionView.show-overlay); }
         }
+    }
+
+    if BlockMotionView.show-overlay && BlockMotionView.vectors.length > 0: Caption {
+        text: "Resolved base vectors in the current luma grid.";
+        wrap: word-wrap;
+    }
+
+    if BlockMotionView.show-overlay && BlockMotionView.copy-source.width > 0: Caption {
+        text: "Direct copy source in the current picture.";
+        wrap: word-wrap;
     }
 
     VerticalLayout {
@@ -116,14 +217,40 @@ export component BlockMotionPane inherits VerticalLayout {
         accessible-live-region: polite;
     }
 
-    if BlockMotionView.preview-picture.width > 0 && BlockMotionView.preview-picture.height > 0: Image {
+    if BlockMotionView.preview-picture.width > 0 && BlockMotionView.preview-picture.height > 0: Rectangle {
         preferred-width: 240px;
         min-width: 0px;
         max-width: 240px;
         height: 136px;
-        source: BlockMotionView.preview-picture;
-        image-fit: contain;
-        accessible-role: image;
-        accessible-label: "Decoded reference preview";
+
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: BlockMotionView.preview-picture;
+            image-fit: contain;
+            accessible-role: image;
+            accessible-label: "Decoded reference preview";
+        }
+
+        if BlockMotionView.show-overlay && BlockMotionView.preview-extent.width > 0: Rectangle {
+            property <float> fit: min(parent.width / max(1, BlockMotionView.preview-picture.width) / 1px,
+                parent.height / max(1, BlockMotionView.preview-picture.height) / 1px);
+            width: BlockMotionView.preview-picture.width * self.fit * 1px;
+            height: BlockMotionView.preview-picture.height * self.fit * 1px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            clip: true;
+
+            RegionOutline {
+                frame-width: parent.width;
+                frame-height: parent.height;
+                region: BlockMotionView.preview-extent;
+            }
+        }
+    }
+
+    if BlockMotionView.show-overlay && BlockMotionView.preview-extent.width > 0: Caption {
+        text: "Illustrative footprint in the reference luma grid.";
+        wrap: word-wrap;
     }
 }

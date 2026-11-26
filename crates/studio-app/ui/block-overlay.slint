@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
 import { ComboBox } from "std-widgets.slint";
-import { BlockMotionPane, BlockMotionView } from "block-motion.slint";
+import { BlockMotionPane, BlockMotionView, MotionDrawing } from "block-motion.slint";
 import { Caption, LinkButton } from "controls.slint";
 import { FocusRing, KeyboardFocus } from "focus.slint";
 import { Tokens } from "tokens.slint";
@@ -199,6 +199,8 @@ export component BlockOverlayPanel inherits VerticalLayout {
 export component BlockDrawing inherits Rectangle {
     clip: true;
     accessible-role: none;
+
+    if BlockMotionView.active && BlockMotionView.show-overlay: MotionDrawing { }
 
     // Rust supplies only records in the bounded query that meet this crop.
     for outline in BlockOverlay.outlines: Rectangle {
