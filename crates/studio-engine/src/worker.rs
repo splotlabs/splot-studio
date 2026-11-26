@@ -210,27 +210,11 @@ fn serve<'scope>(
                 export::start(scope, outbox, id, *export, &mut job);
             }
             Command::ExportProceed => export::proceed(outbox, id),
-            Command::Cancel => match outbox.cancel(id) {
-                Cancel::Inactive => {
-                    outbox.reply(id, refusal(ErrorCode::WrongState, "no job is running"))
+            Command::Cancel => {
+                if cancel_job(outbox, id) {
+                    return (Ok(()), true);
                 }
-                Cancel::WrongExport => outbox.reply(
-                    id,
-                    refusal(
-                        ErrorCode::WrongState,
-                        "Use the request ID of the running export.",
-                    ),
-                ),
-                Cancel::Publishing => outbox.reply(
-                    id,
-                    refusal(ErrorCode::WrongState, "The export is publishing."),
-                ),
-                Cancel::Accepted => {
-                    if outbox.settle(CANCEL_GRACE) {
-                        return (Ok(()), true);
-                    }
-                }
-            },
+            }
             Command::Picture { .. }
             | Command::Play { .. }
             | Command::PictureSample { .. }
@@ -272,6 +256,17 @@ fn serve<'scope>(
         }
     };
     (result, stop_job(outbox, job))
+}
+
+fn cancel_job(outbox: &Outbox, id: u64) -> bool {
+    let message = match outbox.cancel(id) {
+        Cancel::Accepted => return outbox.settle(CANCEL_GRACE),
+        Cancel::Inactive => "no job is running",
+        Cancel::WrongExport => "Use the request ID of the running export.",
+        Cancel::Publishing => "The export is publishing.",
+    };
+    outbox.reply(id, refusal(ErrorCode::WrongState, message));
+    false
 }
 
 fn stop_job(outbox: &Outbox, job: Option<ScopedJoinHandle<'_, ()>>) -> bool {

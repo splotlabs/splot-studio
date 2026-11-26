@@ -71,6 +71,13 @@ pub struct FileId(#[cfg(unix)] (u64, u64), #[cfg(not(unix))] PathBuf);
 
 impl FileId {
     /// File identity that remains usable across a new process on this platform.
+    #[cfg_attr(
+        unix,
+        expect(
+            clippy::unnecessary_wraps,
+            reason = "other platforms can lack a stable identity"
+        )
+    )]
     pub(crate) const fn export_identity(
         &self,
         created: Option<SystemTime>,
