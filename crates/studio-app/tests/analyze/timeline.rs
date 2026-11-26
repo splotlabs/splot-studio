@@ -86,6 +86,18 @@ pub(super) fn controls(rig: &mut Rig, scratch: &Scratch) {
         timeline_snapshot(rig, scheme, scale, file_name);
     }
 
+    check_table(rig);
+
+    rig.window.global::<TimelineUi>().invoke_zoom(1);
+    rig.idle("the visible zoom range");
+    assert_eq!(rig.window.global::<TimelineUi>().get_bars().row_count(), 2);
+    check_output_order(rig);
+}
+
+fn check_table(rig: &mut Rig) {
+    use slint::language::ColorScheme;
+    use studio_app::TimelineUi;
+
     rig.window.global::<TimelineUi>().set_show_table(true);
     rig.tab_to(Key::Return, |input| {
         matches!(
@@ -105,11 +117,6 @@ pub(super) fn controls(rig: &mut Rig, scratch: &Scratch) {
         "timeline-table-keyboard-light-1x.ppm",
     );
     rig.window.global::<TimelineUi>().set_show_table(false);
-
-    rig.window.global::<TimelineUi>().invoke_zoom(1);
-    rig.idle("the visible zoom range");
-    assert_eq!(rig.window.global::<TimelineUi>().get_bars().row_count(), 2);
-    check_output_order(rig);
 }
 
 fn check_output_order(rig: &mut Rig) {
