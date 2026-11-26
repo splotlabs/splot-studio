@@ -157,7 +157,8 @@ fn cross_layer(rig: &mut Rig, scratch: &Scratch) {
     );
 
     select(rig, 1388);
-    pick(rig, 24, 24, 160, 160);
+    // AVM places the TIP block at coded luma (0, 0), size 16 × 8.
+    pick(rig, 10, 10, 160, 160);
     assert!(
         view(rig)
             .get_predictors()
