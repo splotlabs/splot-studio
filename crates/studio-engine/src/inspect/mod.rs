@@ -607,8 +607,6 @@ fn queued_request(command: &Command) -> Option<(u64, Request)> {
     })
 }
 
-/// Queues an open, or refuses it: its id must be new, and the queue must
-/// take it.
 fn queued_timeline_request(command: &Command) -> Option<(u64, Request)> {
     let (document, scan, query) = match *command {
         Command::AnalysisTimeline {
@@ -638,6 +636,8 @@ fn queued_timeline_request(command: &Command) -> Option<(u64, Request)> {
     Some((document, Request::Inspect(Query::Timeline { scan, query })))
 }
 
+/// Queues an open, or refuses it: its id must be new, and the queue must
+/// take it.
 fn queue_open<W: Write>(
     shared: &Shared<W>,
     requests: &SyncSender<Queued>,
