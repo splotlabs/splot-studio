@@ -276,3 +276,31 @@ fn disk_write_failure_stops_both_renderers() -> TestResult {
     }
     Ok(())
 }
+
+#[cfg(windows)]
+#[test]
+fn refuses_win32_report_aliases_of_an_absent_source() -> TestResult {
+    let fixture = Fixture::new()?;
+    fs::remove_file(&fixture.source)?;
+    let outcome = BatchOutcome::Failed {
+        code: AnalysisFailure::Io,
+        message: "Source removed.".into(),
+    };
+    let failed = Report {
+        source_id: None,
+        outcome: &outcome,
+        findings: &[],
+        ..fixture.report()
+    };
+    for name in ["sample.av2.", "sample.av2 ", "sample.av2:$DATA"] {
+        let alias = fixture.directory.path().join(name);
+        let result = export(&alias, &failed, ReportFormat::Json, &|_| Ok(()), &|| false);
+        assert!(matches!(
+            result,
+            Err(Stop::Failed(failure)) if failure.code == FailureCode::Output
+        ));
+        assert!(!fixture.source.exists());
+    }
+    assert_eq!(fs::read_dir(fixture.directory.path())?.count(), 0);
+    Ok(())
+}

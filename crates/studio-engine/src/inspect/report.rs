@@ -128,6 +128,15 @@ pub(super) fn export(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<u64, Stop> {
     check_cancelled(cancelled)?;
+    #[cfg(windows)]
+    if destination.file_name().is_some_and(|name| {
+        let name = name.to_string_lossy();
+        name.ends_with([' ', '.']) || name.contains(':')
+    }) {
+        return Err(output::output(
+            "Choose a report name without trailing spaces, periods, or a colon.",
+        ));
+    }
     check_source_slot(report.source, destination)?;
     let metadata = Metadata::new(report)?;
     let mut temp = match report.source_id {
@@ -145,6 +154,15 @@ pub(super) fn export(
     }
     temp.as_file().sync_all().map_err(write_failed)?;
     check_cancelled(cancelled)?;
+    #[cfg(windows)]
+    if let Some(name) = destination.file_name() {
+        let name = name.to_string_lossy();
+        if name.ends_with([' ', '.']) || name.contains(':') {
+            return Err(output::output(
+                "Choose a report name without trailing spaces, periods, or a colon.",
+            ));
+        }
+    }
     check_source_slot(report.source, destination)?;
     output::publish(temp, destination)
 }
