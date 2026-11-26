@@ -261,6 +261,9 @@ impl Activity {
             // name, which the queue records, and live pictures, which the
             // preview shows.
             Event::Hello { .. }
+            | Event::OptionsDescribed { .. }
+            | Event::OptionsResolved { .. }
+            | Event::OptionsFailed { .. }
             | Event::Probed { .. }
             | Event::Working { .. }
             | Event::Picture { .. }
