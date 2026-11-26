@@ -30,26 +30,31 @@
 //! A media source runs `ffprobe` with a timeout.
 
 mod cache;
+mod document;
 mod result;
 mod source;
 
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use studio_domain::preview::{
-    ColorBasis, MAX_PICTURE_HEIGHT, MAX_PICTURE_WIDTH, MediaTime, PictureBox, PictureFailure,
-    PictureFrame, PictureHeader, PictureOrigin, PictureStage, PictureTarget, PictureView,
+    ColorBasis, ColorMatrix, GrainPolicy, MAX_PICTURE_HEIGHT, MAX_PICTURE_WIDTH, MAX_PICTURE_ZOOM,
+    MediaTime, PictureBox, PictureFailure, PictureFrame, PictureHeader, PictureOptions,
+    PictureOrigin, PictureStage, PictureSurface, PictureTarget, PictureView, SamplePlane,
+    SamplePoint,
 };
 use studio_domain::protocol::{
     Command, Envelope, ErrorCode, Event, ProtocolError, decode, read_frame, write_message,
     write_picture,
 };
 
+use self::document::{DocumentPicture, Recent};
 use crate::job::{JOB_STACK_BYTES, Stop};
 use crate::media::process::Killer;
 use crate::picture::{self, Frame};
@@ -138,30 +143,59 @@ fn serve(input: &mut impl Read, shared: &Shared) -> Result<(), ProtocolError> {
                 );
                 continue;
             }
-            Command::DescribeOptions { .. }
-            | Command::ResolveOptions { .. }
-            | Command::Probe { .. }
-            | Command::Start { .. }
-            | Command::StartChecked { .. }
-            | Command::ConfirmPolicy
-            | Command::Cancel
-            | Command::AnalysisOpen { .. }
-            | Command::AnalysisCancel { .. }
-            | Command::AnalysisPage { .. }
-            | Command::AnalysisLocate { .. }
-            | Command::AnalysisBytes { .. }
-            | Command::AnalysisSyntax { .. }
-            | Command::AnalysisSyntaxPage { .. }
-            | Command::AnalysisValidate { .. }
-            | Command::AnalysisCancelValidation { .. }
-            | Command::AnalysisFindings { .. }
-            | Command::BatchCheckSettings { .. }
-            | Command::BatchValidate { .. }
-            | Command::BatchCancel { .. }
-            | Command::BatchFindings { .. }
-            | Command::BatchExport { .. }
-            | Command::BatchForget { .. }
-            | Command::AnalysisClose { .. } => {
+            Command::Picture {
+                generation,
+                target,
+                frame,
+                view,
+                options,
+                size,
+            } => Request::Picture {
+                generation,
+                target,
+                frame,
+                display: Display {
+                    view,
+                    size,
+                    options,
+                },
+            },
+            Command::Play {
+                generation,
+                target,
+                from,
+                view,
+                options,
+                size,
+            } => Request::Play {
+                generation,
+                target,
+                from,
+                display: Display {
+                    view,
+                    size,
+                    options,
+                },
+            },
+            Command::PictureSample {
+                generation,
+                target,
+                ordinal,
+                grain,
+                point,
+            } => Request::Sample {
+                generation,
+                target,
+                ordinal,
+                grain,
+                point,
+            },
+            Command::StopPlayback => Request::Stop,
+            Command::CloseDocumentPlayback { document } => {
+                shared.close_document(document);
+                continue;
+            }
+            _ => {
                 shared.reply(
                     id,
                     refusal(
@@ -169,37 +203,6 @@ fn serve(input: &mut impl Read, shared: &Shared) -> Result<(), ProtocolError> {
                         "the preview process runs no jobs or analysis",
                     ),
                 );
-                continue;
-            }
-            Command::Picture {
-                generation,
-                target,
-                frame,
-                view,
-                size,
-            } => Request::Picture {
-                generation,
-                target,
-                frame,
-                view,
-                size,
-            },
-            Command::Play {
-                generation,
-                target,
-                from,
-                view,
-                size,
-            } => Request::Play {
-                generation,
-                target,
-                from,
-                view,
-                size,
-            },
-            Command::StopPlayback => Request::Stop,
-            Command::CloseDocumentPlayback { document } => {
-                shared.close_document(document);
                 continue;
             }
         };
@@ -221,27 +224,75 @@ enum Request {
         generation: u64,
         target: PictureTarget,
         frame: PictureFrame,
-        view: PictureView,
-        size: PictureBox,
+        display: Display,
     },
     Play {
         generation: u64,
         target: PictureTarget,
         from: u64,
-        view: PictureView,
-        size: PictureBox,
+        display: Display,
+    },
+    Sample {
+        generation: u64,
+        target: PictureTarget,
+        ordinal: u64,
+        grain: GrainPolicy,
+        point: SamplePoint,
     },
     Stop,
 }
 
 impl Request {
     fn document(&self) -> Option<u64> {
-        match self {
-            Self::Picture { target, .. } | Self::Play { target, .. } => match target {
-                PictureTarget::Document { document, .. } => Some(*document),
-                _ => None,
-            },
-            Self::Stop => None,
+        let target = match self {
+            Self::Picture { target, .. }
+            | Self::Play { target, .. }
+            | Self::Sample { target, .. } => target,
+            Self::Stop => return None,
+        };
+        match target {
+            PictureTarget::Document { document, .. } => Some(*document),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Display {
+    view: PictureView,
+    size: PictureBox,
+    options: PictureOptions,
+}
+
+impl Display {
+    fn check(self, target: &PictureTarget) -> Outcome<()> {
+        valid(self.size)?;
+        if self.options != PictureOptions::default()
+            && !matches!(target, PictureTarget::Document { .. })
+        {
+            return Err(Stopped::unavailable(
+                PictureFailure::InvalidRequest,
+                "Plane and grain controls require a document.",
+            ));
+        }
+        if let PictureView::Zoom { factor, .. } = self.view
+            && (!(2..=MAX_PICTURE_ZOOM).contains(&factor)
+                || u16::from(factor) > self.size.width.min(self.size.height))
+        {
+            return Err(Stopped::unavailable(
+                PictureFailure::InvalidRequest,
+                "The zoom factor is outside the allowed range for this picture box.",
+            ));
+        }
+        Ok(())
+    }
+
+    const fn plane(self) -> Option<SamplePlane> {
+        match self.options.surface {
+            PictureSurface::Rgb => None,
+            PictureSurface::Y => Some(SamplePlane::Y),
+            PictureSurface::U => Some(SamplePlane::U),
+            PictureSurface::V => Some(SamplePlane::V),
         }
     }
 }
@@ -626,7 +677,9 @@ fn work(shared: &Shared) {
             Work::Request(serial, request_id, request) => (serial, request_id, request),
         };
         let generation = match &request {
-            Request::Picture { generation, .. } | Request::Play { generation, .. } => *generation,
+            Request::Picture { generation, .. }
+            | Request::Play { generation, .. }
+            | Request::Sample { generation, .. } => *generation,
             Request::Stop => continue,
         };
         let context = Context {
@@ -636,38 +689,49 @@ fn work(shared: &Shared) {
             generation,
             last_progress: Cell::new(None),
         };
-        match request {
+        let (target, answer) = match request {
             Request::Picture {
-                generation,
                 target,
                 frame,
-                view,
-                size,
+                display,
+                ..
             } => {
-                let answer = previews.picture(&context, generation, &target, frame, view, size);
-                if let Err(Stopped::Unavailable(code, message)) = answer {
-                    unavailable(&context, generation, code, message);
-                }
+                let answer = previews.picture(&context, &target, frame, display);
+                (target, answer)
             }
             Request::Play {
-                generation,
                 target,
                 from,
-                view,
-                size,
-            } => previews.play(&context, generation, &target, from, view, size),
-            Request::Stop => {}
+                display,
+                ..
+            } => {
+                let answer = previews.play(&context, &target, from, display);
+                (target, answer)
+            }
+            Request::Sample {
+                target,
+                ordinal,
+                grain,
+                point,
+                ..
+            } => {
+                let answer = previews.sample(&context, &target, ordinal, grain, point);
+                (target, answer)
+            }
+            Request::Stop => continue,
+        };
+        if let Err(Stopped::Unavailable(code, message)) = answer {
+            if code == PictureFailure::SourceChanged {
+                previews.recent.forget_matching(|entry| *entry == target);
+            }
+            if !context.superseded() {
+                context.event(Event::PictureUnavailable {
+                    generation,
+                    code,
+                    message,
+                });
+            }
         }
-    }
-}
-
-fn unavailable(context: &Context<'_>, generation: u64, code: PictureFailure, message: String) {
-    if !context.superseded() {
-        context.event(Event::PictureUnavailable {
-            generation,
-            code,
-            message,
-        });
     }
 }
 
@@ -681,7 +745,7 @@ enum Decoded {
     },
     /// A Splot decoder picture.
     Picture(Box<splot_decode::Picture>),
-    Document(Box<result::DocumentPicture>),
+    Document(Rc<DocumentPicture>),
 }
 
 impl Decoded {
@@ -793,10 +857,33 @@ impl Target {
     }
 
     /// Makes `index` the next frame [`Self::next`] returns.
-    fn seek(&mut self, context: &Context<'_>, index: u64) -> Outcome<()> {
+    fn prepare(&mut self, grain: GrainPolicy) {
+        if let Self::Result(result) = self {
+            result.choose_grain(grain);
+        }
+    }
+
+    fn seek(&mut self, context: &Context<'_>, index: u64, grain: GrainPolicy) -> Outcome<()> {
         match self {
             Self::Source(s) => s.seek(context, index),
-            Self::Result(r) => r.seek(context, index),
+            Self::Result(r) => r.seek(context, index, grain),
+        }
+    }
+
+    fn decode_at(
+        &mut self,
+        context: &Context<'_>,
+        index: u64,
+        grain: GrainPolicy,
+    ) -> Outcome<Decoded> {
+        self.seek(context, index, grain)?;
+        match self.next(context)? {
+            Some((at, decoded)) if at == index => Ok(decoded),
+            Some((at, _)) => Err(Stopped::unavailable(
+                PictureFailure::Unreadable,
+                format!("The decoder returned output {at}. Expected output {index}."),
+            )),
+            None => Err(out_of_range(index, self.frame_count())),
         }
     }
 
@@ -810,7 +897,11 @@ impl Target {
 
     /// The representative frame: one second in, or the last of a shorter
     /// stream. Without a known count the frames up to it are read.
-    fn poster(&mut self, context: &Context<'_>) -> Outcome<(u64, Option<Decoded>)> {
+    fn poster(
+        &mut self,
+        context: &Context<'_>,
+        grain: GrainPolicy,
+    ) -> Outcome<(u64, Option<Decoded>)> {
         let wanted = self.second();
         if let Some(count) = self.frame_count() {
             return match count.checked_sub(1) {
@@ -821,7 +912,7 @@ impl Target {
                 )),
             };
         }
-        self.seek(context, 0)?;
+        self.seek(context, 0, grain)?;
         let mut last = None;
         while last.as_ref().is_none_or(|(index, _)| *index < wanted) {
             match self.next(context)? {
@@ -849,6 +940,7 @@ struct Previews {
     /// Open files, the most recently used last.
     targets: Vec<Entry>,
     cache: cache::Cache<PictureTarget>,
+    recent: Recent,
 }
 
 /// The open entry for `target`, opened or checked now.
@@ -894,102 +986,134 @@ impl Previews {
         let matches = |target: &PictureTarget| matches!(target, PictureTarget::Document { document: id, .. } if *id == document);
         self.targets.retain(|entry| !matches(&entry.key));
         self.cache.forget_matching(matches);
+        self.recent.forget_matching(matches);
     }
 
     fn picture(
         &mut self,
         context: &Context<'_>,
-        generation: u64,
         target: &PictureTarget,
         frame: PictureFrame,
-        view: PictureView,
-        size: PictureBox,
+        display: Display,
     ) -> Outcome<()> {
-        valid(size)?;
+        let grain = display.options.grain;
+        self.recent.prepare(target, grain);
+        display.check(target)?;
         let entry = open(&mut self.targets, &mut self.cache, target, context)?;
+        let open = &mut entry.target;
+        open.prepare(grain);
         let (index, decoded) = match (frame, entry.poster) {
             (PictureFrame::Index { index }, _) | (PictureFrame::Poster, Some(index)) => {
                 (index, None)
             }
             (PictureFrame::Poster, None) => {
-                let (index, decoded) = entry.target.poster(context)?;
+                let (index, decoded) = open.poster(context, grain)?;
                 entry.poster = Some(index);
                 (index, decoded)
             }
         };
-        let open = &mut entry.target;
-        if let Some((mut header, pixels)) = self.cache.get(target, index, view, size) {
-            header.generation = generation;
+        if let Some((mut header, pixels)) = self.cache.get(target, index, display) {
+            header.generation = context.generation;
             header.frame_count = open.frame_count();
             open.check_document()?;
             context.picture(header, pixels);
             return Ok(());
         }
-        let decoded = if let Some(decoded) = decoded {
-            decoded
-        } else {
-            open.seek(context, index)?;
-            match open.next(context)? {
-                Some((at, decoded)) if at == index => decoded,
-                Some((at, _)) => {
-                    return Err(Stopped::unavailable(
-                        PictureFailure::Unreadable,
-                        format!("frame {at} was decoded where frame {index} was expected"),
-                    ));
-                }
-                None => return Err(out_of_range(index, open.frame_count())),
-            }
+        let decoded = match decoded.or_else(|| self.recent.get(target, index, grain)) {
+            Some(decoded) => decoded,
+            None => open.decode_at(context, index, grain)?,
         };
         context.check()?;
-        let (header, pixels) = render(open, index, &decoded, view, size, generation)?;
         open.check_document()?;
-        self.cache.put(target.clone(), view, size, &header, &pixels);
+        self.recent.keep(target, grain, &decoded);
+        let (header, pixels) = render(open, index, &decoded, display, context.generation)?;
+        open.check_document()?;
+        self.cache.put(target.clone(), display, &header, &pixels);
         context.picture(header, pixels);
+        Ok(())
+    }
+
+    fn sample(
+        &mut self,
+        context: &Context<'_>,
+        target: &PictureTarget,
+        ordinal: u64,
+        grain: GrainPolicy,
+        point: SamplePoint,
+    ) -> Outcome<()> {
+        self.recent.prepare(target, grain);
+        if !matches!(target, PictureTarget::Document { .. }) {
+            return Err(Stopped::unavailable(
+                PictureFailure::InvalidRequest,
+                "Select a document to inspect samples.",
+            ));
+        }
+        let open = &mut open(&mut self.targets, &mut self.cache, target, context)?.target;
+        open.prepare(grain);
+        let decoded = match self.recent.get(target, ordinal, grain) {
+            Some(decoded) => decoded,
+            None => open.decode_at(context, ordinal, grain)?,
+        };
+        let Decoded::Document(picture) = &decoded else {
+            return Err(Stopped::unavailable(
+                PictureFailure::Unreadable,
+                "The decoder did not return a document picture.",
+            ));
+        };
+        context.check()?;
+        open.check_document()?;
+        self.recent.keep(target, grain, &decoded);
+        let value = picture.sample(point)?;
+        context.event(Event::PictureSample {
+            generation: context.generation,
+            ordinal,
+            grain,
+            point,
+            value,
+        });
         Ok(())
     }
 
     fn play(
         &mut self,
         context: &Context<'_>,
-        generation: u64,
         target: &PictureTarget,
         from: u64,
-        view: PictureView,
-        size: PictureBox,
-    ) {
+        display: Display,
+    ) -> Outcome<()> {
         let mut last = None;
-        let played = self.playback(context, generation, target, from, view, size, &mut last);
+        let played = self.playback(context, target, from, display, &mut last);
         match played {
-            Err(Stopped::Unavailable(code, message))
+            Err(error @ Stopped::Unavailable(..))
                 if last.is_none() || matches!(target, PictureTarget::Document { .. }) =>
             {
-                unavailable(context, generation, code, message);
+                Err(error)
             }
-            // Ended, stopped, superseded, or failed after some frames.
             _ => {
                 if !context.shared.lock().closed {
                     context.event(Event::PlaybackEnded {
-                        generation,
+                        generation: context.generation,
                         frame: last,
                     });
                 }
+                Ok(())
             }
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn playback(
         &mut self,
         context: &Context<'_>,
-        generation: u64,
         target: &PictureTarget,
         from: u64,
-        view: PictureView,
-        size: PictureBox,
+        display: Display,
         last: &mut Option<u64>,
     ) -> Outcome<()> {
-        valid(size)?;
+        let grain = display.options.grain;
+        self.recent.prepare(target, grain);
+        display.check(target)?;
         let open = &mut open(&mut self.targets, &mut self.cache, target, context)?.target;
+        open.prepare(grain);
         let mut clock = if open.origin() == PictureOrigin::Document {
             PlayClock::Document(DocumentClock::default())
         } else if let Some(start) = open.time(from) {
@@ -1000,7 +1124,7 @@ impl Previews {
                 "The stream has no playback timing. Provide the source for an Annex B result.",
             ));
         };
-        open.seek(context, from)?;
+        open.seek(context, from, grain)?;
         let started = Instant::now();
         let mut shown = started;
         // The newest frame that was skipped as late. Playback must still end
@@ -1010,8 +1134,10 @@ impl Previews {
             context.check()?;
             let Some((index, decoded)) = open.next(context)? else {
                 if let Some((index, decoded)) = skipped.take() {
-                    let (header, pixels) = render(open, index, &decoded, view, size, generation)?;
+                    let (header, pixels) =
+                        render(open, index, &decoded, display, context.generation)?;
                     open.check_document()?;
+                    self.recent.keep(target, grain, &decoded);
                     context.picture(header, pixels);
                     *last = Some(index);
                 }
@@ -1032,7 +1158,8 @@ impl Previews {
                 continue;
             }
             skipped = None;
-            let (header, pixels) = render(open, index, &decoded, view, size, generation)?;
+            let (header, pixels) = render(open, index, &decoded, display, context.generation)?;
+            self.recent.keep(target, grain, &decoded);
             drop(decoded);
             if !context.wait_until(due) {
                 return Err(Stopped::Superseded);
@@ -1137,8 +1264,7 @@ fn render(
     open: &Target,
     index: u64,
     decoded: &Decoded,
-    view: PictureView,
-    size: PictureBox,
+    display: Display,
     generation: u64,
 ) -> Outcome<(PictureHeader, Vec<u8>)> {
     let frame = decoded.frame().ok_or_else(|| {
@@ -1147,18 +1273,51 @@ fn render(
             "the frame's planes are inconsistent",
         )
     })?;
-    let basis = open.basis(&frame, decoded)?;
-    let (w, h) = frame.size();
-    let rendered = picture::render(&frame, basis, view, size);
-    let (time, output) = match decoded {
-        Decoded::Document(picture) => (picture.time, Some(picture.output)),
-        _ => (open.time(index), None),
+    let Display {
+        view,
+        size,
+        options,
+    } = display;
+    let (rendered, (w, h), basis) = if let Some(channel) = display.plane() {
+        let plane = frame.plane(channel).ok_or_else(|| {
+            Stopped::unavailable(
+                PictureFailure::Unsupported,
+                "The picture has no selected plane.",
+            )
+        })?;
+        let rendered = picture::render_plane(plane, frame.bit_depth, view, size);
+        let basis = ColorBasis {
+            matrix: ColorMatrix::Monochrome,
+            assumed: false,
+        };
+        (rendered, plane.size(), basis)
+    } else {
+        let basis = open.basis(&frame, decoded)?;
+        (
+            picture::render(&frame, basis, view, size),
+            frame.size(),
+            basis,
+        )
+    };
+    let (time, output, document_info) = match decoded {
+        Decoded::Document(picture) => {
+            let info = picture.info().ok_or_else(|| {
+                Stopped::unavailable(
+                    PictureFailure::Unreadable,
+                    "The decoder returned invalid geometry.",
+                )
+            })?;
+            (picture.time, Some(picture.output), Some(info))
+        }
+        _ => (open.time(index), None, None),
     };
     let header = PictureHeader {
         generation,
         origin: open.origin(),
         frame: index,
         output,
+        options,
+        document_info,
         time,
         frame_count: open.frame_count(),
         width: rendered.width,

@@ -117,6 +117,7 @@ impl Preview {
                 target: target.clone(),
                 frame,
                 view,
+                options: studio_domain::preview::PictureOptions::default(),
                 size,
             },
         )?;
@@ -941,6 +942,7 @@ fn stale_requests_are_dropped_and_the_newest_wins() -> TestResult {
                     index: (generation * 7) % 30,
                 },
                 view: PictureView::Fit,
+                options: studio_domain::preview::PictureOptions::default(),
                 size: BIG,
             },
         )?;
@@ -1021,6 +1023,7 @@ fn play(generation: u64, target: &PictureTarget, from: u64) -> Command {
         target: target.clone(),
         from,
         view: PictureView::Fit,
+        options: studio_domain::preview::PictureOptions::default(),
         size: BIG,
     }
 }
@@ -1113,6 +1116,7 @@ fn playback_starts_stops_and_ends() -> TestResult {
             target: target.clone(),
             frame: PictureFrame::Index { index: 1 },
             view: NATIVE,
+            options: studio_domain::preview::PictureOptions::default(),
             size: BIG,
         },
     )?;
