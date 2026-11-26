@@ -304,9 +304,6 @@ impl Session {
 
     fn save_prepared(&mut self, id: u64, now: Instant) -> Outcome {
         let Some(writer) = &self.journal else {
-            if self.state.journal_problem().is_some() || self.state.save_error().is_some() {
-                return self.journal_failed(id, "The queue journal is unavailable.".into(), now);
-            }
             return self.start_prepared(id, now);
         };
         let journal = journal::snapshot(
