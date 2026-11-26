@@ -15,7 +15,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use splot_encode::ivf::IvfWriter;
 use splot_encode::{Config, Packet};
@@ -62,36 +62,37 @@ pub(crate) trait ExportControl {
 
 /// Which file a path names.
 ///
-/// Unix compares device and inode, so hard links and symlinks to the source
-/// are caught. Windows compares canonical paths, which resolves symlinks but
-/// not hard links; since an existing destination is refused anyway, a missed
-/// hard link is reported as [`FailureCode::DestinationExists`], never written.
+/// Unix compares device and inode. Windows compares volume and file index.
+/// These identities also detect a hard link to the opened source.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileId(#[cfg(unix)] (u64, u64), #[cfg(not(unix))] PathBuf);
+pub struct FileId(
+    #[cfg(any(unix, windows))] (u64, u64),
+    #[cfg(not(any(unix, windows)))] PathBuf,
+);
 
 impl FileId {
     /// File identity that remains usable across a new process on this platform.
     #[cfg_attr(
-        unix,
+        any(unix, windows),
         expect(
             clippy::unnecessary_wraps,
             reason = "other platforms can lack a stable identity"
         )
     )]
-    pub(crate) const fn export_identity(
+    pub(crate) fn export_identity(
         &self,
         created: Option<SystemTime>,
     ) -> Option<ExportTempIdentity> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let (device, inode) = self.0;
             Some(ExportTempIdentity {
                 device,
                 inode,
-                created,
+                created: created.filter(|time| *time >= UNIX_EPOCH),
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = created;
             None
@@ -101,7 +102,7 @@ impl FileId {
     /// The identity of the already opened `file` at `path`.
     ///
     /// # Errors
-    /// Any error from reading its metadata or canonicalizing `path`.
+    /// Any error from reading its identity.
     #[allow(unused_variables)] // each platform reads one of the two arguments
     pub fn of_file(file: &File, path: &Path) -> io::Result<Self> {
         #[cfg(unix)]
@@ -110,16 +111,21 @@ impl FileId {
             let metadata = file.metadata()?;
             Ok(Self((metadata.dev(), metadata.ino())))
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let info = winapi_util::file::information(file)?;
+            Ok(Self((info.volume_serial_number(), info.file_index())))
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             Ok(Self(fs::canonicalize(path)?))
         }
     }
 
-    /// The identity of the file `path` names, following symlinks.
+    /// The identity of the file or directory `path` names, following symlinks.
     ///
     /// # Errors
-    /// Any error from reading its metadata or canonicalizing `path`.
+    /// Any error from opening `path` or reading its identity.
     pub fn of_path(path: &Path) -> io::Result<Self> {
         #[cfg(unix)]
         {
@@ -127,7 +133,12 @@ impl FileId {
             let metadata = fs::metadata(path)?;
             Ok(Self((metadata.dev(), metadata.ino())))
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let handle = winapi_util::Handle::from_path_any(path)?;
+            Self::of_file(handle.as_file(), path)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             Ok(Self(fs::canonicalize(path)?))
         }
@@ -469,6 +480,35 @@ mod tests {
 #[cfg(test)]
 mod publication_tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_identities_follow_open_handles_and_hard_links() -> io::Result<()> {
+        let scratch = tempfile::tempdir()?;
+        let source = scratch.path().join("source.obu");
+        let link = scratch.path().join("link.obu");
+        let other = scratch.path().join("other.obu");
+        fs::write(&source, b"source")?;
+        fs::write(&other, b"other")?;
+        fs::hard_link(&source, &link)?;
+        let opened = File::open(&source)?;
+        let id = FileId::of_file(&opened, &source)?;
+        assert_eq!(FileId::of_path(&source)?, id);
+        assert_eq!(FileId::of_path(&link)?, id);
+        assert_ne!(FileId::of_path(&other)?, id);
+        assert!(
+            matches!(check_destination(&link, &id), Err(Stop::Failed(failure))
+            if failure.code == FailureCode::SourceIsDestination)
+        );
+        let directory = FileId::of_path(scratch.path())?;
+        assert_ne!(directory, id);
+        assert!(
+            directory
+                .export_identity(scratch.path().metadata()?.created().ok())
+                .is_some()
+        );
+        Ok(())
+    }
 
     #[test]
     fn a_post_rename_sync_failure_preserves_the_published_file()

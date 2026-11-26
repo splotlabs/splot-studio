@@ -886,7 +886,7 @@ mod tests {
         assert!(export.destinations.iter().all(|plan| plan.temp.is_none()));
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn cancellation_preserves_a_replacement_at_a_registered_path() {
         let fixture = Fixture::new();
