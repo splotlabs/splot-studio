@@ -1212,9 +1212,9 @@ fn retry_picks_a_new_name_when_the_destination_now_exists() {
     app.fail(id, FailureCode::DestinationExists);
     app.apply(Intent::PresetEdited(1));
     app.disk.0.push(abs("/m/a.ivf"));
-    let update = app.apply(Intent::ConvertRequested);
-    let effects = app.answer(update, ready);
-    let (_, job) = only_start(&effects);
+    let retry = app.apply(Intent::RowAction(0));
+    app.answer(retry, ready);
+    let (_, job) = only_start(&app.apply(Intent::ConvertRequested).effects);
     assert_eq!(dest_of(&job), abs("/m/a (2).ivf"));
     assert_eq!(job.settings, original.settings);
     assert_eq!(job.fingerprint, original.fingerprint);
