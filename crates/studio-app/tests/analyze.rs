@@ -1001,7 +1001,7 @@ fn timeline_controls(rig: &mut Rig, scratch: &Scratch) {
     }
 
     rig.window.global::<TimelineUi>().set_show_table(true);
-    rig.tab_to(Key::Space, |input| {
+    rig.tab_to(Key::Return, |input| {
         matches!(
             input,
             Input::TimelineSelect(studio_domain::timeline::TimelineTarget::Coded { .. })
