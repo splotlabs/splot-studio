@@ -573,6 +573,59 @@ fn long_stream(path: &Path) -> std::io::Result<()> {
     fs::write(path, bytes)
 }
 
+#[test]
+fn progressive_open_serves_pages_before_its_terminal_reply() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("long.obu");
+    long_stream(&path)?;
+    let mut inspect = Inspect::spawn()?;
+    let [open, page] = inspect.send(vec![
+        Command::AnalysisOpenProgressive {
+            document: 1,
+            source: WirePath::from_path(&path),
+        },
+        Command::AnalysisPage {
+            document: 1,
+            filter: RowFilter::default(),
+            first: 0,
+            count: 1,
+        },
+    ])?[..] else {
+        return Err("Expected two request IDs.".into());
+    };
+
+    let partial = inspect.next()?;
+    assert_eq!(partial.request_id, open);
+    assert!(matches!(
+        partial.body,
+        Event::AnalysisOpenProgress { document: 1, summary }
+            if summary.outcome == ScanOutcome::Scanning && summary.elements > 0 &&
+                summary.digest.is_none()
+    ));
+    let response = inspect.next()?;
+    assert_eq!(response.request_id, page);
+    assert!(matches!(
+        response.body,
+        Event::AnalysisPage { document: 1, total, rows, .. }
+            if total > 0 && rows.len() == 1
+    ));
+    let complete = loop {
+        let response = inspect.next()?;
+        assert_eq!(response.request_id, open);
+        match response.body {
+            Event::AnalysisOpenProgress { .. } => {}
+            Event::AnalysisOpened {
+                document: 1,
+                summary,
+            } => break summary,
+            other => return Err(format!("Unexpected open reply {other:?}.").into()),
+        }
+    };
+    assert_eq!(complete, inspect.open(2, &path)?);
+    assert_eq!(complete.outcome, ScanOutcome::Complete);
+    Ok(())
+}
+
 /// Whether the document is open after a cancel answered `cancel` and its
 /// open answered `open`.
 fn kept_after_cancel(cancel: &Event, open: &Event) -> Result<bool, String> {

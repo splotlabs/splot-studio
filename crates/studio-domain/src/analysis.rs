@@ -341,6 +341,8 @@ pub struct LayerCount {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ScanOutcome {
+    /// The scan continues. Counts describe the prefix scanned so far.
+    Scanning,
     /// Every byte belongs to a parsed element.
     Complete,
     /// The end of the file was reached, but some regions did not parse.

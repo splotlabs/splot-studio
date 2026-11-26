@@ -227,6 +227,7 @@ fn serve<'scope>(
                 );
             }
             Command::AnalysisOpen { .. }
+            | Command::AnalysisOpenProgressive { .. }
             | Command::AnalysisCancel { .. }
             | Command::AnalysisPage { .. }
             | Command::AnalysisLocate { .. }

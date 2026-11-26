@@ -39,7 +39,7 @@ use crate::validation::{
 };
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -297,6 +297,17 @@ pub enum Command {
         /// process.
         document: u64,
         /// The file. It is never modified.
+        source: WirePath,
+    },
+    /// Inspect process only. Opens a read-only document and scans its framing.
+    /// If the scan continues after the first slice, the engine sends
+    /// [`Event::AnalysisOpenProgress`]. Page, locate and byte requests can use
+    /// the document after that event. The final reply is [`Event::AnalysisOpened`]
+    /// or [`Event::AnalysisFailed`].
+    AnalysisOpenProgressive {
+        /// A document ID greater than each previously accepted ID.
+        document: u64,
+        /// The source file.
         source: WirePath,
     },
     /// Inspect process only. Stops the [`Command::AnalysisOpen`] of
@@ -633,6 +644,13 @@ pub enum Event {
     Failed {
         /// Why.
         failure: Failure,
+    },
+    /// An interim reply to [`Command::AnalysisOpenProgressive`].
+    AnalysisOpenProgress {
+        /// The document.
+        document: u64,
+        /// Facts found so far.
+        summary: DocumentSummary,
     },
     /// Answers [`Command::AnalysisOpen`]: the document is open.
     AnalysisOpened {
