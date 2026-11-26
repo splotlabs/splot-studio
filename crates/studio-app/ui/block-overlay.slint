@@ -160,6 +160,8 @@ export component BlockOverlayPanel inherits VerticalLayout {
                 }
 
                 if row.selected: Rectangle {
+                    x: 0px;
+                    y: 0px;
                     width: 3px;
                     height: parent.height;
                     background: Tokens.accent;
@@ -237,8 +239,9 @@ export component BlockDrawing inherits Rectangle {
         if outline.label != "" && parent.width >= 30px && parent.height >= 18px: Rectangle {
             x: 2phx;
             y: 2phx;
-            width: min(parent.width - 4phx, label.preferred-width + 6px);
-            height: min(parent.height - 4phx, label.preferred-height + 2px);
+            width: label.preferred-width + 6px;
+            height: label.preferred-height + 2px;
+            visible: self.width <= parent.width - 4phx && self.height <= parent.height - 4phx;
             border-radius: 2px;
             background: #101015e6;
             accessible-role: none;
