@@ -192,14 +192,7 @@ fn serve<'scope>(
                 source,
                 video_stream,
             } => {
-                let event = match source.to_path_buf() {
-                    Ok(path) => match source::probe(&path, video_stream) {
-                        Ok(facts) => Event::Probed { facts },
-                        Err(stop) => failed(stop),
-                    },
-                    Err(e) => failed(Stop::failed(FailureCode::InvalidSource, e.to_string())),
-                };
-                outbox.reply(id, event);
+                outbox.reply(id, probe(&source, video_stream));
             }
             Command::Start { job: spec, live } => {
                 if job.is_some() {
@@ -289,6 +282,16 @@ struct Resolution {
     settings: OptionRequest,
     first: u32,
     count: u32,
+}
+
+fn probe(source: &studio_domain::job::WirePath, video_stream: Option<u32>) -> Event {
+    match source.to_path_buf() {
+        Ok(path) => match source::probe(&path, video_stream) {
+            Ok(facts) => Event::Probed { facts },
+            Err(stop) => failed(stop),
+        },
+        Err(e) => failed(Stop::failed(FailureCode::InvalidSource, e.to_string())),
+    }
 }
 
 fn hello() -> Event {

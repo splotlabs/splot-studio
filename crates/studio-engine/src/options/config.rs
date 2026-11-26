@@ -475,7 +475,14 @@ fn choice(value: &str) -> OptionValue {
 
 pub(super) fn error(config: &Config, error: &Error) -> FieldError {
     let field = match error {
-        Error::InvalidDimensions { .. } => "width".into(),
+        Error::InvalidDimensions { width, .. } => {
+            if (1..=splot_encode::MAX_FRAME_DIMENSION).contains(width) {
+                "height"
+            } else {
+                "width"
+            }
+            .into()
+        }
         Error::UnsupportedChroma { .. } => "chroma".into(),
         Error::InvalidResize { .. } => "resize_denominator".into(),
         Error::InvalidCrop { .. } => "crop".into(),
