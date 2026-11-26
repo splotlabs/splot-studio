@@ -68,9 +68,8 @@ impl PictureBox {
 pub enum PictureView {
     /// The whole frame, scaled down to fit the box (never up), aspect kept.
     Fit,
-    /// Frame pixels one to one: the box-sized region whose top-left corner is
-    /// at `x`, `y` in luma pixels. The engine moves an origin that would leave
-    /// the frame back inside it and reports the origin it used.
+    /// Show one visible sample per physical pixel. The origin uses coordinates
+    /// in the selected surface. The engine reports the origin after clamping.
     Native {
         /// Left edge in the visible grid of the selected surface.
         x: u32,

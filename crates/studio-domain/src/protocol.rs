@@ -941,6 +941,8 @@ mod tests {
         PictureHeader {
             generation: 3,
             origin: PictureOrigin::Live,
+            options: PictureOptions::default(),
+            document_info: None,
             output: None,
             frame: 9,
             time: None,
