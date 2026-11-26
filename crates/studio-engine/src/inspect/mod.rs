@@ -23,6 +23,7 @@ mod validation;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{Read, Write};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -205,6 +206,7 @@ impl EvidenceTask {
 enum EvidenceResult {
     Validation(ValidationResult),
     Identity(Result<(), Refusal>),
+    Aborted,
 }
 
 impl EvidenceResult {
@@ -217,6 +219,10 @@ impl EvidenceResult {
             Self::Identity(result) => {
                 let summary = doc.complete_identity(id, result)?;
                 Ok(Event::AnalysisIdentityScanned { document, summary: Box::new(summary) })
+            }
+            Self::Aborted => {
+                doc.drop_identity(id);
+                Err(Refusal::new(AnalysisFailure::Io, "The evidence thread stopped."))
             }
         }
     }
@@ -717,7 +723,11 @@ fn work<'scope, W: Write + Send>(
                             .name("studio-inspect-evidence".to_owned())
                             .stack_size(JOB_STACK_BYTES)
                             .spawn_scoped(scope, move || {
-                                let result = task.run(&|| shared.cancelled(operation));
+                                // Always wake the scheduler, even if the codec unwinds.
+                                let result = catch_unwind(AssertUnwindSafe(|| {
+                                    task.run(&|| shared.cancelled(operation))
+                                }))
+                                .unwrap_or(EvidenceResult::Aborted);
                                 let _ = replies.send((id, document, Request::EvidenceDone(Box::new(result))));
                             });
                         match job {
