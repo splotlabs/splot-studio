@@ -263,7 +263,17 @@ fn progressive_scan_keeps_rows_available_through_cancel() {
             summary: first,
         },
     );
-    Engine { rows: stream(4) }.settle(&mut analysis, effects);
+    for effect in effects {
+        let available = if matches!(effect.command, Command::AnalysisBytes { .. }) {
+            20
+        } else {
+            4
+        };
+        Engine {
+            rows: stream(available),
+        }
+        .settle(&mut analysis, vec![effect]);
+    }
     assert_eq!(doc(&analysis).total(), Some(4));
     assert_eq!(doc(&analysis).phase(), &Phase::Opening);
     let select = analysis.input(Input::RowClicked(2));
