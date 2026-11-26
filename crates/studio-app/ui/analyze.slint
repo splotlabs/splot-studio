@@ -900,6 +900,17 @@ export component AnalyzeView inherits VerticalLayout {
     callback copy(string);
     callback reveal-bytes();
 
+    if Analysis.state == AnalysisState.empty: StateCard {
+        height: 220px;
+        heading: "Open an AV2 stream to analyze it";
+        text: Analysis.message;
+        action: "Open…";
+        action-description: "Choose an IVF or Annex B file (" + root.open-shortcut + ")";
+        act => {
+            Analysis.open();
+        }
+    }
+
     // The documents and what reading the shown one found.
     HorizontalLayout {
         spacing: Tokens.space-2;
@@ -955,17 +966,6 @@ export component AnalyzeView inherits VerticalLayout {
         font-weight: Tokens.weight-semibold;
         wrap: word-wrap;
         accessible-live-region: polite;
-    }
-
-    if Analysis.state == AnalysisState.empty: StateCard {
-        height: 220px;
-        heading: "Open an AV2 stream to analyze it";
-        text: Analysis.message;
-        action: "Open…";
-        action-description: "Choose an IVF or Annex B file (" + root.open-shortcut + ")";
-        act => {
-            Analysis.open();
-        }
     }
 
     if Analysis.state == AnalysisState.opening: StateCard {
