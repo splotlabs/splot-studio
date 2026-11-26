@@ -1189,14 +1189,14 @@ fn timeline_output_links_match_native_pictures_after_backward_seek() -> TestResu
         Some(1)
     );
 
-    let first = timeline_location(
-        &mut inspect,
+    let time_search = inspect.ask(Command::AnalysisTimelineLocate {
+        document: 1,
         scan,
-        TimelineTarget::Time {
+        target: TimelineTarget::Time {
             time: TimelineTime { num: 0, den: 1 },
         },
-    )?;
-    assert_eq!(first.output_ordinal, Some(0));
+    })?;
+    assert_eq!(failure(&time_search), Some(AnalysisFailure::InvalidRequest));
 
     let target = PictureTarget::Document {
         document: 1,
