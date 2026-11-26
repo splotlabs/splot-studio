@@ -573,7 +573,7 @@ impl Session {
         if matches!(
             input,
             analysis::Input::FollowReference(_)
-                | analysis::Input::FollowBlockReference(_)
+                | analysis::Input::BlockMotion(analysis::BlockMotionInput::Follow(_))
                 | analysis::Input::Back
                 | analysis::Input::Forward
         ) {

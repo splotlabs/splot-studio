@@ -6,7 +6,7 @@ use std::fs;
 use slint::platform::Key;
 use slint::{ComponentHandle, Model};
 use studio_app::BlockMotionView;
-use studio_app::analysis::{BlockOverlayInput, Input};
+use studio_app::analysis::{BlockMotionInput, BlockOverlayInput, Input};
 use studio_app::preview::{Dirty, Input as PreviewInput};
 use studio_app::session::Session;
 use studio_domain::preview::{PictureBox, PictureView};
@@ -88,7 +88,7 @@ pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch) {
         .view()
         .picture
         .map(|frame| frame.header.view);
-    activate_analyze_key(rig, &Input::FollowBlockReference(0));
+    activate_analyze_key(rig, &Input::BlockMotion(BlockMotionInput::Follow(0)));
     rig.settle("key follows the exact reference picture", |session| {
         picture(session.preview().view().output, 72) && !session.analysis().waiting()
     });

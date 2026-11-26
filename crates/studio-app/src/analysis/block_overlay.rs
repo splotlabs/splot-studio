@@ -527,8 +527,6 @@ impl Analysis {
             detail,
             max_events: if detail.is_some() {
                 1
-            } else if matches!(capture, Capture::Motion(..)) {
-                8
             } else {
                 MAX_BLOCK_RECORDS
             },

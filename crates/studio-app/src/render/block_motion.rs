@@ -10,7 +10,7 @@ use studio_domain::blocks::{
 };
 
 use super::model;
-use crate::analysis::{Analysis, Input, SelectedMotion};
+use crate::analysis::{Analysis, BlockMotionInput, Input, SelectedMotion};
 use crate::preview::{BlockViewport, Preview};
 use crate::ui::{
     AppWindow, BlockMotionView, MotionGlyph, MotionRegion, PredictionFact, PredictorRow,
@@ -20,17 +20,17 @@ pub(crate) fn bind(window: &AppWindow, send: impl Fn(Input) + Clone + 'static) {
     let motion = window.global::<BlockMotionView>();
     motion.on_inspect_references({
         let send = send.clone();
-        move || send(Input::InspectBlockReferences)
+        move || send(Input::BlockMotion(BlockMotionInput::InspectReferences))
     });
     motion.on_preview_reference({
         let send = send.clone();
-        move |index| send(Input::PreviewBlockReference(index))
+        move |index| send(Input::BlockMotion(BlockMotionInput::Preview(index)))
     });
     motion.on_follow_reference({
         let send = send.clone();
-        move |index| send(Input::FollowBlockReference(index))
+        move |index| send(Input::BlockMotion(BlockMotionInput::Follow(index)))
     });
-    motion.on_set_overlay(move |show| send(Input::ShowBlockMotion(show)));
+    motion.on_set_overlay(move |show| send(Input::BlockMotion(BlockMotionInput::Overlay(show))));
 }
 
 pub(super) fn render(window: &AppWindow, analysis: &Analysis) {

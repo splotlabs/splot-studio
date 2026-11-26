@@ -1743,8 +1743,12 @@ fn following_a_reference_keeps_the_verified_index_while_its_page_loads() {
     engine.settle(&mut analysis, effects);
     let (request, document, query) = inspect_reference(&mut analysis);
     analysis.event(request, reference_reply(document, query));
-    let target =
-        references::retained_frame(doc(&analysis).reference_evidence().unwrap(), 0).unwrap();
+    let Some(target) = doc(&analysis)
+        .reference_evidence()
+        .and_then(|evidence| references::retained_frame(evidence, 0))
+    else {
+        unreachable!("expected a retained reference")
+    };
     let mut preview = Vec::new();
     analysis.request_reference_preview(0, query, target, &mut preview);
     let preview_request = preview[0].request_id;

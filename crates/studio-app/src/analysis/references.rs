@@ -128,7 +128,10 @@ impl Analysis {
         };
         let selection = doc.layer_decode_selection();
         if let Some(place) = doc.history.get_mut(doc.at) {
-            if let Some(block) = &mut place.block {
+            if let Some(block) = &mut place.block
+                && selection == block.policy
+                && view.and_then(HistoryView::output) == Some(block.output)
+            {
                 block.view = view;
             }
             if doc.evidence.tab == TAB || place.reference.is_some() {

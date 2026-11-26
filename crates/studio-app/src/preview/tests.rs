@@ -935,7 +935,9 @@ fn reference_preview_verifies_the_coded_source_without_replacing_the_main_pictur
     use studio_domain::references::ReferenceFrame;
 
     let subject = document_subject(7);
-    let target = subject.target().unwrap();
+    let Some(target) = subject.target() else {
+        unreachable!("expected a document picture target")
+    };
     let frame = ReferenceFrame {
         coded_offset: 15,
         sequence_offset: 5,
@@ -967,8 +969,11 @@ fn reference_preview_verifies_the_coded_source_without_replacing_the_main_pictur
     // The output uses a later temporal layer to display the coded reference.
     preview.picture(output_picture(request.request_id, 1, None));
     assert_eq!(
-        preview.reference_preview().unwrap().unwrap().header.frame,
-        1
+        preview
+            .reference_preview()
+            .and_then(Result::ok)
+            .map(|picture| picture.header.frame),
+        Some(1)
     );
     assert_eq!(preview.view().frame_text, "Output 1");
 
@@ -991,7 +996,9 @@ fn reference_preview_cancellation_rejects_late_pictures() {
     use studio_domain::references::ReferenceFrame;
 
     let subject = document_subject(7);
-    let target = subject.target().unwrap();
+    let Some(target) = subject.target() else {
+        unreachable!("expected a document picture target")
+    };
     let (mut preview, opening) = shown(subject);
     preview.picture(output_picture(only(&opening).request_id, 0, None));
     let request = preview.request_reference_preview(

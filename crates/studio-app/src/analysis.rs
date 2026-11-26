@@ -70,6 +70,7 @@ pub(crate) mod references;
 #[cfg(test)]
 mod tests;
 
+pub use block_motion::BlockMotionInput;
 pub(crate) use block_motion::SelectedMotion;
 pub use block_overlay::BlockOverlayInput;
 pub use document::{
@@ -263,14 +264,8 @@ pub enum Input {
     StopBlocks,
     /// Follow the direct dependency at this row.
     FollowReference(i32),
-    /// Read the selected block's coded-frame input slots.
-    InspectBlockReferences,
-    /// Preview the selected block's reference at this predictor position.
-    PreviewBlockReference(i32),
-    /// Follow the selected block's reference at this predictor position.
-    FollowBlockReference(i32),
-    /// Show or hide the selected block's motion on the picture.
-    ShowBlockMotion(bool),
+    /// Inspect motion or follow a reference from the selected coding block.
+    BlockMotion(BlockMotionInput),
     /// Remove the indexes saved on disk.
     ClearCache,
 }
@@ -715,10 +710,7 @@ impl Analysis {
             Input::InspectReferences => self.request_references(at, out),
             Input::StopReferences => self.stop_references(at, out),
             Input::FollowReference(index) => self.follow_reference(at, index, out),
-            Input::InspectBlockReferences
-            | Input::PreviewBlockReference(_)
-            | Input::FollowBlockReference(_)
-            | Input::ShowBlockMotion(_) => self.block_motion_input(at, input, out),
+            Input::BlockMotion(input) => self.block_motion_input(at, input, out),
             Input::TypeFilter(index) => self.choose_kind(at, index, out),
             Input::LayerFilter(index) => self.choose_layer(at, index, out),
             Input::ClearFilters => self.refilter(at, RowFilter::default(), out),

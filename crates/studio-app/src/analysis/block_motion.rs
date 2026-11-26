@@ -8,7 +8,20 @@ use studio_domain::blocks::{
 };
 use studio_domain::references::{ReferenceEvidence, ReferenceFrame, ReferenceQuery};
 
-use super::{Analysis, Document, Effect, Input, block_overlay::Key, references::retained_frame};
+use super::{Analysis, Document, Effect, block_overlay::Key, references::retained_frame};
+
+/// An action for the selected block's prediction and motion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockMotionInput {
+    /// Read the input slots of the block's coded frame.
+    InspectReferences,
+    /// Preview the reference at a predictor position.
+    Preview(i32),
+    /// Follow the reference at a predictor position.
+    Follow(i32),
+    /// Show or hide motion on the picture.
+    Overlay(bool),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PreviewSelection {
@@ -88,26 +101,31 @@ impl Analysis {
         self.show_motion
     }
 
-    pub(super) fn block_motion_input(&mut self, at: usize, input: Input, out: &mut Vec<Effect>) {
+    pub(super) fn block_motion_input(
+        &mut self,
+        at: usize,
+        input: BlockMotionInput,
+        out: &mut Vec<Effect>,
+    ) {
         let Some(selected) = self.selected_motion() else {
             return;
         };
         match input {
-            Input::InspectBlockReferences => {
+            BlockMotionInput::InspectReferences => {
                 if matches!(selected.prediction, Some(BlockPrediction::Inter { references, .. })
                     if references.iter().any(|reference| matches!(reference, Some(BlockReference::Frame { .. }))))
                 {
                     self.request_references_for(at, selected.frame.coded_offset, out);
                 }
             }
-            Input::PreviewBlockReference(index) | Input::FollowBlockReference(index) => {
+            BlockMotionInput::Preview(index) | BlockMotionInput::Follow(index) => {
                 let Some((position, (scope, frame))) = usize::try_from(index)
                     .ok()
                     .and_then(|position| Some((position, selected.retained_reference(position)?)))
                 else {
                     return;
                 };
-                if matches!(input, Input::PreviewBlockReference(_)) {
+                if matches!(input, BlockMotionInput::Preview(_)) {
                     self.motion_preview = Some(PreviewSelection {
                         document: selected.document.id(),
                         frame: selected.frame,
@@ -120,8 +138,7 @@ impl Analysis {
                     self.follow_reference_frame(at, frame, out);
                 }
             }
-            Input::ShowBlockMotion(show) => self.show_motion = show,
-            _ => {}
+            BlockMotionInput::Overlay(show) => self.show_motion = show,
         }
     }
 

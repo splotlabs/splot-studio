@@ -125,6 +125,12 @@ codec is young.
   the picture or the list to inspect its geometry and decoder facts. Use the
   overlay plane control to distinguish overlapping luma and chroma trees.
   If a capture reaches its limit, zoom in or select a point to read more.
+- Select a coding block to inspect its prediction and motion. Studio shows
+  signaled vector differences and resolved base vectors in eighths of a luma
+  sample. **Show Motion** displays available vectors and outlines.
+  **Read References** locates coded pictures in the input slots. **Preview**
+  uses the indexed output when available. **Follow** opens the coded
+  reference, and **Back** restores the selected block and viewer position.
 - In Analyze, use **Export Decoded Video** for a stream or range, **Export Frame** for
   the displayed output, or **Frame Hashes** for a report. A frame export keeps the
   displayed layer and grain policy. Jobs writes only the selected outputs, even
