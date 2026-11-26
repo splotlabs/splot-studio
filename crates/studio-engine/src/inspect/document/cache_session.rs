@@ -181,7 +181,7 @@ fn source_candidate(
     if !fs::metadata(path)?.is_file() {
         return Ok(None);
     }
-    let file = File::open(path)?;
+    let file = crate::source::open_verified(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file()
         || FileId::of_file(&file, path)? != *id
