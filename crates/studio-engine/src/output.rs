@@ -10,15 +10,16 @@
 //! itself, and an existing file there is never replaced.
 
 use std::cell::Cell;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::SystemTime;
 
 use splot_encode::ivf::IvfWriter;
 use splot_encode::{Config, Packet};
-use studio_domain::export::{ExportArtifactKind, ExportProgress, ExportStage};
+use studio_domain::export::{ExportArtifactKind, ExportProgress, ExportStage, ExportTempIdentity};
 use studio_domain::job::FailureCode;
 use studio_domain::settings::OutputKind;
 use tempfile::NamedTempFile;
@@ -69,6 +70,27 @@ pub(crate) trait ExportControl {
 pub struct FileId(#[cfg(unix)] (u64, u64), #[cfg(not(unix))] PathBuf);
 
 impl FileId {
+    /// File identity that remains usable across a new process on this platform.
+    pub(crate) const fn export_identity(
+        &self,
+        created: Option<SystemTime>,
+    ) -> Option<ExportTempIdentity> {
+        #[cfg(unix)]
+        {
+            let (device, inode) = self.0;
+            Some(ExportTempIdentity {
+                device,
+                inode,
+                created,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = created;
+            None
+        }
+    }
+
     /// The identity of the already opened `file` at `path`.
     ///
     /// # Errors
@@ -166,6 +188,35 @@ pub fn check_destination(destination: &Path, source: &FileId) -> Result<(), Stop
         ));
     }
     check_absent(destination)
+}
+
+/// Whether two paths refer to the same directory entry, even before a file exists.
+pub(crate) fn same_destination_slot(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    let parent_id = |path: &Path| {
+        let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty());
+        FileId::of_path(parent.unwrap_or_else(|| Path::new(".")))
+    };
+    left.file_name()
+        .zip(right.file_name())
+        .is_some_and(|(left, right)| same_name(left, right))
+        && parent_id(left).is_ok_and(|left| parent_id(right).is_ok_and(|right| left == right))
+}
+
+fn same_name(left: &OsStr, right: &OsStr) -> bool {
+    if cfg!(any(windows, target_os = "macos")) {
+        left.to_str().zip(right.to_str()).map_or_else(
+            || {
+                left.as_encoded_bytes()
+                    .eq_ignore_ascii_case(right.as_encoded_bytes())
+            },
+            |(left, right)| left.to_uppercase() == right.to_uppercase(),
+        )
+    } else {
+        left == right
+    }
 }
 
 fn check_absent(destination: &Path) -> Result<(), Stop> {
@@ -405,5 +456,28 @@ mod tests {
         assert_eq!(sink.bytes(), 2 * packet.data.len() as u64);
         let bytes = sink.finish().unwrap_or_default();
         assert_eq!(bytes, [packet.data.clone(), packet.data].concat());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_post_rename_sync_failure_preserves_the_published_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let destination = dir.path().join("export.yuv");
+        let mut temp = tempfile::NamedTempFile::new_in(dir.path())?;
+        temp.write_all(b"verified samples")?;
+        temp.as_file().sync_all()?;
+        let publication = publish_with_sync(temp, &destination, |_| {
+            Err(io::Error::other("injected folder sync failure"))
+        })
+        .map_err(|stop| io::Error::other(format!("{stop:?}")))?;
+        assert_eq!(publication.bytes, 16);
+        assert!(publication.sync.is_err());
+        assert_eq!(fs::read(&destination)?, b"verified samples");
+        Ok(())
     }
 }
