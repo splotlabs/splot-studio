@@ -218,13 +218,7 @@ fn serve<'scope>(
             | Command::PictureSample { .. }
             | Command::StopPlayback
             | Command::CloseDocumentPlayback { .. } => {
-                outbox.reply(
-                    id,
-                    refusal(
-                        ErrorCode::WrongState,
-                        "Use the preview process for pictures.",
-                    ),
-                );
+                reject_mode(outbox, id, "Use the preview process for pictures.");
             }
             Command::AnalysisOpen { .. }
             | Command::AnalysisOpenProgressive { .. }
@@ -248,17 +242,15 @@ fn serve<'scope>(
             | Command::BatchExport { .. }
             | Command::BatchForget { .. }
             | Command::AnalysisClose { .. } => {
-                outbox.reply(
-                    id,
-                    refusal(
-                        ErrorCode::WrongState,
-                        "Use the inspect process for analysis.",
-                    ),
-                );
+                reject_mode(outbox, id, "Use the inspect process for analysis.");
             }
         }
     };
     (result, stop_job(outbox, job))
+}
+
+fn reject_mode(outbox: &Outbox, id: u64, message: &str) {
+    outbox.reply(id, refusal(ErrorCode::WrongState, message));
 }
 
 fn cancel_job(outbox: &Outbox, id: u64) -> bool {
