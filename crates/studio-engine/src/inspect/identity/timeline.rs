@@ -615,6 +615,21 @@ mod tests {
     }
 
     #[test]
+    fn decreasing_presentation_timestamps_make_the_clock_discontinuous() -> io::Result<()> {
+        let clock = Some(IvfClock { num: 1, den: 30 });
+        let mut timeline = TimelineIndex::new()?;
+        timeline.obu(12, 3, Some(8), false, false)?;
+        timeline.obu(24, 6, Some(7), false, false)?;
+        timeline.frame(12, TimelineQuantizer::Unavailable)?;
+        timeline.frame(24, TimelineQuantizer::Unavailable)?;
+        timeline.output(12, 12, None)?;
+        assert_eq!(timeline.clock(clock), TimelineClock::Ivf);
+        timeline.output(24, 24, None)?;
+        assert_eq!(timeline.clock(clock), TimelineClock::Discontinuous);
+        Ok(())
+    }
+
+    #[test]
     fn rational_clock_handles_overflow_and_nonintegral_input() {
         let clock = IvfClock {
             num: 1001,
