@@ -379,9 +379,19 @@ impl Session {
             }
             let worker_available =
                 self.job.is_none() && self.encode_save.is_none() && self.export.is_none();
+            let worker_ended = matches!(
+                intent,
+                Intent::Job {
+                    input: activity::Input::WorkerEnded { .. },
+                    ..
+                }
+            );
             let update = self
                 .state
                 .apply_with_worker(intent, now, &RealDisk, worker_available);
+            if worker_ended && worker_available && update.changed != Changed::Phase {
+                pending.push_back(Intent::WorkerIdle);
+            }
             outcome.changed = more(outcome.changed, update.changed);
             for effect in update.effects {
                 self.perform(effect, &mut pending, &mut outcome.ui);
