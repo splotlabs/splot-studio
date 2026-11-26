@@ -383,7 +383,7 @@ fn a_run_of_three_files_with_one_unreadable_publishes_two() {
         })
         .collect();
     assert_eq!(kinds, ["completed", "unreadable", "completed"]);
-    assert_eq!(saved.settings.preset.get(), 10);
+    assert_eq!(saved.settings.base.preset.get(), 10);
 }
 
 /// A converted file opens in Analyze through the real inspect process with

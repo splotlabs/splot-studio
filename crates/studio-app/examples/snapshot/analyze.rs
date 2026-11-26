@@ -119,7 +119,7 @@ fn restored(path: PathBuf) -> AppState {
         recovered: Some(Recovered {
             items: Vec::new(),
             next_id: 1,
-            settings: INITIAL_SETTINGS,
+            settings: INITIAL_SETTINGS.into(),
             cleanups: Vec::new(),
             dropped: 0,
             view: RestoredView {
