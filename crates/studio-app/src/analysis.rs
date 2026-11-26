@@ -614,6 +614,31 @@ impl Analysis {
             Input::TypeFilter(index) => self.choose_kind(at, index, out),
             Input::LayerFilter(index) => self.choose_layer(at, index, out),
             Input::ClearFilters => self.refilter(at, RowFilter::default(), out),
+            Input::EvidenceView(_)
+            | Input::EvidenceSearch(_)
+            | Input::EvidenceRule(_)
+            | Input::EvidenceSeverity(_)
+            | Input::EvidenceLayer(_)
+            | Input::EvidencePick(_)
+            | Input::EvidenceMove(_)
+            | Input::EvidencePage(_)
+            | Input::FindingStep(_)
+            | Input::Validate
+            | Input::CancelValidation => self.evidence_input(at, input, out),
+            Input::Open(_)
+            | Input::OpenResult(_)
+            | Input::Show(_)
+            | Input::Close
+            | Input::Reopen
+            | Input::Cancel
+            | Input::CancelDocument(_)
+            | Input::Resolve
+            | Input::Relink { .. } => {}
+        }
+    }
+
+    fn evidence_input(&mut self, at: usize, input: Input, out: &mut Vec<Effect>) {
+        match input {
             Input::EvidenceView(tab) => {
                 let evidence = &mut self.documents[at].evidence;
                 evidence.tab = tab.clamp(0, 2);
@@ -663,17 +688,13 @@ impl Analysis {
             Input::FindingStep(direction) => {
                 self.move_evidence(at, if direction < 0 { Step::Up } else { Step::Down }, out);
             }
-            Input::Validate => self.start_validation(at, Default::default(), out),
+            Input::Validate => self.start_validation(
+                at,
+                studio_domain::validation::ValidationSettings::default(),
+                out,
+            ),
             Input::CancelValidation => self.stop_validation(at, out),
-            Input::Open(_)
-            | Input::OpenResult(_)
-            | Input::Show(_)
-            | Input::Close
-            | Input::Reopen
-            | Input::Cancel
-            | Input::CancelDocument(_)
-            | Input::Resolve
-            | Input::Relink { .. } => {}
+            _ => {}
         }
     }
 
@@ -825,20 +846,7 @@ impl Analysis {
         let Some((document, asked)) = self.pending.remove(&request_id) else {
             return out;
         };
-        let answered = match &event {
-            Event::AnalysisOpened { document: d, .. }
-            | Event::AnalysisPage { document: d, .. }
-            | Event::AnalysisLocated { document: d, .. }
-            | Event::AnalysisBytes { document: d, .. }
-            | Event::AnalysisSyntaxReady { document: d, .. }
-            | Event::AnalysisSyntaxPage { document: d, .. }
-            | Event::AnalysisValidated { document: d, .. }
-            | Event::AnalysisFindings { document: d, .. }
-            | Event::AnalysisClosed { document: d }
-            | Event::AnalysisFailed { document: d, .. } => Some(*d),
-            _ => None,
-        };
-        if answered.is_some_and(|d| d != document) {
+        if reply_document(&event).is_some_and(|d| d != document) {
             return out;
         }
         let Some(at) = self.index_of(document) else {
@@ -1467,4 +1475,20 @@ fn page_fits(first: u64, total: u64, len: usize) -> bool {
     len <= u64::from(PAGE_ROWS)
         && end.is_some_and(|end| end <= total)
         && (len > 0 || first >= total)
+}
+
+fn reply_document(event: &Event) -> Option<u64> {
+    match event {
+        Event::AnalysisOpened { document: d, .. }
+        | Event::AnalysisPage { document: d, .. }
+        | Event::AnalysisLocated { document: d, .. }
+        | Event::AnalysisBytes { document: d, .. }
+        | Event::AnalysisSyntaxReady { document: d, .. }
+        | Event::AnalysisSyntaxPage { document: d, .. }
+        | Event::AnalysisValidated { document: d, .. }
+        | Event::AnalysisFindings { document: d, .. }
+        | Event::AnalysisClosed { document: d }
+        | Event::AnalysisFailed { document: d, .. } => Some(*d),
+        _ => None,
+    }
 }

@@ -3,6 +3,8 @@
 
 //! Display values for the bounded Analyze evidence list.
 
+use std::fmt::Write as _;
+
 use studio_domain::syntax::{SyntaxEvent, SyntaxSpan, SyntaxStatus, SyntaxValue};
 use studio_domain::validation::{Finding, Severity, ValidationCompletion};
 
@@ -205,15 +207,16 @@ fn findings_status(evidence: &Evidence) -> String {
         text.push_str(" Strict policy treats warnings as a failure.");
     }
     if report.omitted > 0 {
-        text.push_str(&format!(" The report omits {} findings.", report.omitted));
+        let _ = write!(text, " The report omits {} findings.", report.omitted);
     }
     if evidence.findings_loading {
         text.push_str(" Reading more rows…");
     }
     if let Some(error) = &evidence.findings_error {
-        text.push_str(&format!(
+        let _ = write!(
+            text,
             " The engine could not supply all retained findings. {error}"
-        ));
+        );
     }
     text
 }
@@ -235,10 +238,10 @@ fn finding_detail(
         .validation
         .as_ref()
         .map_or("AV2", |(_, report)| report.spec_revision.as_str());
-    let reference = finding
-        .spec_section
-        .as_ref()
-        .map_or_else(|| spec.to_owned(), |section| format!("{spec} § {section}"));
+    let reference = finding.spec_section.as_ref().map_or_else(
+        || spec.to_owned(),
+        |section| format!("{spec} § {}", section.trim_start_matches('§').trim()),
+    );
     let detail = format!(
         "{} · {}\n{}\n{reference}",
         severity(finding.severity),

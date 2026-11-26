@@ -167,6 +167,26 @@ impl Evidence {
         }
     }
 
+    fn append_syntax(&mut self, events: Vec<SyntaxEvent>) {
+        for event in events {
+            if event == SyntaxEvent::ExitScope {
+                self.depth = self.depth.saturating_sub(1);
+            } else {
+                let scope = matches!(
+                    event,
+                    SyntaxEvent::Structure { .. }
+                        | SyntaxEvent::LoopItem { .. }
+                        | SyntaxEvent::Condition { .. }
+                        | SyntaxEvent::UnknownScope
+                );
+                self.events.push((self.depth, event));
+                if scope {
+                    self.depth += 1;
+                }
+            }
+        }
+    }
+
     pub(super) fn reveal_selection(&mut self) {
         if let Some(index) = self.selected_index()
             && let Ok(position) = self.matching().binary_search(&index)
@@ -219,7 +239,7 @@ impl Evidence {
         let index = match self.selected? {
             Pick::Syntax { element, index } if self.syntax.as_ref()?.0 == element => index,
             Pick::Finding { .. } => return self.matched_field().map(|(_, span)| span),
-            _ => return None,
+            Pick::Syntax { .. } => return None,
         };
         match &self.events.get(index)?.1 {
             SyntaxEvent::Signaled { span, .. } => *span,
@@ -294,20 +314,7 @@ impl Analysis {
                     ..
                 },
             ) if evidence.syntax_request == Some((id, expected)) && expected == element => {
-                evidence.syntax_request = None;
-                if total > MAX_SYNTAX_EVENTS || total != summary.retained_events {
-                    evidence.syntax_loading = false;
-                    evidence.syntax_error =
-                        Some("The engine supplied an invalid syntax count.".to_owned());
-                    return;
-                }
-                evidence.syntax_loading = total > 0;
-                evidence.syntax = Some((element, *summary));
-                evidence.trace = Some(id);
-                evidence.depth = 0;
-                if evidence.syntax_loading {
-                    self.syntax_page(at, id, 0, out);
-                }
+                self.syntax_ready(at, id, element, *summary, total, out);
             }
             (
                 Request::SyntaxPage {
@@ -333,24 +340,7 @@ impl Analysis {
                 && events.len() as u64 <= total - first =>
             {
                 let next = first + events.len() as u64;
-                for event in events {
-                    match event {
-                        SyntaxEvent::ExitScope => evidence.depth = evidence.depth.saturating_sub(1),
-                        _ => {
-                            let scope = matches!(
-                                event,
-                                SyntaxEvent::Structure { .. }
-                                    | SyntaxEvent::LoopItem { .. }
-                                    | SyntaxEvent::Condition { .. }
-                                    | SyntaxEvent::UnknownScope
-                            );
-                            evidence.events.push((evidence.depth, event));
-                            if scope {
-                                evidence.depth += 1;
-                            }
-                        }
-                    }
-                }
+                evidence.append_syntax(events);
                 // Exits also count in the stream. The separate cursor is the
                 // number of received events, not the number of displayed rows.
                 evidence.syntax_loading = next < total;
@@ -363,19 +353,7 @@ impl Analysis {
             (Request::Validate, Event::AnalysisValidated { summary, total, .. })
                 if evidence.running == Some(id) =>
             {
-                evidence.running = None;
-                evidence.cancelling = false;
-                evidence.validation = Some((id, *summary));
-                evidence.findings_total = total;
-                if total > MAX_FINDINGS {
-                    evidence.findings_error =
-                        Some("The engine supplied an invalid finding count.".to_owned());
-                    return;
-                }
-                evidence.findings_loading = total > 0;
-                if evidence.findings_loading {
-                    self.findings_page(at, id, 0, out);
-                }
+                self.validation_ready(at, id, *summary, total, out);
             }
             (
                 Request::Findings {
@@ -414,6 +392,55 @@ impl Analysis {
                 request,
                 "The engine supplied an invalid evidence reply.".to_owned(),
             ),
+        }
+    }
+
+    fn syntax_ready(
+        &mut self,
+        at: usize,
+        id: u64,
+        element: u64,
+        summary: SyntaxSummary,
+        total: u64,
+        out: &mut Vec<Effect>,
+    ) {
+        let evidence = &mut self.documents[at].evidence;
+        evidence.syntax_request = None;
+        if total > MAX_SYNTAX_EVENTS || total != summary.retained_events {
+            evidence.syntax_loading = false;
+            evidence.syntax_error = Some("The engine supplied an invalid syntax count.".to_owned());
+            return;
+        }
+        evidence.syntax_loading = total > 0;
+        evidence.syntax = Some((element, summary));
+        evidence.trace = Some(id);
+        evidence.depth = 0;
+        if evidence.syntax_loading {
+            self.syntax_page(at, id, 0, out);
+        }
+    }
+
+    fn validation_ready(
+        &mut self,
+        at: usize,
+        id: u64,
+        summary: ValidationSummary,
+        total: u64,
+        out: &mut Vec<Effect>,
+    ) {
+        let evidence = &mut self.documents[at].evidence;
+        evidence.running = None;
+        evidence.cancelling = false;
+        evidence.validation = Some((id, summary));
+        evidence.findings_total = total;
+        if total > MAX_FINDINGS {
+            evidence.findings_error =
+                Some("The engine supplied an invalid finding count.".to_owned());
+            return;
+        }
+        evidence.findings_loading = total > 0;
+        if evidence.findings_loading {
+            self.findings_page(at, id, 0, out);
         }
     }
 

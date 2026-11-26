@@ -196,6 +196,22 @@ pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
                 scenario.settle()?;
             }
         }
+        "analyze-syntax" | "analyze-findings" => {
+            let path = scenario.file("bad trailing bit.obu", &[0x01, 0x08, 0x02, 0x08, 0x00])?;
+            scenario.input(Input::Open(vec![path]));
+            scenario.settle()?;
+            scenario.input(Input::Validate);
+            scenario.settle()?;
+            scenario.input(Input::EvidenceRule(
+                "trailing-bits/missing-one-bit".to_owned(),
+            ));
+            scenario.input(Input::EvidencePick(0));
+            scenario.settle()?;
+            if name == "analyze-syntax" {
+                scenario.input(Input::EvidenceView(1));
+                scenario.settle()?;
+            }
+        }
         "analyze-damaged" => {
             let path = scenario.file("cut short.obu", &TRUNCATED)?;
             scenario.input(Input::Open(vec![path]));
