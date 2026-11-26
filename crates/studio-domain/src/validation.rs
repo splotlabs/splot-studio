@@ -24,8 +24,8 @@ pub struct ValidationSettings {
 pub struct ContextIdentity {
     /// SHA-256 digest of the supplied bytes.
     pub sha256: String,
-    /// External sequence header identifiers.
-    pub sequence_header_ids: Vec<u32>,
+    /// External (extended layer, sequence header) identifiers.
+    pub sequence_headers: Vec<(u8, u32)>,
     /// External (extended layer, operating point set) identifiers.
     pub operating_point_sets: Vec<(u8, u8)>,
 }
@@ -82,6 +82,11 @@ pub enum ValidationCompletion {
         declared: u64,
         /// Maximum permitted size in bytes.
         cap: u64,
+    },
+    /// Validation reached the configured OBU count limit.
+    ObuLimit {
+        /// Maximum number of OBUs checked.
+        max_obus: u64,
     },
     /// The engine cannot interpret the native completion reason.
     Unsupported,

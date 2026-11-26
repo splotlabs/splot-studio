@@ -159,10 +159,7 @@ impl Document {
         let reader = file
             .try_clone()
             .map_err(|e| io("cannot read the file", e))?;
-        let checked = Checked {
-            inner: reader,
-            cancelled,
-        };
+        let checked = Checked::new(reader, cancelled);
         let scanned = scan(BufReader::new(checked), fingerprint.len, cancelled)?;
         let document = Self {
             summary: scanned.summary(fingerprint),
@@ -241,9 +238,15 @@ impl Document {
 }
 
 /// Fails reads once `cancelled` says so.
-struct Checked<'a, R> {
+pub(super) struct Checked<'a, R> {
     inner: R,
     cancelled: &'a dyn Fn() -> bool,
+}
+
+impl<'a, R> Checked<'a, R> {
+    pub(super) fn new(inner: R, cancelled: &'a dyn Fn() -> bool) -> Self {
+        Self { inner, cancelled }
+    }
 }
 
 impl<R: Read> Read for Checked<'_, R> {
