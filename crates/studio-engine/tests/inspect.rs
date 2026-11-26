@@ -17,16 +17,20 @@ use std::process::{Child, ChildStdin, ChildStdout, Command as Process, Stdio};
 use common::{Clip, TestResult, run_job, spec};
 use studio_domain::analysis::{
     AnalysisFailure, DocumentSummary, Element, Framing, KindFilter, LocateTarget,
-    MAX_PAGE_ELEMENTS, ObuFact, ProblemKind, RowFilter, ScanOutcome, Span,
+    MAX_PAGE_ELEMENTS, ObuFact, ProblemKind, Row, RowFilter, ScanOutcome, Span,
 };
 use studio_domain::identity::{IdentityCompletion, IdentityKind};
 use studio_domain::job::WirePath;
-use studio_domain::preview::GrainPolicy;
+use studio_domain::preview::{
+    GrainPolicy, PictureBox, PictureFrame, PictureHeader, PictureOptions, PictureTarget,
+    PictureView,
+};
 use studio_domain::protocol::{
-    BuildIdentity, Command, Envelope, ErrorCode, Event, read_message, write_message,
+    BuildIdentity, Command, Envelope, ErrorCode, Event, read_event, read_message, write_message,
 };
 use studio_domain::settings::OutputKind;
 use studio_domain::syntax::{SYNTAX_SCHEMA, SyntaxEvent, SyntaxValue};
+use studio_domain::timeline::{TimelineSelection, TimelineTarget, TimelineTime, TimelineView};
 use studio_domain::validation::{VALIDATION_SCHEMA, ValidationCompletion, ValidationSettings};
 
 const BIN: &str = env!("CARGO_BIN_EXE_splot-studio-engine");
@@ -41,8 +45,12 @@ struct Inspect {
 
 impl Inspect {
     fn spawn() -> Result<Self, Box<dyn Error>> {
+        Self::spawn_mode("inspect")
+    }
+
+    fn spawn_mode(mode: &str) -> Result<Self, Box<dyn Error>> {
         let mut child = Process::new(BIN)
-            .arg("inspect")
+            .arg(mode)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -1126,6 +1134,162 @@ fn identity_pages_require_the_selected_scan_and_source() -> TestResult {
     assert_eq!(reopened.framing, Framing::AnnexB);
     assert_eq!(reopened.obus, 1);
     Ok(())
+}
+
+#[test]
+fn timeline_output_links_match_native_pictures_after_backward_seek() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("timeline.ivf");
+    fs::write(
+        &path,
+        include_bytes!("inspect/fixtures/syn-bridge-celu-64x64.ivf"),
+    )?;
+    let mut inspect = Inspect::spawn()?;
+    let opened = inspect.open(1, &path)?;
+    assert_eq!(opened.packets, 1);
+    let scan = inspect.next_id;
+    let scanned = inspect.ask(Command::AnalysisIdentityScan {
+        document: 1,
+        grain: GrainPolicy::Skip,
+    })?;
+    assert!(
+        matches!(scanned, Event::AnalysisIdentityScanned { summary, .. }
+        if summary.coded == 3 && summary.outputs == 2 && summary.matches_structure)
+    );
+
+    let coded = inspect.ask(Command::AnalysisTimeline {
+        document: 1,
+        scan,
+        view: TimelineView::Coded,
+        first: 0,
+        limit: 3,
+        buckets: 3,
+    })?;
+    let Event::AnalysisTimeline { page, .. } = coded else {
+        return Err(format!("Expected coded timeline. {coded:?}").into());
+    };
+    assert!(page.verified);
+    let hidden = page
+        .buckets
+        .iter()
+        .filter_map(|bucket| bucket.entry)
+        .find(|row| row.output_ordinal.is_none())
+        .ok_or("Expected a hidden coded frame.")?;
+    let selected = timeline_location(
+        &mut inspect,
+        scan,
+        TimelineTarget::Coded {
+            index: hidden.ordinal,
+        },
+    )?;
+    assert_eq!(selected.coded_offset, hidden.coded_offset);
+    assert_eq!(selected.output_ordinal, None);
+    assert_eq!(
+        timeline_obu(&mut inspect, selected.coded_offset)?.parent,
+        Some(1)
+    );
+
+    let time_search = inspect.ask(Command::AnalysisTimelineLocate {
+        document: 1,
+        scan,
+        target: TimelineTarget::Time {
+            time: TimelineTime { num: 0, den: 1 },
+        },
+    })?;
+    assert_eq!(failure(&time_search), Some(AnalysisFailure::InvalidRequest));
+
+    let target = PictureTarget::Document {
+        document: 1,
+        path: WirePath::from_path(&path),
+        fingerprint: opened.fingerprint,
+        digest: opened.digest.ok_or("Expected source digest.")?,
+    };
+    let mut preview = Inspect::spawn_mode("preview")?;
+    for (generation, index) in [(1, 1), (2, 0)] {
+        let selection = timeline_location(&mut inspect, scan, TimelineTarget::Output { index })?;
+        let showing = selection.showing_offset.ok_or("Expected a display OBU.")?;
+        assert_eq!(timeline_obu(&mut inspect, showing)?.parent, Some(1));
+        assert_eq!(
+            timeline_obu(&mut inspect, selection.coded_offset)?.parent,
+            Some(1)
+        );
+        let picture = timeline_picture(&mut preview, target.clone(), generation, index)?;
+        let native = picture.output.ok_or("Expected native output evidence.")?;
+        assert_eq!(selection.output_ordinal, Some(native.ordinal));
+        assert_eq!(Some(selection.coded_offset), native.coded_offset);
+        assert_eq!(selection.showing_offset, native.showing_offset);
+    }
+    Ok(())
+}
+
+fn timeline_obu(inspect: &mut Inspect, offset: u64) -> Result<Row, Box<dyn Error>> {
+    let reply = inspect.ask(Command::AnalysisLocate {
+        document: 1,
+        filter: RowFilter::default(),
+        target: LocateTarget::Offset { offset },
+    })?;
+    let Event::AnalysisLocated { found, .. } = reply else {
+        return Err(format!("Expected a linked OBU. {reply:?}").into());
+    };
+    assert!(matches!(&found.element, Element::Obu { obu } if obu.obu.offset == offset));
+    Ok(*found)
+}
+
+fn timeline_location(
+    inspect: &mut Inspect,
+    scan: u64,
+    target: TimelineTarget,
+) -> Result<TimelineSelection, Box<dyn Error>> {
+    let reply = inspect.ask(Command::AnalysisTimelineLocate {
+        document: 1,
+        scan,
+        target,
+    })?;
+    let Event::AnalysisTimelineLocated {
+        selection,
+        scan: answered,
+        ..
+    } = reply
+    else {
+        return Err(format!("Expected a timeline selection. {reply:?}").into());
+    };
+    assert_eq!(answered, scan);
+    Ok(*selection)
+}
+
+fn timeline_picture(
+    preview: &mut Inspect,
+    target: PictureTarget,
+    generation: u64,
+    index: u64,
+) -> Result<PictureHeader, Box<dyn Error>> {
+    preview.send(vec![Command::Picture {
+        generation,
+        target,
+        frame: PictureFrame::Index { index },
+        view: PictureView::Fit,
+        options: PictureOptions {
+            grain: GrainPolicy::Skip,
+            ..PictureOptions::default()
+        },
+        size: PictureBox {
+            width: 64,
+            height: 64,
+        },
+    }])?;
+    loop {
+        let (reply, pixels) =
+            read_event(&mut preview.stdout)?.ok_or("The preview process stopped.")?;
+        match reply.body {
+            Event::Picture { picture } => {
+                assert_eq!(picture.generation, generation);
+                assert!(pixels.is_some());
+                return Ok(picture);
+            }
+            Event::PictureProgress { .. } => {}
+            other => return Err(format!("Expected a picture. {other:?}").into()),
+        }
+    }
 }
 
 #[test]

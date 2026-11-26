@@ -52,10 +52,15 @@ use studio_domain::analysis::{
 };
 use studio_domain::job::WirePath;
 use studio_domain::protocol::{Command, Event};
+use studio_domain::timeline::{TimelineTarget, TimelineView};
 
 mod batch;
 mod bytes;
 mod document;
+mod timeline_links;
+
+use timeline_links::Request as TimelineRequest;
+pub use timeline_links::{Timeline, TimelineRange};
 pub(crate) mod evidence;
 #[cfg(test)]
 mod tests;
@@ -215,6 +220,29 @@ pub enum Input {
     Validate,
     /// Stop validation of the current source.
     CancelValidation,
+    /// Build decoded timeline facts for the shown document.
+    TimelineBuild,
+    /// Stop collecting timeline facts.
+    TimelineCancel,
+    /// Refresh indexed rows during an active timeline scan.
+    TimelineRefresh,
+    /// Request a range in the selected order.
+    TimelineRange {
+        /// The timeline order.
+        view: TimelineView,
+        /// The first zero-based ordinal.
+        first: u64,
+        /// The number of rows to include.
+        limit: u64,
+        /// The maximum number of graph buckets.
+        buckets: u32,
+    },
+    /// Select an exact target in the current timeline.
+    TimelineSelect(TimelineTarget),
+    /// Step to the preceding or following timeline entry.
+    TimelineStep(i32),
+    /// Show the findings for the selected timeline entry.
+    TimelineLinkFindings,
     /// Remove the indexes saved on disk.
     ClearCache,
 }
@@ -224,6 +252,7 @@ pub enum Input {
 enum Asked {
     Open,
     Evidence(EvidenceRequest),
+    Timeline(TimelineRequest),
     Cancel,
     Close,
     Page { generation: u64, first: u64 },
@@ -247,6 +276,8 @@ enum Purpose {
         pick: Pick,
         offset: u64,
     },
+    /// Select the OBU for a timeline entry.
+    Timeline,
     /// Learn the selection's row under the filter.
     Position,
 }
@@ -261,6 +292,7 @@ pub struct Analysis {
     /// Requests not answered: request id to engine document id and purpose.
     pending: HashMap<u64, (u64, Asked)>,
     cache_clear: Option<u64>,
+    timeline_picture: Option<(u64, Option<u64>)>,
     notice: Option<String>,
     /// Why the documents cannot be saved, while that is so.
     storage: Option<String>,
@@ -484,6 +516,7 @@ impl Analysis {
                 self.open(path, Origin::Result(result), &mut out);
             }
             Input::Show(index) => {
+                self.cancel_timeline_location(self.shown);
                 if let Some(index) = usize::try_from(index)
                     .ok()
                     .filter(|i| *i < self.documents.len())
@@ -540,6 +573,7 @@ impl Analysis {
                 }
             }
             Input::PlaybackByte { document, offset } => {
+                self.cancel_timeline_location(self.shown);
                 if let Some(doc) = self.documents.get_mut(self.shown)
                     && doc.id == document
                     && doc.len().is_some_and(|len| offset < len)
@@ -579,6 +613,7 @@ impl Analysis {
     }
 
     fn document_input(&mut self, at: usize, input: Input, out: &mut Vec<Effect>) {
+        self.cancel_timeline_if_selection_changes(at, &input);
         // A problem stays in view until the user does something else here.
         self.documents[at].notice = None;
         match input {
@@ -594,29 +629,12 @@ impl Analysis {
             }
             Input::Move(step) => self.step(at, step, out),
             Input::Scroll(rows) => {
-                let doc = &mut self.documents[at];
-                doc.top = if rows < 0 {
-                    doc.top.saturating_sub(u64::from(rows.unsigned_abs()))
-                } else {
-                    doc.top.saturating_add(u64::from(rows.unsigned_abs()))
-                };
-                self.clamp_top(at);
-                self.fill(at, out);
+                let top = self.documents[at]
+                    .top
+                    .saturating_add_signed(i64::from(rows));
+                self.scroll_navigator(at, top, out);
             }
-            Input::ScrollTo(share) => {
-                let doc = &mut self.documents[at];
-                let last = doc.total.unwrap_or(0).saturating_sub(VISIBLE_ROWS);
-                // `last` rows fit an f64 exactly far beyond any document.
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    clippy::cast_precision_loss
-                )]
-                let top = (f64::from(share.clamp(0.0, 1.0)) * last as f64).round() as u64;
-                doc.top = top;
-                self.clamp_top(at);
-                self.fill(at, out);
-            }
+            Input::ScrollTo(share) => self.scroll_navigator_to(at, share, out),
             Input::ByteClicked(slot) => {
                 let Ok(slot) = u64::try_from(slot) else {
                     return;
@@ -665,6 +683,15 @@ impl Analysis {
             | Input::FindingStep(_)
             | Input::Validate
             | Input::CancelValidation => self.evidence_input(at, input, out),
+            Input::TimelineBuild
+            | Input::TimelineCancel
+            | Input::TimelineRefresh
+            | Input::TimelineRange { .. }
+            | Input::TimelineSelect(_)
+            | Input::TimelineStep(_)
+            | Input::TimelineLinkFindings => {
+                self.timeline_input(at, &input, out);
+            }
             Input::Open(_)
             | Input::OpenResult(_)
             | Input::Show(_)
@@ -678,6 +705,27 @@ impl Analysis {
             | Input::PlaybackByte { .. }
             | Input::ClearCache => {}
         }
+    }
+
+    fn scroll_navigator(&mut self, at: usize, top: u64, out: &mut Vec<Effect>) {
+        self.documents[at].top = top;
+        self.clamp_top(at);
+        self.fill(at, out);
+    }
+
+    fn scroll_navigator_to(&mut self, at: usize, share: f32, out: &mut Vec<Effect>) {
+        let last = self.documents[at]
+            .total
+            .unwrap_or(0)
+            .saturating_sub(VISIBLE_ROWS);
+        // The index row limit is below the largest integer represented exactly by f64.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let top = (f64::from(share.clamp(0.0, 1.0)) * last as f64).round() as u64;
+        self.scroll_navigator(at, top, out);
     }
 
     fn evidence_input(&mut self, at: usize, input: Input, out: &mut Vec<Effect>) {
@@ -976,11 +1024,16 @@ impl Analysis {
             }
             (_, Event::AnalysisFailed { code, message, .. }) => {
                 self.failed(at, request_id, asked, Some(code), message);
+                self.retry_timeline_after_failure(at, asked, &mut out);
             }
             // A refused cancel: the open was answered first, and decides.
             (Asked::Cancel, Event::Error { .. }) => {}
             (_, Event::Error { message, .. }) => {
                 self.failed(at, request_id, asked, None, message);
+                self.retry_timeline_after_failure(at, asked, &mut out);
+            }
+            (Asked::Timeline(request), event) => {
+                self.timeline_event(at, request_id, request, event, &mut out);
             }
             (Asked::Evidence(request), event) => {
                 self.evidence_event(at, request_id, request, event, &mut out);
@@ -1122,6 +1175,19 @@ impl Analysis {
                     self.position_selection(at, out);
                 }
             }
+            Purpose::Timeline => {
+                self.timeline_located(
+                    at,
+                    request_id,
+                    found,
+                    if current {
+                        Position::of(row)
+                    } else {
+                        Position::Unknown
+                    },
+                    out,
+                );
+            }
             Purpose::Position => {
                 let same = doc
                     .selected
@@ -1170,10 +1236,13 @@ impl Analysis {
                 }
                 fail_or_notice(doc, code, &message);
             }
-            Asked::Locate { .. } => {
+            Asked::Locate { purpose, .. } => {
                 // Only the selecting locate's own failure stops it.
                 if doc.locating == Some(request_id) {
                     doc.locating = None;
+                    if purpose == Purpose::Timeline {
+                        doc.timeline.fail_link(message.clone());
+                    }
                 }
                 fail_or_notice(doc, code, &message);
             }
@@ -1185,6 +1254,16 @@ impl Analysis {
                     fail_or_notice(doc, code, &message);
                 } else {
                     doc.evidence.fail(request_id, request, message);
+                }
+            }
+            Asked::Timeline(request) => {
+                if matches!(
+                    code,
+                    Some(AnalysisFailure::SourceChanged | AnalysisFailure::UnknownDocument)
+                ) {
+                    fail_or_notice(doc, code, &message);
+                } else {
+                    doc.timeline.fail(request_id, request, message);
                 }
             }
             Asked::Cancel | Asked::Close => {}
@@ -1278,6 +1357,7 @@ impl Analysis {
         doc.wanted = None;
         doc.locating = None;
         doc.evidence.selected = None;
+        doc.timeline.clear_selection();
         if doc
             .selected
             .as_ref()
@@ -1341,6 +1421,13 @@ impl Analysis {
         });
         doc.evidence.tab = place.evidence_tab;
         doc.bytes.shown = place.bytes_shown;
+        let timeline = place
+            .timeline
+            .filter(|(scan, _)| Some(*scan) == doc.timeline.scan());
+        doc.timeline.restore_selection(timeline);
+        if let Some((_, selection)) = timeline {
+            self.timeline_picture = Some((doc.id, selection.output_ordinal));
+        }
         doc.evidence.reveal_selection();
         self.position_selection(at, out);
         self.fetch_bytes(at, out);
@@ -1370,7 +1457,11 @@ impl Analysis {
                 target,
             },
         );
-        if let Purpose::Select { .. } | Purpose::Restore | Purpose::Evidence { .. } = purpose {
+        if let Purpose::Select { .. }
+        | Purpose::Restore
+        | Purpose::Evidence { .. }
+        | Purpose::Timeline = purpose
+        {
             self.documents[at].locating = Some(id);
         }
     }
@@ -1581,6 +1672,9 @@ fn reply_document(event: &Event) -> Option<u64> {
         | Event::AnalysisPage { document: d, .. }
         | Event::AnalysisLocated { document: d, .. }
         | Event::AnalysisBytes { document: d, .. }
+        | Event::AnalysisIdentityScanned { document: d, .. }
+        | Event::AnalysisTimeline { document: d, .. }
+        | Event::AnalysisTimelineLocated { document: d, .. }
         | Event::AnalysisSyntaxReady { document: d, .. }
         | Event::AnalysisSyntaxPage { document: d, .. }
         | Event::AnalysisValidated { document: d, .. }

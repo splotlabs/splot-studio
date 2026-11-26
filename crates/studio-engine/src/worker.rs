@@ -226,6 +226,8 @@ fn serve<'scope>(
             | Command::AnalysisIdentityScan { .. }
             | Command::AnalysisCancelIdentity { .. }
             | Command::AnalysisIdentityPage { .. }
+            | Command::AnalysisTimeline { .. }
+            | Command::AnalysisTimelineLocate { .. }
             | Command::AnalysisCancel { .. }
             | Command::AnalysisPage { .. }
             | Command::AnalysisLocate { .. }

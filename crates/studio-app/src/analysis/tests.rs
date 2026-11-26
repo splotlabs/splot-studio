@@ -1418,3 +1418,215 @@ fn a_restored_syntax_row_is_visible_only_after_its_page_arrives() {
     );
     assert_eq!(doc(&analysis).evidence.selected_index(), Some(0));
 }
+
+#[test]
+fn timeline_history_keeps_coded_and_output_links_distinct() {
+    use studio_domain::timeline::{TimelineSelection, TimelineTarget};
+
+    let (mut analysis, engine) = opened(40);
+    let scan = start_timeline(&mut analysis);
+    let shown = TimelineSelection {
+        coded_ordinal: 7,
+        coded_offset: 19,
+        output_ordinal: Some(2),
+        showing_offset: Some(37),
+        time: None,
+    };
+    resolve_timeline(
+        &mut analysis,
+        &engine,
+        scan,
+        TimelineTarget::Output { index: 2 },
+        shown,
+    );
+    assert_eq!(selected(&analysis), Some((4, Position::Row(4))));
+    assert_eq!(doc(&analysis).bytes().cursor, 37);
+    assert_eq!(analysis.take_timeline_picture(), Some((1, Some(2))));
+
+    resolve_timeline(
+        &mut analysis,
+        &engine,
+        scan,
+        TimelineTarget::Coded { index: 7 },
+        shown,
+    );
+    assert_eq!(selected(&analysis), Some((2, Position::Row(2))));
+    assert_eq!(doc(&analysis).bytes().cursor, 19);
+    assert_eq!(analysis.take_timeline_picture(), Some((1, Some(2))));
+
+    let hidden = TimelineSelection {
+        coded_ordinal: 8,
+        coded_offset: 28,
+        output_ordinal: None,
+        showing_offset: None,
+        time: None,
+    };
+    resolve_timeline(
+        &mut analysis,
+        &engine,
+        scan,
+        TimelineTarget::Coded { index: 8 },
+        hidden,
+    );
+    assert_eq!(selected(&analysis), Some((3, Position::Row(3))));
+    assert_eq!(analysis.take_timeline_picture(), Some((1, None)));
+
+    let effects = analysis.input(Input::Back);
+    engine.settle(&mut analysis, effects);
+    assert_eq!(selected(&analysis), Some((2, Position::Row(2))));
+    assert_eq!(analysis.take_timeline_picture(), Some((1, Some(2))));
+    let effects = analysis.input(Input::Back);
+    engine.settle(&mut analysis, effects);
+    assert_eq!(selected(&analysis), Some((4, Position::Row(4))));
+    assert_eq!(analysis.take_timeline_picture(), Some((1, Some(2))));
+}
+
+#[test]
+fn timeline_drops_a_superseded_time_before_linking_evidence() {
+    use studio_domain::timeline::{TimelineSelection, TimelineTarget, TimelineTime};
+
+    let (mut analysis, engine) = opened(40);
+    let scan = start_timeline(&mut analysis);
+    let target = |num| TimelineTarget::Time {
+        time: TimelineTime { num, den: 1 },
+    };
+    let selection = TimelineSelection {
+        coded_ordinal: 7,
+        coded_offset: 19,
+        output_ordinal: Some(2),
+        showing_offset: Some(37),
+        time: Some(TimelineTime { num: 1, den: 1 }),
+    };
+    let first = analysis.input(Input::TimelineSelect(target(1)));
+    assert_eq!(
+        analysis.input(Input::TimelineSelect(target(2))),
+        [] as [Effect; 0]
+    );
+    let effects = analysis.event(first[0].request_id, timeline_reply(scan, selection));
+    assert!(matches!(
+        commands(&effects)[..],
+        [Command::AnalysisTimelineLocate { target: next, .. }] if *next == target(2)
+    ));
+    assert_eq!(analysis.take_timeline_picture(), None);
+    let picked = analysis.input(Input::RowClicked(5));
+    engine.settle(&mut analysis, picked);
+    let late = analysis.event(effects[0].request_id, timeline_reply(scan, selection));
+    assert_eq!(late, [] as [Effect; 0]);
+    assert_eq!(selected(&analysis), Some((5, Position::Row(5))));
+    assert_eq!(analysis.take_timeline_picture(), None);
+}
+
+#[test]
+fn a_live_timeline_keeps_one_range_request_and_refreshes_after_completion() {
+    use studio_domain::timeline::{
+        TimelineClock, TimelineFileBytes, TimelinePage, TimelineTarget, TimelineView,
+    };
+
+    let (mut analysis, _) = opened(40);
+    let scan = analysis.input(Input::TimelineBuild)[0].request_id;
+    assert!(doc(&analysis).timeline().can_refresh());
+    let first = analysis.input(Input::TimelineRefresh);
+    assert!(matches!(
+        commands(&first)[..],
+        [Command::AnalysisTimeline { .. }]
+    ));
+    assert!(!doc(&analysis).timeline().can_refresh());
+    assert_eq!(analysis.input(Input::TimelineRefresh), []);
+
+    let live_page = || Event::AnalysisTimeline {
+        document: 1,
+        scan,
+        page: Box::new(TimelinePage {
+            view: TimelineView::Coded,
+            first: 0,
+            total: 1,
+            complete: false,
+            verified: false,
+            clock: TimelineClock::Unavailable,
+            file_bytes: TimelineFileBytes {
+                file: 360,
+                obu: 9,
+                assigned_obu: 9,
+                unassigned_obu: 0,
+                framing: 0,
+                unclassified: 351,
+            },
+            bytes: None,
+            rate: None,
+            buckets: Vec::new(),
+        }),
+    };
+    assert_eq!(analysis.event(first[0].request_id, live_page()), []);
+    assert!(doc(&analysis).timeline().can_refresh());
+    let linked = analysis.input(Input::TimelineSelect(TimelineTarget::Coded { index: 0 }));
+    assert!(matches!(
+        commands(&linked)[..],
+        [Command::AnalysisTimelineLocate { .. }]
+    ));
+
+    let in_flight = analysis.input(Input::TimelineRefresh);
+    assert!(matches!(
+        commands(&analysis.input(Input::TimelineCancel))[..],
+        [Command::AnalysisCancelIdentity { .. }]
+    ));
+    assert!(!doc(&analysis).timeline().can_refresh());
+    assert_eq!(analysis.input(Input::TimelineRefresh), []);
+    assert_eq!(analysis.event(scan, timeline_finished()), []);
+    let final_range = analysis.event(in_flight[0].request_id, live_page());
+    assert!(matches!(
+        commands(&final_range)[..],
+        [Command::AnalysisTimeline { .. }]
+    ));
+    assert!(!doc(&analysis).timeline().can_refresh());
+}
+
+fn start_timeline(analysis: &mut Analysis) -> u64 {
+    let effects = analysis.input(Input::TimelineBuild);
+    let scan = effects[0].request_id;
+    let _ = analysis.event(scan, timeline_finished());
+    scan
+}
+
+fn timeline_finished() -> Event {
+    use studio_domain::identity::{IdentityCompletion, IdentitySummary};
+    use studio_domain::preview::GrainPolicy;
+
+    let summary = IdentitySummary {
+        schema: 1,
+        codec_revision: "codec".into(),
+        spec_revision: "spec".into(),
+        fingerprint: summary(40).fingerprint,
+        grain: GrainPolicy::Skip,
+        digest: None,
+        matches_structure: false,
+        completion: IdentityCompletion::Complete,
+        temporal: 1,
+        coded: 9,
+        continuations: 0,
+        outputs: 3,
+    };
+    Event::AnalysisIdentityScanned {
+        document: 1,
+        summary: Box::new(summary),
+    }
+}
+
+fn timeline_reply(scan: u64, selection: studio_domain::timeline::TimelineSelection) -> Event {
+    Event::AnalysisTimelineLocated {
+        document: 1,
+        scan,
+        selection: Box::new(selection),
+    }
+}
+
+fn resolve_timeline(
+    analysis: &mut Analysis,
+    engine: &Engine,
+    scan: u64,
+    target: studio_domain::timeline::TimelineTarget,
+    selection: studio_domain::timeline::TimelineSelection,
+) {
+    let effects = analysis.input(Input::TimelineSelect(target));
+    let links = analysis.event(effects[0].request_id, timeline_reply(scan, selection));
+    engine.settle(analysis, links);
+}

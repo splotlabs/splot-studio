@@ -7,6 +7,7 @@
 
 mod analysis;
 mod evidence;
+pub(crate) mod timeline;
 
 use std::time::Instant;
 

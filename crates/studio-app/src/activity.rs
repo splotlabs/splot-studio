@@ -303,6 +303,8 @@ impl Activity {
             | Event::AnalysisFindings { .. }
             | Event::AnalysisIdentityScanned { .. }
             | Event::AnalysisIdentityPage { .. }
+            | Event::AnalysisTimeline { .. }
+            | Event::AnalysisTimelineLocated { .. }
             | Event::BatchSettingsChecked
             | Event::BatchValidating { .. }
             | Event::BatchValidated { .. }

@@ -10,6 +10,7 @@ mod advanced;
 mod batch;
 mod export;
 mod presets;
+mod timeline;
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -235,6 +236,7 @@ impl Controller {
         ctl.wire_presets(window);
         ctl.wire_preview(window);
         ctl.wire_analysis(window);
+        timeline::bind(window);
         ctl.wire_batch(window);
         ctl.wire_export(window);
 

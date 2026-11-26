@@ -34,6 +34,9 @@ use studio_app::state::{AppState, Intent};
 use studio_app::workspace::Workspace;
 use studio_app::{AnalysisState, AppWindow, ByteRegion};
 
+#[path = "analyze/timeline.rs"]
+mod timeline;
+
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(60);
 const SIZE: (u32, u32) = (960, 680);
 
@@ -624,6 +627,7 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
     a_byte_only_finding_keeps_both_offsets(&mut rig, &scratch);
 
     eprintln!("Tab stops: navigator after {tabs}, byte view {byte_tabs} later");
+    timeline::controls(&mut rig, &scratch);
 }
 
 /// A malformed trailing bit has a native rule, a known bit position and

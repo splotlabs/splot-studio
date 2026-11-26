@@ -70,6 +70,32 @@ codec is young.
   seek can require decoding from the start of the stream. You can cancel the seek.
   When timing is unavailable, playback uses a labeled 30 fps assumption.
   A decode error leaves the navigator, syntax, and bytes available.
+- In Analyze, select **Show Frame Timeline** and then **Build Timeline**. You can
+  inspect the indexed rows during the scan. The timeline shows the available
+  range and its verification status.
+  Use **Coded order** to include frames with no output. Use **Output order** to
+  inspect displayed pictures. A cancelled scan shows the retained rows with
+  partial coverage.
+- Use **Zoom In**, **Zoom Out**, **Previous Range**, and **Next Range** to change
+  the view. A bar covers one row or a range of rows. Select a range bar to inspect
+  that range. Bars show the largest byte count. Marks show the mean and minimum.
+  Use **Show Table** to read the exact values and select a row with the keyboard.
+  With focus on the graph, use Left and Right to step between rows. Enter a
+  zero-based coded or output index in **Go**. When the output clock is valid,
+  you can also enter an exact time in seconds, such as `1/30`.
+- Selecting a row opens the linked OBU and its bytes. A row with an output also
+  selects its picture. Use **Syntax** to inspect the selected OBU or **Findings**
+  to inspect linked validation findings. **Back** and **Forward** restore the
+  linked selection. The row shows available native base quantizer values and
+  identifies them as signaled, derived, or inherited. These values apply to the
+  frame header or its references. Block quantizer averages require block evidence.
+- Coded byte counts include the frame OBU and its continuation OBUs. Output byte
+  counts assign each display OBU once. File accounting separates OBU bytes,
+  framing, and unclassified bytes. The output bitrate uses the range's timestamp
+  window, which ends at the next output timestamp. If the clock or end timestamp
+  is unavailable, Studio gives the reason. Use **Copy Statistics** or **Save
+  Statistics…** for exact values in the displayed range.
+
 - Inspect a decoded picture in RGB or select an available Y, U, or V plane. Fit shows the whole
   picture. Use integer zoom to inspect individual samples. Select a sample with the pointer
   or enter its coordinates to read and copy its exact integer value. The viewer shows

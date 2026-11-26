@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 
 use studio_domain::analysis::{DocumentSummary, Element, Row, RowFilter, Span};
 use studio_domain::job::SourceFingerprint;
+use studio_domain::timeline::TimelineSelection;
 
 use super::evidence::{Evidence, Pick};
-use super::{HISTORY, LINE_BYTES, WINDOW_BYTES};
+use super::{HISTORY, LINE_BYTES, Timeline, WINDOW_BYTES};
 use crate::queue::ItemId;
 
 /// A converted file and what it was converted from, fixed when Encode
@@ -163,6 +164,7 @@ pub(super) struct Place {
     pub(super) evidence: Option<Pick>,
     pub(super) evidence_tab: i32,
     pub(super) bytes_shown: bool,
+    pub(super) timeline: Option<(u64, TimelineSelection)>,
 }
 
 /// The byte view of one document.
@@ -206,6 +208,7 @@ pub struct Document {
     pub(super) selected: Option<Selected>,
     pub(super) history: Vec<Place>,
     pub(crate) evidence: Evidence,
+    pub(super) timeline: Timeline,
     /// Report awaiting source fingerprint verification at open.
     pub(super) pending_batch: Option<Box<crate::batch::Report>>,
     pub(super) at: usize,
@@ -242,6 +245,7 @@ impl Document {
             selected: None,
             history: Vec::new(),
             evidence: Evidence::default(),
+            timeline: Timeline::default(),
             pending_batch: None,
             at: 0,
             bytes: Bytes {
@@ -270,6 +274,7 @@ impl Document {
             evidence: self.evidence.selected,
             evidence_tab: self.evidence.tab,
             bytes_shown: self.bytes.shown,
+            timeline: self.timeline.history(),
         });
         if self.history.len() > HISTORY {
             self.history.remove(0);
@@ -324,7 +329,14 @@ impl Document {
         self.pending_batch = None;
         self.restore = self.restore();
         self.partial = None;
+        self.timeline = Timeline::default();
         self.phase = Phase::Failed { message, by };
+    }
+
+    /// The timeline for the current document generation.
+    #[must_use]
+    pub const fn timeline(&self) -> &Timeline {
+        &self.timeline
     }
 
     /// The engine's id of the current read; `0` before the first.

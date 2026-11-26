@@ -1,0 +1,339 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+import { ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
+import { Caption, Label, LinkButton } from "controls.slint";
+import { FocusRing, KeyboardFocus } from "focus.slint";
+import { Tokens } from "tokens.slint";
+
+export struct TimelineBar {
+    first: string,
+    count: string,
+    label: string,
+    detail: string,
+    minimum: float,
+    maximum: float,
+    mean: float,
+    known: bool,
+    selected: bool,
+    marker: string,
+}
+
+export global TimelineUi {
+    in property <bool> available;
+    in-out property <bool> expanded;
+    in-out property <bool> show-table;
+    in property <bool> built;
+    in property <bool> can-build;
+    in property <bool> can-cancel;
+    in property <bool> can-refresh;
+    in property <bool> can-pan-back;
+    in property <bool> can-pan-forward;
+    in property <bool> can-zoom-in;
+    in property <bool> can-zoom-out;
+    in property <bool> can-go-to-time;
+    in property <bool> selected;
+    in property <int> order;
+    in property <string> status;
+    in property <string> range-label;
+    in property <string> scope;
+    in property <string> summary;
+    in property <string> selection-detail;
+    in property <string> selected-index;
+    in property <string> exact-statistics;
+    in property <string> first;
+    in property <string> count;
+    in property <string> total;
+    in property <[TimelineBar]> bars;
+    in-out property <string> export-status;
+    in-out property <bool> exporting;
+
+    callback build();
+    callback cancel();
+    callback refresh();
+    callback reorder(int);
+    callback pan(int);
+    callback zoom(int);
+    callback step(int);
+    callback pick(int);
+    callback go-to(int, string);
+    callback findings();
+    callback save-statistics();
+}
+
+component TimelineGraph inherits KeyboardFocus {
+    min-height: 104px;
+    accessible-role: image;
+    accessible-label: "Frame size graph. Use Left and Right to select frames. Use the table to read exact values.";
+    accessible-description: TimelineUi.scope;
+    key-pressed(event) => {
+        if event.text == Key.LeftArrow || event.text == Key.RightArrow {
+            self.keyboard-used();
+            TimelineUi.step(event.text == Key.LeftArrow ? -1 : 1);
+            return accept;
+        }
+        if event.text == Key.PageUp || event.text == Key.PageDown {
+            self.keyboard-used();
+            TimelineUi.pan(event.text == Key.PageUp ? -1 : 1);
+            return accept;
+        }
+        reject
+    }
+
+    Rectangle {
+        background: Tokens.track;
+        border-color: Tokens.border;
+        border-width: 1px;
+        border-radius: Tokens.radius-small;
+
+        HorizontalLayout {
+            padding: Tokens.space-2;
+            spacing: 2px;
+            for bucket[index] in TimelineUi.bars: Rectangle {
+                horizontal-stretch: 1;
+                background: bucket.selected ? Tokens.row-selected : transparent;
+
+                Rectangle {
+                    y: parent.height - self.height - 16px;
+                    width: parent.width;
+                    height: bucket.known ? max(1px, (parent.height - 16px) * bucket.maximum) : 1px;
+                    background: bucket.known ? Tokens.accent : Tokens.border-strong;
+                    opacity: bucket.selected ? 1.0 : 0.62;
+                }
+
+                Rectangle {
+                    y: parent.height - 16px - (parent.height - 16px) * bucket.mean;
+                    width: parent.width;
+                    height: bucket.known ? 1px : 0px;
+                    background: Tokens.on-accent;
+                }
+
+                Rectangle {
+                    y: parent.height - 16px - (parent.height - 16px) * bucket.minimum;
+                    width: parent.width;
+                    height: bucket.known ? 1px : 0px;
+                    background: Tokens.text;
+                }
+
+                Text {
+                    y: parent.height - 15px;
+                    height: 15px;
+                    width: parent.width;
+                    text: bucket.marker;
+                    font-size: Tokens.type-caption * 1rem;
+                    horizontal-alignment: center;
+                    overflow: clip;
+                    color: Tokens.text;
+                    accessible-role: none;
+                }
+
+                TouchArea {
+                    clicked => {
+                        root.focus();
+                        TimelineUi.pick(index);
+                    }
+                }
+            }
+        }
+    }
+
+    FocusRing {
+        shown: root.ring;
+        x: -3px;
+        y: -3px;
+        width: root.width + 6px;
+        height: root.height + 6px;
+        radius: Tokens.radius-small;
+    }
+}
+
+export component TimelinePane inherits VerticalLayout {
+    in property <bool> active;
+    callback copy(string);
+    spacing: Tokens.space-2;
+
+    Timer {
+        interval: 400ms;
+        running: root.active && TimelineUi.expanded && TimelineUi.can-refresh;
+        triggered => { TimelineUi.refresh(); }
+    }
+
+    HorizontalLayout {
+        spacing: Tokens.space-2;
+        LinkButton {
+            text: TimelineUi.expanded ? "Hide Frame Timeline" : "Show Frame Timeline";
+            accessible-expandable: true;
+            accessible-expanded: TimelineUi.expanded;
+            clicked => {
+                TimelineUi.expanded = !TimelineUi.expanded;
+            }
+        }
+        Caption {
+            horizontal-stretch: 1;
+            text: TimelineUi.expanded ? "" : TimelineUi.range-label;
+            vertical-alignment: center;
+        }
+    }
+
+    if TimelineUi.expanded: VerticalLayout {
+        spacing: Tokens.space-2;
+
+        HorizontalLayout {
+            spacing: Tokens.space-2;
+            Caption {
+                horizontal-stretch: 1;
+                text: TimelineUi.status;
+                vertical-alignment: center;
+                accessible-live-region: polite;
+            }
+            if TimelineUi.can-build: LinkButton {
+                text: TimelineUi.built ? "Rebuild" : "Build Timeline";
+                description: "Read coded and displayed picture identities from the source.";
+                clicked => { TimelineUi.build(); }
+            }
+            if TimelineUi.can-cancel: LinkButton {
+                text: "Cancel Timeline Scan";
+                clicked => { TimelineUi.cancel(); }
+            }
+        }
+
+        if TimelineUi.built: VerticalLayout {
+            spacing: Tokens.space-2;
+
+            HorizontalLayout {
+                spacing: Tokens.space-2;
+                ComboBox {
+                    width: 132px;
+                    model: ["Coded order", "Output order"];
+                    current-index: TimelineUi.order;
+                    accessible-label: "Timeline order";
+                    selected => { TimelineUi.reorder(self.current-index); }
+                }
+                LinkButton {
+                    text: "Previous Range";
+                    enabled: TimelineUi.can-pan-back;
+                    clicked => { TimelineUi.pan(-1); }
+                }
+                LinkButton {
+                    text: "Next Range";
+                    enabled: TimelineUi.can-pan-forward;
+                    clicked => { TimelineUi.pan(1); }
+                }
+                LinkButton {
+                    text: "Zoom In";
+                    enabled: TimelineUi.can-zoom-in;
+                    clicked => { TimelineUi.zoom(1); }
+                }
+                LinkButton {
+                    text: "Zoom Out";
+                    enabled: TimelineUi.can-zoom-out;
+                    clicked => { TimelineUi.zoom(-1); }
+                }
+                LinkButton {
+                    text: TimelineUi.show-table ? "Hide Table" : "Show Table";
+                    accessible-expandable: true;
+                    accessible-expanded: TimelineUi.show-table;
+                    clicked => { TimelineUi.show-table = !TimelineUi.show-table; }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: Tokens.space-2;
+                kind := ComboBox {
+                    width: 146px;
+                    model: TimelineUi.can-go-to-time
+                        ? ["Coded index", "Output index", "Time"]
+                        : ["Coded index", "Output index"];
+                    accessible-label: "Go to timeline target";
+                }
+                target := LineEdit {
+                    width: 157px;
+                    placeholder-text: kind.current-index == 2 ? "Seconds or fraction" : "Index from 0";
+                    accessible-label: kind.current-index == 2 ? "Time in seconds" : "Frame index";
+                    accessible-description: "Indices start at zero. Enter time as seconds or a fraction in seconds.";
+                    accepted(text) => { TimelineUi.go-to(kind.current-index, text); }
+                }
+                LinkButton {
+                    text: "Go";
+                    description: "Select the requested timeline position.";
+                    clicked => { TimelineUi.go-to(kind.current-index, target.text); }
+                }
+                Caption {
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                    text: TimelineUi.range-label;
+                }
+            }
+
+            if TimelineUi.bars.length > 0: TimelineGraph {}
+
+            if TimelineUi.bars.length > 0: Caption {
+                text: TimelineUi.scope + " ◆ Random access · | Sequence change · – No output indexed · ? Byte count unavailable";
+            }
+            if TimelineUi.summary != "": Caption {
+                text: TimelineUi.summary;
+            }
+
+            if TimelineUi.show-table && TimelineUi.bars.length > 0: ScrollView {
+                min-height: 114px;
+                max-height: 114px;
+                accessible-role: list;
+                accessible-label: "Exact timeline buckets";
+                content-width: self.visible-width;
+
+                VerticalLayout {
+                    width: parent.content-width;
+                    padding: Tokens.space-2;
+                    spacing: Tokens.space-1;
+                    for bucket[index] in TimelineUi.bars: HorizontalLayout {
+                        spacing: Tokens.space-2;
+                        LinkButton {
+                            min-width: 94px;
+                            min-height: 22px;
+                            text: bucket.label;
+                            description: bucket.detail;
+                            highlighted: bucket.selected;
+                            clicked => { TimelineUi.pick(index); }
+                        }
+                        Caption {
+                            horizontal-stretch: 1;
+                            text: bucket.detail;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            if TimelineUi.selection-detail != "": Label {
+                text: TimelineUi.selection-detail;
+                wrap: word-wrap;
+                accessible-live-region: polite;
+            }
+
+            if TimelineUi.exact-statistics != "": HorizontalLayout {
+                spacing: Tokens.space-2;
+                LinkButton {
+                    text: "Copy Statistics";
+                    clicked => { root.copy(TimelineUi.exact-statistics); }
+                }
+                LinkButton {
+                    text: "Save Statistics…";
+                    description: "Save the displayed statistics to a new text file.";
+                    enabled: !TimelineUi.exporting;
+                    clicked => { TimelineUi.save-statistics(); }
+                }
+                if TimelineUi.selected: LinkButton {
+                    text: "Findings";
+                    description: "Show validation findings at the selected frame.";
+                    clicked => { TimelineUi.findings(); }
+                }
+                Caption {
+                    horizontal-stretch: 1;
+                    text: TimelineUi.export-status;
+                    vertical-alignment: center;
+                    accessible-live-region: polite;
+                }
+            }
+        }
+    }
+}
