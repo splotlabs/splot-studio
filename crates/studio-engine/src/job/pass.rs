@@ -20,28 +20,29 @@ use crate::source::Source;
 
 pub(super) fn generate(
     job: &JobSpec,
-    mut source: Source,
+    source: &mut Source,
     destination: &Path,
-    config: Config,
+    config: &Config,
     policy: Vec<Event>,
     control: &dyn Control,
     report: &mut (dyn FnMut(Event) + Send),
 ) -> Result<JobReport, Stop> {
-    require_vbr(&config)?;
+    require_vbr(config)?;
     let cancel = control.cancel_flag();
     report(Event::Stage {
         stage: Stage::Checking,
     });
-    let header = header(job, &source, &policy, cancel)?;
+    let header = header(job, source, &policy, cancel)?;
     source.start(cancel)?;
-    if source
-        .frame_count()
-        .is_some_and(|count| count > MAX_FRAMES as u64)
+    if source.facts.reader == SourceReader::Ffmpeg
+        && source
+            .frame_count()
+            .is_some_and(|count| count > MAX_FRAMES as u64)
     {
         return Err(limit());
     }
     report_policy(policy, control, report)?;
-    let (frames, bits) = analyze(&mut source, &config, control, report)?;
+    let (frames, bits) = analyze(source, config, control, report)?;
     if source.pass_identity(cancel)? != header.source {
         return Err(Stop::failed(
             FailureCode::SourceChanged,
@@ -49,9 +50,10 @@ pub(super) fn generate(
         ));
     }
 
-    let temp = open_output(destination, &source, control, report)?;
+    let temp = open_output(destination, source, control, report)?;
     stop_if(cancel)?;
     let digest = artifact::write(temp.as_file(), &header, &bits, cancel).map_err(write_error)?;
+    drop(bits);
     report(Event::Stage {
         stage: Stage::Verifying,
     });
@@ -168,14 +170,17 @@ pub(super) fn load(
         ));
     }
     let expected = header(job, source, policy, cancel)?;
+    let frame_count = match source.facts.reader {
+        SourceReader::Y4m => None,
+        SourceReader::Ffmpeg => Some(
+            source
+                .frame_count()
+                .ok_or_else(|| invalid("The source scan did not verify the frame count."))?,
+        ),
+    };
     artifact
-        .verify(&expected, source.frame_count())
+        .verify(&expected, frame_count)
         .map_err(read_error)?;
-    if source.facts.reader == SourceReader::Y4m {
-        check_y4m_count(source, artifact.bits.len() as u64, cancel)?;
-    } else if source.frame_count().is_none() {
-        return Err(invalid("The source scan did not verify the frame count."));
-    }
     Ok(Some(artifact))
 }
 

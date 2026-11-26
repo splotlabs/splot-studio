@@ -493,9 +493,12 @@ impl Source {
                 )
             }
         };
+        // The artifact carries an exact frame count. A probe may estimate it.
+        let mut facts = self.facts.clone();
+        facts.frame_count = None;
         Ok(crate::artifact::SourceIdentity {
             sha256,
-            facts: self.facts.clone(),
+            facts,
             adapter,
         })
     }

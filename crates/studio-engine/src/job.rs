@@ -164,7 +164,7 @@ fn execute(
         .destination
         .to_path_buf()
         .map_err(|e| output::output(e.to_string()))?;
-    let source = source::open(
+    let mut source = source::open(
         &source_path,
         Selection {
             fingerprint: Some(job.fingerprint),
