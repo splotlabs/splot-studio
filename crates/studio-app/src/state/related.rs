@@ -146,7 +146,7 @@ impl AppState {
             let Some(Ending::Completed(report)) = original.ending() else {
                 return None;
             };
-            job.pass_digest = report.pass_digest.clone();
+            job.pass_digest.clone_from(&report.pass_digest);
             job.pass_digest.as_ref()?;
             job.pass_artifact = Some(job.destination);
             job.purpose = JobPurpose::Encode;
@@ -204,7 +204,7 @@ impl AppState {
             }
             Err(error) => {
                 related.preview =
-                    RelatedPreview::Failed(format!("{}. {}", error.field, error.message))
+                    RelatedPreview::Failed(format!("{}. {}", error.field, error.message));
             }
         }
     }
