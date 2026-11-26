@@ -223,37 +223,45 @@ fn serve<'scope>(
                     return (Ok(()), true);
                 }
             }
-            Command::Picture { .. } | Command::Play { .. } | Command::StopPlayback => outbox.reply(
-                id,
-                refusal(
-                    ErrorCode::WrongState,
-                    "a job worker does not serve pictures; the preview process does",
-                ),
-            ),
+            Command::Picture { .. } | Command::Play { .. } | Command::StopPlayback => {
+                outbox.reply(
+                    id,
+                    refusal(
+                        ErrorCode::WrongState,
+                        "Use the preview process for pictures.",
+                    ),
+                );
+            }
             Command::AnalysisOpen { .. }
             | Command::AnalysisCancel { .. }
             | Command::AnalysisPage { .. }
             | Command::AnalysisLocate { .. }
             | Command::AnalysisBytes { .. }
-            | Command::AnalysisClose { .. } => outbox.reply(
-                id,
-                refusal(
-                    ErrorCode::WrongState,
-                    "a job worker does not serve analysis; the inspect process does",
-                ),
-            ),
+            | Command::AnalysisClose { .. } => {
+                outbox.reply(
+                    id,
+                    refusal(
+                        ErrorCode::WrongState,
+                        "Use the inspect process for analysis.",
+                    ),
+                );
+            }
         }
     };
+    (result, stop_job(outbox, job))
+}
+
+fn stop_job(outbox: &Outbox, job: Option<ScopedJoinHandle<'_, ()>>) -> bool {
     // The end of input, or an unreadable one, means nobody can cancel later.
     outbox.stop(&outbox.lock());
     if outbox.settle(CANCEL_GRACE) {
-        return (result, true);
+        return true;
     }
     if let Some(handle) = job {
         // The job body cannot panic past `catch_unwind`.
         let _ = handle.join();
     }
-    (result, false)
+    false
 }
 
 fn next_command(
