@@ -65,7 +65,7 @@ impl Analysis {
             .summary()
             .is_some_and(|summary| matches_source(summary, &report))
         {
-            doc.notice = Some("Studio could not match the opened bytes to the validated source. Export the retained report from Jobs.".into());
+            doc.notice = Some("Studio could not verify the entire source against this report. Export the retained report from Jobs.".into());
             return;
         }
         if doc.evidence.running.is_some() {
@@ -81,6 +81,7 @@ impl Analysis {
 }
 
 fn matches_source(summary: &DocumentSummary, report: &Report) -> bool {
-    same_file(summary.fingerprint, report.fingerprint)
+    report.digest.bytes == report.fingerprint.len
+        && same_file(summary.fingerprint, report.fingerprint)
         && summary.digest.as_deref() == Some(&report.digest)
 }

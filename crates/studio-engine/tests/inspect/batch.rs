@@ -416,6 +416,73 @@ fn a_stopped_scan_digests_only_the_bytes_read() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn validation_hashes_an_ivf_tail_beyond_the_index_limit() -> TestResult {
+    use splot_core::ivf::{IvfHeader, write_ivf_frame, write_ivf_header};
+    use studio_domain::analysis::{ProblemKind, ScanOutcome};
+    use studio_engine::inspect::document::MAX_RETAINED_ELEMENTS;
+
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("tail.ivf");
+    // Empty records consume Studio index slots without consuming the native OBU limit.
+    // Keep the tail beyond the scan buffer's read-ahead.
+    let empty = u32::try_from(MAX_RETAINED_ELEMENTS + 2048)?;
+    let mut contents = Vec::new();
+    write_ivf_header(
+        &mut contents,
+        &IvfHeader::new(*b"AV02", 16, 16, 24, 1, empty + 1),
+    )?;
+    for pts in 0..u64::from(empty) {
+        write_ivf_frame(&mut contents, pts, &[])?;
+    }
+    write_ivf_frame(&mut contents, u64::from(empty), &[0x02, 0x88, 0x05])?;
+    fs::write(&path, &contents)?;
+    let modified = fs::metadata(&path)?.modified()?;
+    let mut inspect = Inspect::spawn()?;
+    let indexed = inspect.open(1, &path)?;
+    assert!(matches!(indexed.outcome, ScanOutcome::Stopped { problem }
+        if problem.kind == ProblemKind::LimitReached));
+    let indexed_digest = indexed.digest.ok_or("expected index digest")?;
+    assert!(indexed_digest.bytes < contents.len() as u64);
+    let latest = inspect.next_id;
+    inspect.send(vec![validate(&path)])?;
+    let BatchOutcome::Validated {
+        fingerprint,
+        digest,
+        summary,
+        ..
+    } = outcome(&mut inspect, latest)?
+    else {
+        return Err("expected native validation evidence".into());
+    };
+    assert_eq!(summary.checked_obus, 1);
+    assert_eq!(digest.bytes, contents.len() as u64);
+    assert_eq!(digest.sha256, sha256(&contents));
+
+    let tail = contents.last_mut().ok_or("expected an IVF tail")?;
+    *tail = 0x06;
+    fs::write(&path, &contents)?;
+    fs::File::options()
+        .write(true)
+        .open(&path)?
+        .set_times(fs::FileTimes::new().set_modified(modified))?;
+    let indexed = inspect.open(2, &path)?;
+    assert_eq!(indexed.digest.as_deref(), Some(&*indexed_digest));
+    assert_eq!(indexed.fingerprint, fingerprint);
+    let latest = inspect.next_id;
+    inspect.send(vec![validate(&path)])?;
+    let BatchOutcome::Validated {
+        digest: updated, ..
+    } = outcome(&mut inspect, latest)?
+    else {
+        return Err("expected updated validation evidence".into());
+    };
+    assert_eq!(updated.bytes, digest.bytes);
+    assert_eq!(updated.sha256, sha256(&contents));
+    assert_ne!(updated.sha256, digest.sha256);
+    Ok(())
+}
+
 fn sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     use std::fmt::Write as _;

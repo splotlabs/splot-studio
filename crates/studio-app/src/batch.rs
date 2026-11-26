@@ -22,6 +22,15 @@ pub struct File {
     pub(crate) archived: bool,
 }
 
+impl File {
+    pub(crate) fn can_open_report(&self) -> bool {
+        self.archived
+            && matches!(&self.phase, Phase::Report(outcome)
+            if matches!(&**outcome, BatchOutcome::Validated { fingerprint, digest, .. }
+                if fingerprint.len == digest.bytes))
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum Phase {
     Queued,
@@ -179,11 +188,8 @@ impl Batch {
     }
 
     pub fn show(&mut self, validation: u64) -> Option<Effect> {
-        self.file(validation).filter(|file| {
-            file.archived
-                && matches!(file.phase, Phase::Report(ref outcome)
-                if matches!(**outcome, BatchOutcome::Validated { .. }))
-        })?;
+        self.file(validation)
+            .filter(|file| file.can_open_report())?;
         self.fetch(validation, Vec::new())
     }
 

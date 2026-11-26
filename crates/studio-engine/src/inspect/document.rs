@@ -160,17 +160,10 @@ impl Document {
         let reader = file
             .try_clone()
             .map_err(|e| io("cannot read the file", e))?;
-        let mut reader = HashReader {
-            inner: Checked::new(reader, cancelled),
-            hash: Sha256::new(),
-            bytes: 0,
-        };
+        let mut reader = HashReader::new(Checked::new(reader, cancelled));
         let scanned = scan(BufReader::new(&mut reader), fingerprint.len, cancelled)?;
         let mut summary = scanned.summary(fingerprint);
-        summary.digest = Some(Box::new(SourceDigest {
-            sha256: crate::artifact::hex(&reader.hash.finalize()),
-            bytes: reader.bytes,
-        }));
+        summary.digest = Some(Box::new(reader.finish()));
         let document = Self {
             summary,
             path,
@@ -273,10 +266,27 @@ impl<R: Read> Read for Checked<'_, R> {
 }
 
 /// Hashes bytes from the file handle, including any bytes read ahead by the buffer.
-struct HashReader<R> {
+pub(super) struct HashReader<R> {
     inner: R,
     hash: Sha256,
     bytes: u64,
+}
+
+impl<R> HashReader<R> {
+    pub(super) fn new(inner: R) -> Self {
+        Self {
+            inner,
+            hash: Sha256::new(),
+            bytes: 0,
+        }
+    }
+
+    pub(super) fn finish(self) -> SourceDigest {
+        SourceDigest {
+            sha256: crate::artifact::hex(&self.hash.finalize()),
+            bytes: self.bytes,
+        }
+    }
 }
 
 impl<R: Read> Read for HashReader<R> {

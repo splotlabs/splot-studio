@@ -12,12 +12,13 @@ use splot_core::span::{BitOffset, ByteOffset};
 use splot_validate::{
     StreamValidateError, ValidationCompletion as NativeCompletion, ValidationLimits, Validator,
 };
+use studio_domain::analysis::SourceDigest;
 use studio_domain::validation::{
     Finding, Severity, VALIDATION_SCHEMA, ValidationCompletion, ValidationEvidence,
     ValidationSettings, ValidationSummary,
 };
 
-use super::document::{Checked, MAX_RETAINED_ELEMENTS, MAX_UNIT_BYTES, Refusal};
+use super::document::{Checked, HashReader, MAX_RETAINED_ELEMENTS, MAX_UNIT_BYTES, Refusal};
 
 const MAX_FINDINGS: u32 = 4096;
 
@@ -31,11 +32,11 @@ pub(super) fn validate(
     file: &mut File,
     settings: &ValidationSettings,
     cancelled: &dyn Fn() -> bool,
-) -> Result<ValidationEvidence, Refusal> {
+) -> Result<(ValidationEvidence, SourceDigest), Refusal> {
     let (options, context) = context::options(settings.external_hls.as_deref())?;
-    let reader = BufReader::new(Checked::new(file, cancelled));
+    let mut reader = HashReader::new(Checked::new(file, cancelled));
     let result = Validator::new(settings.strict).validate_reader_with_evidence(
-        reader,
+        BufReader::new(&mut reader),
         &options,
         ValidationLimits {
             max_unit_bytes: MAX_UNIT_BYTES,
@@ -95,7 +96,7 @@ pub(super) fn validate(
         .errors
         .saturating_add(counts.warnings)
         .saturating_add(counts.info);
-    Ok(ValidationEvidence {
+    let evidence = ValidationEvidence {
         summary: ValidationSummary {
             schema: VALIDATION_SCHEMA,
             spec_revision: "AV2 v1.0.0".into(),
@@ -116,7 +117,8 @@ pub(super) fn validate(
             omitted: total.saturating_sub(findings.len()) as u64,
         },
         findings,
-    })
+    };
+    Ok((evidence, reader.finish()))
 }
 
 #[cfg(test)]
@@ -132,7 +134,9 @@ mod tests {
             strict,
             external_hls: None,
         };
-        validate(file, &settings, &|| false).map_err(|error| std::io::Error::other(error.message))
+        validate(file, &settings, &|| false)
+            .map(|(evidence, _)| evidence)
+            .map_err(|error| std::io::Error::other(error.message))
     }
 
     #[test]

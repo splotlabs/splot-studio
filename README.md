@@ -61,9 +61,10 @@ codec is young.
 - Open a validation result in Analyze to inspect its findings without running validation
   again. From Jobs, export the complete retained report as JSON or plain text. The report
   records scope, interruptions, and omitted findings. When validation runs, the report
-  includes the SHA-256 digest and the number of source bytes read during the scan. A stopped
-  scan may hash only a prefix. Reports omit absolute paths. Completed checks cannot certify
-  AV2 conformance.
+  includes the SHA-256 digest and the number of source bytes the validator read. A stopped
+  validation may hash only a prefix. Studio attaches findings in Analyze only when both
+  workers can verify the full source. Reports omit absolute paths. Completed checks cannot
+  certify AV2 conformance.
 
 **What it refuses, with a reason**
 

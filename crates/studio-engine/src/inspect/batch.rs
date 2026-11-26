@@ -292,18 +292,12 @@ impl Entry {
             self.source_id = Some(document.identity().clone());
             validating();
             let fingerprint = document.summary().fingerprint;
-            let digest = document.summary().digest.clone().ok_or_else(|| {
-                Refusal::new(
-                    AnalysisFailure::Io,
-                    "The source scan did not return a digest.",
-                )
-            })?;
-            let evidence = document.collect_validation(settings, cancelled)?;
+            let (evidence, digest) = document.collect_validation(settings, cancelled)?;
             let total = evidence.findings.len() as u64;
             self.findings = evidence.findings;
             Ok(BatchOutcome::Validated {
                 fingerprint,
-                digest: *digest,
+                digest,
                 summary: Box::new(evidence.summary),
                 total,
             })

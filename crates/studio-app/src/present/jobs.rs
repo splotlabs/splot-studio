@@ -222,6 +222,11 @@ fn validation(file: &ValidationFile) -> String {
             let mut detail = validation_result(report);
             if !file.archived {
                 detail.push_str(" The worker stopped. Its detailed report is unavailable.");
+            } else if matches!(&**report, BatchOutcome::Validated { .. }) && !file.can_open_report()
+            {
+                detail.push_str(
+                    " Studio read only a source prefix. Export the report to inspect it.",
+                );
             }
             detail
         }

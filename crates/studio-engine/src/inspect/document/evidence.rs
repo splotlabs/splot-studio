@@ -4,7 +4,7 @@
 //! Evidence retained for one generation of an open source.
 
 use serde::Serialize;
-use studio_domain::analysis::{AnalysisFailure, Element, Framing, MAX_PAGE_ELEMENTS};
+use studio_domain::analysis::{AnalysisFailure, Element, Framing, MAX_PAGE_ELEMENTS, SourceDigest};
 use studio_domain::syntax::{SyntaxEvent, SyntaxSummary};
 use studio_domain::validation::{
     Finding, ValidationEvidence, ValidationSettings, ValidationSummary,
@@ -104,7 +104,7 @@ impl Document {
                 "Use a request ID greater than the last validation request ID.",
             ));
         }
-        let report = self.validate_source(settings, cancelled)?;
+        let (report, _) = self.validate_source(settings, cancelled)?;
         let total = report.findings.len() as u64;
         self.evidence.report = Some((request, report.findings));
         Ok((report.summary, total))
@@ -114,7 +114,7 @@ impl Document {
         &mut self,
         settings: &ValidationSettings,
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<ValidationEvidence, Refusal> {
+    ) -> Result<(ValidationEvidence, SourceDigest), Refusal> {
         self.check()?;
         self.validate_source(settings, cancelled)
     }
@@ -123,7 +123,7 @@ impl Document {
         &mut self,
         settings: &ValidationSettings,
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<ValidationEvidence, Refusal> {
+    ) -> Result<(ValidationEvidence, SourceDigest), Refusal> {
         if self
             .summary
             .ivf_header
@@ -146,7 +146,18 @@ impl Document {
             })
             .and_then(|_| validation::validate(&mut self.file, settings, cancelled));
         self.check()?;
-        let mut report = result?;
+        let (mut report, digest) = result?;
+        if self
+            .summary
+            .digest
+            .as_ref()
+            .is_some_and(|indexed| indexed.bytes == digest.bytes && indexed.sha256 != digest.sha256)
+        {
+            return Err(Refusal::new(
+                AnalysisFailure::SourceChanged,
+                "The source bytes changed between inspection and validation.",
+            ));
+        }
         for finding in &mut report.findings {
             if let Some(byte) = finding.file_offset {
                 let (stream, layer) = indexed_location(&self.items, byte);
@@ -158,7 +169,7 @@ impl Document {
                 finding.extended_layer_id = layer;
             }
         }
-        Ok(report)
+        Ok((report, digest))
     }
 
     pub(in crate::inspect) fn findings(

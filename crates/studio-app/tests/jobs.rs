@@ -362,6 +362,7 @@ fn jobs_and_documents_survive_cancel_close_worker_death_and_restart() {
     let scratch = Scratch::new("lifecycle");
     validation_setup_keyboard(&rig);
     batch_reports_in_jobs_and_analyze(&mut rig);
+    partial_batch_reports_can_export_without_attaching(&mut rig);
     concurrent_encode_and_inspection(&mut rig, &scratch);
     cancel_and_close(&mut rig, &scratch);
     #[cfg(unix)]
@@ -479,6 +480,28 @@ fn batch_reports_in_jobs_and_analyze(rig: &mut Rig) {
             State::Failed
         ]
     );
+    rig.stop();
+}
+
+fn partial_batch_reports_can_export_without_attaching(rig: &mut Rig) {
+    let scratch = Scratch::new("partial-batch");
+    let source = scratch.media("oversize.obu");
+    // Temporal delimiter, then an Annex B length of 64 MiB plus one byte.
+    let mut contents = vec![0x01, 0x08, 0x81, 0x80, 0x80, 0x20];
+    contents.resize(128 * 1024, 0);
+    fs::write(&source, contents).unwrap_or_else(|error| unreachable!("{error}"));
+    rig.start(&scratch);
+    rig.session()
+        .batch_start(vec![source], ValidationSettings::default());
+    rig.settle("the resource-limited validation ended", |session| {
+        !session.batch_active()
+    });
+    let jobs = rig.session().jobs();
+    assert_eq!(jobs[0].state, State::Stopped);
+    assert!(jobs[0].can_export());
+    assert!(!jobs[0].can_show());
+    let detail = studio_app::present::jobs::line(&jobs[0]).detail;
+    assert!(detail.contains("source prefix"));
     rig.stop();
 }
 

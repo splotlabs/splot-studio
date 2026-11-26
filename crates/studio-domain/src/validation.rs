@@ -29,7 +29,7 @@ pub enum BatchOutcome {
     Validated {
         /// Identity of the validated input.
         fingerprint: SourceFingerprint,
-        /// SHA-256 and byte count from the source scan before validation.
+        /// SHA-256 and byte count from the validation reader, including read-ahead.
         digest: SourceDigest,
         /// Execution evidence and requested policy.
         summary: Box<ValidationSummary>,

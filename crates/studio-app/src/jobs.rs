@@ -114,11 +114,7 @@ impl Job<'_> {
     #[must_use]
     pub fn can_show(&self) -> bool {
         match self.work {
-            Work::Validate(file) => {
-                file.archived
-                    && matches!(&file.phase, ValidationPhase::Report(outcome)
-                    if matches!(**outcome, BatchOutcome::Validated { .. }))
-            }
+            Work::Validate(file) => file.can_open_report(),
             Work::Convert(_) | Work::Inspect(..) => true,
         }
     }
