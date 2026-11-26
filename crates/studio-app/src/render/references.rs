@@ -59,8 +59,7 @@ fn output_text(document: &Document, evidence: &ReferenceEvidence) -> String {
         ),
         _ if document
             .timeline()
-            .page()
-            .is_some_and(|page| page.complete && page.verified) =>
+            .has_verified_index(document.layer_decode_selection()) =>
         {
             format!(
                 "Coded index {}. The complete timeline records no output.",

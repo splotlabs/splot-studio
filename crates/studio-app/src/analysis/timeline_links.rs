@@ -44,6 +44,12 @@ pub(super) enum Request {
     Locate { scan: u64, target: TimelineTarget },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScanOutcome {
+    completion: IdentityCompletion,
+    matches_structure: bool,
+}
+
 /// The timeline state of one open source generation.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Timeline {
@@ -51,7 +57,7 @@ pub struct Timeline {
     decode_selection: Option<LayerDecodeSelection>,
     collecting: bool,
     cancelling: bool,
-    completion: Option<IdentityCompletion>,
+    outcome: Option<ScanOutcome>,
     range: TimelineRange,
     reading: Option<u64>,
     refresh_after_finish: bool,
@@ -76,6 +82,14 @@ impl Timeline {
         self.scan
     }
 
+    pub(crate) fn has_verified_index(&self, policy: LayerDecodeSelection) -> bool {
+        self.scan.is_some()
+            && self.decode_selection == Some(policy)
+            && self.outcome.as_ref().is_some_and(|outcome| {
+                outcome.completion == IdentityCompletion::Complete && outcome.matches_structure
+            })
+    }
+
     /// Whether an identity scan or timeline request is active.
     #[must_use]
     pub const fn busy(&self) -> bool {
@@ -94,7 +108,10 @@ impl Timeline {
     /// The final scan outcome, when the engine has returned it.
     #[must_use]
     pub const fn completion(&self) -> Option<&IdentityCompletion> {
-        self.completion.as_ref()
+        match &self.outcome {
+            Some(outcome) => Some(&outcome.completion),
+            None => None,
+        }
     }
 
     /// Whether a visible timeline can refresh its partial rows.
@@ -405,7 +422,10 @@ impl Analysis {
             {
                 timeline.collecting = false;
                 timeline.cancelling = false;
-                timeline.completion = Some(summary.completion);
+                timeline.outcome = Some(ScanOutcome {
+                    completion: summary.completion,
+                    matches_structure: summary.matches_structure,
+                });
                 timeline.refresh_after_finish = timeline.reading.is_some();
                 self.request_timeline_range(at, out);
             }

@@ -536,10 +536,7 @@ impl Analysis {
                     .ok()
                     .filter(|i| *i < self.documents.len())
                 {
-                    if index != self.shown && self.documents[self.shown].references.busy() {
-                        self.cancel_references(self.shown, &mut out);
-                    }
-                    self.shown = index;
+                    self.show_document(index, &mut out);
                 }
             }
             Input::Close => self.close(&mut out),
@@ -571,7 +568,7 @@ impl Analysis {
                     }
                     doc.path = to;
                     doc.phase = Phase::Unread;
-                    self.shown = at;
+                    self.show_document(at, &mut out);
                 }
             }
             Input::PlaybackByte { document, offset } => {
@@ -854,6 +851,18 @@ impl Analysis {
         }
     }
 
+    fn show_document(&mut self, at: usize, out: &mut Vec<Effect>) {
+        if at != self.shown
+            && self
+                .documents
+                .get(self.shown)
+                .is_some_and(|document| document.references.busy())
+        {
+            self.cancel_references(self.shown, out);
+        }
+        self.shown = at;
+    }
+
     /// Opens `path`, or shows it when it is already open or opening.
     fn open(&mut self, path: PathBuf, origin: Origin, out: &mut Vec<Effect>) {
         if let Some(at) = self.documents.iter().position(|d| {
@@ -861,7 +870,7 @@ impl Analysis {
                 && !matches!(d.phase, Phase::Failed { .. } | Phase::Missing)
                 && d.origin == origin
         }) {
-            self.shown = at;
+            self.show_document(at, out);
             return;
         }
         if self.documents.len() >= MAX_DOCUMENTS {
@@ -873,13 +882,14 @@ impl Analysis {
         }
         self.notice = None;
         self.documents.push(Document::new(path, origin, None));
-        self.shown = self.documents.len() - 1;
+        self.show_document(self.documents.len() - 1, out);
         self.read(self.shown, out);
     }
 
     /// Starts a new read of document `at` with a new engine id. Everything
     /// the last read showed is dropped; its view stays in `restore`.
     fn read(&mut self, at: usize, out: &mut Vec<Effect>) {
+        self.cancel_references(at, out);
         self.next_document += 1;
         let id = self.next_document;
         let old = &self.documents[at];
@@ -918,6 +928,7 @@ impl Analysis {
         if self.shown >= self.documents.len() {
             return;
         }
+        self.cancel_references(self.shown, out);
         let doc = self.documents.remove(self.shown);
         // Its answers have nobody to go to now.
         self.pending.retain(|_, (document, _)| *document != doc.id);
