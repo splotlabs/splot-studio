@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of buckets in a timeline response.
-pub const MAX_TIMELINE_BUCKETS: u32 = 128;
+pub const MAX_TIMELINE_BUCKETS: u32 = 96;
 
 /// Which order and byte scope to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,7 +213,75 @@ mod numerator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Command, Envelope, ProtocolError, decode, read_frame, write_message};
+    use crate::protocol::{
+        Command, Envelope, Event, ProtocolError, decode, read_frame, write_message,
+    };
+
+    #[test]
+    fn a_full_resolution_page_fits_the_wire_budget() -> Result<(), ProtocolError> {
+        let time = Some(TimelineTime {
+            num: u128::MAX,
+            den: u64::MAX,
+        });
+        let bytes = Some(ByteDistribution {
+            min: u64::MAX,
+            max: u64::MAX,
+            sum: u64::MAX,
+        });
+        let entry = Some(TimelineEntry {
+            ordinal: u64::MAX,
+            coded_offset: u64::MAX,
+            showing_offset: Some(u64::MAX),
+            sequence_offset: u64::MAX,
+            coded_ordinal: u64::MAX,
+            output_ordinal: Some(u64::MAX),
+            bytes: u64::MAX,
+            time,
+            interval: time,
+            random_access: false,
+            quantizer: TimelineQuantizer::InheritedBase { value: u32::MAX },
+        });
+        let page = TimelinePage {
+            view: TimelineView::Output,
+            first: u64::MAX,
+            total: u64::MAX,
+            complete: false,
+            verified: false,
+            clock: TimelineClock::Discontinuous,
+            file_bytes: TimelineFileBytes {
+                file: u64::MAX,
+                obu: u64::MAX,
+                assigned_obu: u64::MAX,
+                unassigned_obu: u64::MAX,
+                framing: u64::MAX,
+                unclassified: u64::MAX,
+            },
+            bytes,
+            rate: time,
+            buckets: (0..MAX_TIMELINE_BUCKETS)
+                .map(|_| TimelineBucket {
+                    first: u64::MAX,
+                    count: 1,
+                    bytes,
+                    entry,
+                })
+                .collect(),
+        };
+        let envelope = Envelope::new(
+            u64::MAX,
+            Event::AnalysisTimeline {
+                document: u64::MAX,
+                scan: u64::MAX,
+                page: Box::new(page),
+            },
+        );
+        let mut wire = Vec::new();
+        write_message(&mut wire, &envelope)?;
+        let frame = read_frame(&mut wire.as_slice())?.ok_or(ProtocolError::Truncated)?;
+        let decoded: Envelope<Event> = decode(&frame)?;
+        assert_eq!(decoded, envelope);
+        Ok(())
+    }
 
     #[test]
     fn tagged_timeline_request_round_trips_a_wide_rational() -> Result<(), ProtocolError> {
