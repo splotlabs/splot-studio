@@ -143,6 +143,7 @@ pub struct Session {
     preflight: Option<preflight::Preflight>,
     preflight_queue: VecDeque<preflight::Request>,
     prepared: Option<(u64, JobSpec)>,
+    confirming: Option<(u64, usize)>,
     preview: Preview,
     /// The preview process, started on first need, with its spawn number.
     previewer: Option<(u64, Worker)>,
@@ -187,6 +188,7 @@ impl Session {
             preflight: None,
             preflight_queue: VecDeque::new(),
             prepared: None,
+            confirming: None,
             preview: Preview::new(),
             previewer: None,
             previewers_started: 0,
@@ -330,6 +332,7 @@ impl Session {
             return outcome;
         }
         let workspace = self.state.workspace();
+        let batch_policy = matches!(intent, Intent::QueuedPolicy { .. });
         let mut pending = VecDeque::from([intent]);
         while let Some(intent) = pending.pop_front() {
             // Destinations are looked at before anything can start, but not
@@ -341,7 +344,7 @@ impl Session {
                     ..
                 }
             );
-            if !counters {
+            if !counters && !batch_policy {
                 self.state.refresh_destinations(&RealDisk);
             }
             let update = self.state.apply(intent, now, &RealDisk);
@@ -353,7 +356,9 @@ impl Session {
         if outcome.changed == Changed::Phase {
             self.note_storage();
             outcome.analysis |= self.analysis.take_dirty();
-            self.persist();
+            if !batch_policy {
+                self.persist();
+            }
             let effects = self.preview.sync(preview::scene(&self.state));
             self.send_preview(effects);
         }
@@ -639,6 +644,15 @@ impl Session {
                 return nothing;
             }
             Delivery::Event(Envelope {
+                body:
+                    Event::JobPolicy {
+                        first,
+                        total,
+                        values,
+                    },
+                ..
+            }) => return self.confirm_policy(id, first, total, &values, now),
+            Delivery::Event(Envelope {
                 body: Event::PictureUnavailable { message, .. },
                 ..
             }) => {
@@ -781,6 +795,11 @@ impl Session {
             }
             Effect::Start { id, job } => self.begin_preflight(id, job, pending),
             Effect::Worker { id, effect } => {
+                if effect == activity::Effect::SendCancel
+                    && self.confirming.is_some_and(|(current, _)| current == id)
+                {
+                    self.confirming = None;
+                }
                 if effect == activity::Effect::SendCancel
                     && (self
                         .preflight

@@ -340,7 +340,7 @@ impl Session {
             return Outcome::nothing();
         };
         let live = Some(self.preview.live_box());
-        if let Err(detail) = self.send_job(id, Command::Start { job, live }) {
+        if let Err(detail) = self.send_job(id, Command::StartChecked { job, live }) {
             return self.dispatch(
                 Intent::Job {
                     id,
@@ -349,6 +349,56 @@ impl Session {
                 now,
             );
         }
+        self.confirming = Some((id, 0));
+        Outcome::nothing()
+    }
+
+    pub(super) fn confirm_policy(
+        &mut self,
+        id: u64,
+        first: u32,
+        total: u32,
+        values: &[EffectiveOption],
+        now: Instant,
+    ) -> Outcome {
+        let Some((_, offset)) = self.confirming.filter(|(current, _)| *current == id) else {
+            return Outcome::nothing();
+        };
+        let next = self
+            .state
+            .items()
+            .iter()
+            .filter_map(crate::queue::Item::attempt)
+            .find(|attempt| attempt.request == id)
+            .and_then(|attempt| matching_page(&attempt.policy, offset, first, total, values));
+        let Some(end) = next else {
+            return self.preflight_failed(
+                id,
+                Failure {
+                    code: FailureCode::InvalidSettings,
+                    message:
+                        "The engine policy differs from the saved policy. Submit the job again."
+                            .into(),
+                },
+                now,
+            );
+        };
+
+        if end == total as usize {
+            self.confirming = None;
+            if let Err(message) = self.send_job(id, Command::ConfirmPolicy) {
+                return self.preflight_failed(
+                    id,
+                    Failure {
+                        code: FailureCode::InvalidSettings,
+                        message,
+                    },
+                    now,
+                );
+            }
+        } else {
+            self.confirming = Some((id, end));
+        }
         Outcome::nothing()
     }
 
@@ -356,6 +406,7 @@ impl Session {
         self.preflight = None;
         self.preflight_queue.clear();
         self.prepared = None;
+        self.confirming = None;
     }
 
     fn send_job(&mut self, id: u64, command: Command) -> Result<(), String> {
@@ -366,7 +417,7 @@ impl Session {
     }
 
     fn preflight_failed(&mut self, id: u64, failure: Failure, now: Instant) -> Outcome {
-        self.preflight = None;
+        self.clear_preflight();
         self.job.take();
         self.dispatch(
             Intent::Job {
@@ -375,5 +426,53 @@ impl Session {
             },
             now,
         )
+    }
+}
+
+fn matching_page(
+    expected: &[EffectiveOption],
+    offset: usize,
+    first: u32,
+    total: u32,
+    values: &[EffectiveOption],
+) -> Option<usize> {
+    if total > MAX_POLICY_OPTIONS
+        || total as usize != expected.len()
+        || first as usize != offset
+        || values.is_empty()
+        || values.len() > MAX_OPTIONS_PAGE_ITEMS as usize
+    {
+        return None;
+    }
+    let end = offset.checked_add(values.len())?;
+    (expected.get(offset..end)? == values).then_some(end)
+}
+
+#[cfg(test)]
+mod tests {
+    use studio_domain::options::OptionValue;
+
+    use super::*;
+
+    fn option(key: &str) -> EffectiveOption {
+        EffectiveOption {
+            key: key.into(),
+            requested: None,
+            value: OptionValue::Bool(false),
+            origin: OptionValue::Choice("codec default".into()),
+            screen: None,
+            screen_origin: None,
+        }
+    }
+
+    #[test]
+    fn policy_confirmation_requires_matching_order_total_and_values() {
+        let expected = [option("rdoq"), option("wavefront")];
+        assert_eq!(matching_page(&expected, 0, 0, 2, &expected[..1]), Some(1));
+        assert_eq!(matching_page(&expected, 1, 1, 2, &expected[1..]), Some(2));
+        assert_eq!(matching_page(&expected, 1, 0, 2, &expected[..1]), None);
+        assert_eq!(matching_page(&expected, 0, 0, 1, &expected[..1]), None);
+        assert_eq!(matching_page(&expected, 0, 0, 2, &expected[1..]), None);
+        assert_eq!(matching_page(&expected, 0, 0, 2, &[]), None);
     }
 }
