@@ -26,6 +26,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  # Full debug symbols increase test link time and the size of the target cache.
+  # The codec crates retain their package-specific line tables.
+  CARGO_PROFILE_DEV_DEBUG: "0"
 
 jobs:
   gate:
@@ -94,9 +97,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: cargo-${{ matrix.name }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: cargo-ci-v2-${{ matrix.name }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
-            cargo-${{ matrix.name }}-
+            cargo-ci-v2-${{ matrix.name }}-
 
       - name: Doctor
         run: cargo xtask doctor

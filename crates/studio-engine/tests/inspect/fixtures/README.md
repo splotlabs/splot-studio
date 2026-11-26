@@ -54,7 +54,7 @@ provides the expected mode, geometry, quantizer, and motion facts.
 - `syn-2tile-zone1-edge-128x64-q192.ivf` has an 8-bit vertical intra block
   at (64, 0), size 64 × 32, in tile 1 with qindex 192.
   SHA-256 `c9fd016f591250511b12d9a28ce2608b28be98035794042b4f04468ab3507475`.
-- `syn-mrl-padded-444-67x67-10bit-q120.ivf` has a D203 block at (32, 64)
+- The [padded 10-bit fixture](../../preview/fixtures/syn-mrl-padded-444-67x67-10bit-q120.ivf) has a D203 block at (32, 64)
   with size 16 × 8 and visible size 16 × 3. Its reference line is 1.
   The angle delta is 2 and the qindex is 168.
   SHA-256 `53ff44b12489cfc3e8209df5ab176598163ad553f77063f5d4e3879ff1734e42`.
