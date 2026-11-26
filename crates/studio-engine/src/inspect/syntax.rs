@@ -47,6 +47,7 @@ pub(super) fn observe(obu: &ObuFact, bytes: &[u8]) -> SyntaxEvidence {
         },
         events: Vec::new(),
     };
+    let remaining = MAX_ELEMENTS.saturating_sub(header_trace.total_observed);
     append(
         &mut evidence,
         obu,
@@ -62,8 +63,6 @@ pub(super) fn observe(obu: &ObuFact, bytes: &[u8]) -> SyntaxEvidence {
             let Some(payload) = bytes.get(usize::from(header.header_size_bytes)..) else {
                 return evidence;
             };
-            let remaining =
-                MAX_ELEMENTS.saturating_sub(evidence.summary.observed_elements as usize);
             let mut recorder = SyntaxRecorder::new(SyntaxLimits::new(remaining, MAX_DEPTH));
             let result = dispatch_obu_payload_observed(
                 header,
@@ -92,17 +91,17 @@ pub(super) fn observe(obu: &ObuFact, bytes: &[u8]) -> SyntaxEvidence {
                 Ok(PayloadStatus::Unimplemented { feature, .. }) => SyntaxStatus::Unsupported {
                     feature: feature.to_owned(),
                 },
-                Err(error) => record_error(&mut evidence, error),
+                Err(error) => record_error(&mut evidence, &error),
             };
         }
         Err(error) => {
-            evidence.summary.status = record_error(&mut evidence, error);
+            evidence.summary.status = record_error(&mut evidence, &error);
         }
     }
     evidence
 }
 
-fn record_error(evidence: &mut SyntaxEvidence, error: Error) -> SyntaxStatus {
+fn record_error(evidence: &mut SyntaxEvidence, error: &Error) -> SyntaxStatus {
     let status = match error {
         Error::InvalidObuExtension { .. } => SyntaxStatus::UnknownExtension,
         Error::Unimplemented { feature, .. } => SyntaxStatus::Unsupported {
@@ -184,7 +183,7 @@ fn append(evidence: &mut SyntaxEvidence, obu: &ObuFact, base: u64, len: u64, tra
             position: position(error.bit_offset),
         });
     }
-    evidence.summary.retained_events = evidence.events.len() as u32;
+    evidence.summary.retained_events = evidence.events.len() as u64;
     evidence.summary.observed_elements += trace.total_observed as u64;
     evidence.summary.elements_truncated |= trace.elements_truncated;
     evidence.summary.depth_truncated |= trace.depth_truncated;
@@ -228,13 +227,21 @@ mod tests {
         // Metadata short with the HDR content-light payload. max_cll follows
         // the two metadata bytes and holds the 16-bit value 1000.
         let metadata = [0x20, 0x01, 0x01, 0x03, 0xE8, 0x01, 0x90, 0x80];
-        let mut annex = vec![0x01, 0x08, metadata.len() as u8];
+        let mut annex = vec![
+            0x01,
+            0x08,
+            u8::try_from(metadata.len()).expect("one-byte OBU length"),
+        ];
         annex.extend_from_slice(&metadata);
         let mut ivf = b"DKIF\x00\x00\x20\x00AV02\x10\x00\x10\x00".to_vec();
         ivf.extend(30_u32.to_le_bytes());
         ivf.extend(1_u32.to_le_bytes());
         ivf.extend(1_u64.to_le_bytes());
-        ivf.extend((annex.len() as u32).to_le_bytes());
+        ivf.extend(
+            u32::try_from(annex.len())
+                .expect("IVF payload length")
+                .to_le_bytes(),
+        );
         ivf.extend(0_u64.to_le_bytes());
         ivf.extend_from_slice(&annex);
 

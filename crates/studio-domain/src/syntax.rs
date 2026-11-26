@@ -146,7 +146,7 @@ pub struct SyntaxSummary {
     /// First parser error, if parsing failed.
     pub error: Option<SyntaxError>,
     /// Number of retained events, including scope exits.
-    pub retained_events: u32,
+    pub retained_events: u64,
     /// Number of observed elements, including ones omitted by the limits.
     pub observed_elements: u64,
     /// The recording reached its element limit.
