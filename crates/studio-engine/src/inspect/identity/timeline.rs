@@ -23,10 +23,11 @@ const RANDOM_ACCESS: u64 = 2;
 const DISPLAY_COUNTED: u64 = 4;
 const CODED_COUNTED: u64 = 8;
 const AMBIGUOUS_PTS: u64 = 16;
+const CODED_ORDINAL_SHIFT: u32 = 8;
 
 #[derive(Debug)]
 pub(super) struct TimelineIndex {
-    // Header offset, OBU bytes, packet PTS, flags.
+    // Header offset, OBU bytes, packet PTS, flags and coded ordinal + 1.
     obus: Table,
     // Coded header offset, frame OBU bytes, first output ordinal + 1, random-access flag.
     coded: Track<4>,
@@ -78,9 +79,10 @@ impl TimelineIndex {
     }
 
     pub(super) fn frame(&mut self, offset: u64) -> io::Result<()> {
-        let obu = self.claim(offset, CODED_COUNTED)?;
         self.budget(Table::<4>::BYTES)?;
-        // The native observer visits coded frames in file order.
+        let ordinal = self.coded.rows.count;
+        let flags = CODED_COUNTED | ((ordinal + 1) << CODED_ORDINAL_SHIFT);
+        let obu = self.claim(offset, flags)?;
         self.coded
             .append([offset, obu[1], 0, obu[3] & RANDOM_ACCESS])
     }
@@ -118,20 +120,25 @@ impl TimelineIndex {
         Ok(())
     }
 
-    fn claim(&mut self, offset: u64, flag: u64) -> io::Result<[u64; 4]> {
+    fn find_obu(&mut self, offset: u64) -> io::Result<(u64, [u64; 4])> {
         let row = self.obus.lower_bound(|obu| obu[0] < offset)?;
         if row == self.obus.count {
             return Err(missing());
         }
-        let mut obu = self.obus.at(row)?;
+        let obu = self.obus.at(row)?;
         if obu[0] != offset {
             return Err(missing());
         }
-        if obu[3] & flag != 0 {
+        Ok((row, obu))
+    }
+
+    fn claim(&mut self, offset: u64, flags: u64) -> io::Result<[u64; 4]> {
+        let (row, mut obu) = self.find_obu(offset)?;
+        if obu[3] & flags & (DISPLAY_COUNTED | CODED_COUNTED) != 0 {
             obu[1] = 0;
         } else {
             let unassigned = obu[3] & (DISPLAY_COUNTED | CODED_COUNTED) == 0;
-            obu[3] |= flag;
+            obu[3] |= flags;
             self.obus.write(row, obu)?;
             if unassigned {
                 self.assigned_obu_bytes += obu[1];
@@ -141,11 +148,11 @@ impl TimelineIndex {
     }
 
     fn coded_ordinal(&mut self, offset: u64) -> io::Result<u64> {
-        let row = self.coded.rows.lower_bound(|frame| frame[0] < offset)?;
-        if row == self.coded.rows.count || self.coded.rows.at(row)?[0] != offset {
-            return Err(missing());
-        }
-        Ok(row)
+        let (_, obu) = self.find_obu(offset)?;
+        (obu[3] >> CODED_ORDINAL_SHIFT)
+            .checked_sub(1)
+            .filter(|&row| row < self.coded.rows.count)
+            .ok_or_else(missing)
     }
 
     fn budget(&self, add: usize) -> io::Result<()> {
@@ -563,6 +570,22 @@ mod tests {
             })
         );
         assert_eq!(track.bytes(36, 37)?, Some(one(37)));
+        Ok(())
+    }
+
+    #[test]
+    fn reverse_joins_keep_order_even_when_coded_offsets_do_not_increase() -> io::Result<()> {
+        let mut timeline = TimelineIndex::new()?;
+        timeline.obu(12, 3, Some(0), false, false)?;
+        timeline.obu(24, 6, Some(1), false, false)?;
+        timeline.frame(24)?;
+        timeline.frame(12)?;
+        timeline.output(12, 24, None)?;
+        timeline.output(24, 24, None)?;
+        assert_eq!(timeline.output.rows.at(0)?[0], 1);
+        assert_eq!(timeline.output.rows.at(1)?[0], 0);
+        assert_eq!(timeline.output.rows.at(1)?[1], 0);
+        assert_eq!(timeline.assigned_obu_bytes, 9);
         Ok(())
     }
 
