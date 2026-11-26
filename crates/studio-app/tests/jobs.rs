@@ -522,6 +522,14 @@ fn batch_report_refuses_rewritten_source(rig: &mut Rig, source: &Path) {
     let modified = fs::metadata(source)
         .and_then(|metadata| metadata.modified())
         .unwrap_or_else(|error| unreachable!("{error}"));
+    #[cfg(windows)]
+    {
+        // Close releases the source asynchronously. Wait for the reader's handle.
+        rig.input(Input::Close);
+        rig.settle("the inspector released the source", |_| {
+            fs::File::options().write(true).open(source).is_ok()
+        });
+    }
     fs::write(source, [0x01, 0x09]).unwrap_or_else(|error| unreachable!("{error}"));
     fs::File::options()
         .write(true)
