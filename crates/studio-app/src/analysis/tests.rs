@@ -1703,3 +1703,55 @@ fn reference_inspection_rejects_cancelled_and_mismatched_answers() {
     engine.settle(&mut analysis, effects);
     assert!(doc(&analysis).references.evidence().is_none());
 }
+
+#[test]
+fn reference_history_restores_non_default_decode_policy_and_filter() {
+    use studio_domain::layers::{LayerDecodeSelection, LayerScope};
+
+    let (mut analysis, engine) = opened(5);
+    let requested = LayerDecodeSelection::OperatingPoint {
+        scope: LayerScope::Global,
+        set: 0,
+        point: 1,
+    };
+    for input in [
+        Input::RowClicked(1),
+        Input::EvidenceView(references::TAB),
+        Input::LayerFilter(1),
+    ] {
+        let effects = analysis.input(input);
+        engine.settle(&mut analysis, effects);
+    }
+    let filter = doc(&analysis).filter();
+    assert!(filter.layer.is_some());
+    analysis.documents[0].layers.selection = requested;
+    analysis.save_reference_view(None);
+
+    let effects = analysis.input(Input::RowClicked(2));
+    engine.settle(&mut analysis, effects);
+    let effects = analysis.input(Input::ClearFilters);
+    engine.settle(&mut analysis, effects);
+    analysis.documents[0].layers.selection = LayerDecodeSelection::Default;
+    analysis.save_reference_view(None);
+
+    let effects = analysis.input(Input::Back);
+    engine.settle(&mut analysis, effects);
+    assert_eq!(doc(&analysis).layer_decode_selection(), requested);
+    assert_eq!(doc(&analysis).filter(), filter);
+    assert_eq!(
+        doc(&analysis).selected().map(|selected| selected.row.index),
+        Some(1)
+    );
+
+    let effects = analysis.input(Input::Forward);
+    engine.settle(&mut analysis, effects);
+    assert_eq!(
+        doc(&analysis).layer_decode_selection(),
+        LayerDecodeSelection::Default
+    );
+    assert!(doc(&analysis).filter().is_all());
+    assert_eq!(
+        doc(&analysis).selected().map(|selected| selected.row.index),
+        Some(2)
+    );
+}

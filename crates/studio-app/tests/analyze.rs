@@ -925,18 +925,49 @@ fn line_offsets_are_never_cut(rig: &Rig) {
 }
 
 fn reference_table_follows_the_native_bridge(rig: &mut Rig, scratch: &Scratch) {
+    use studio_app::preview::Input as PreviewInput;
+    use studio_domain::preview::PictureBox;
+    use studio_domain::timeline::TimelineTarget;
+
+    while rig.session.analysis().shown().is_some() {
+        rig.session.analysis_input(Input::Close);
+    }
     let path = scratch.0.join("reference bridge.ivf");
     fs::write(
         &path,
         include_bytes!("../../studio-engine/tests/inspect/fixtures/syn-bridge-celu-64x64.ivf"),
     )
     .unwrap_or_else(|e| unreachable!("{e}"));
-    rig.session.analysis_input(Input::Open(vec![path]));
+    rig.session.analysis_input(Input::Open(vec![path.clone()]));
+    rig.session.preview_input(PreviewInput::Resized {
+        stage: PictureBox::clamped(200, 160),
+        thumb: PictureBox::clamped(64, 36),
+    });
     rig.idle("reference fixture");
-    rig.global().invoke_go_to("85".into());
-    rig.idle("bridge coded frame");
-    let bridge = rig.selected();
-    assert!(bridge.is_some());
+    let document = rig
+        .session
+        .analysis()
+        .shown()
+        .map_or(0, studio_app::analysis::Document::id);
+    assert_ne!(document, 0);
+    rig.session.analysis_input(Input::TimelineBuild);
+    rig.settle("verified Bridge timeline", |session| {
+        session
+            .analysis()
+            .shown()
+            .and_then(|doc| doc.timeline().page())
+            .is_some_and(|page| page.complete && page.verified)
+    });
+    rig.session
+        .analysis_input(Input::TimelineSelect(TimelineTarget::CodedOffset {
+            offset: 85,
+        }));
+    rig.global().invoke_layer_filter(1);
+    rig.idle("filtered Bridge coded frame");
+    filter_to_bridge_type(rig);
+    let bridge = reference_selection(rig, document, &path, 85, 1, None);
+    assert!(bridge.layer.is_some());
+    assert_ne!(bridge.kind, studio_domain::analysis::KindFilter::All);
 
     rig.global().invoke_evidence_view(4);
     rig.idle("reference inspector");
@@ -965,26 +996,116 @@ fn reference_table_follows_the_native_bridge(rig: &mut Rig, scratch: &Scratch) {
             .any(|row| row.before.contains("Coded frame at byte 71"))
     );
 
-    rig.tab_to(Key::Return, |input| {
-        matches!(input, Input::FollowReference(0))
-    });
-    rig.inputs
-        .borrow_mut()
-        .retain(|input| matches!(input, Input::FollowReference(0)));
+    assert!(references.get_output().contains("records no output"));
+
+    activate_reference_key(rig, &Input::FollowReference(0));
     rig.idle("keyboard follows Bridge source");
-    let source = rig.selected();
-    assert_ne!(source, bridge);
+    let source = reference_selection(rig, document, &path, 71, 0, Some(0));
+    assert_eq!(source, bridge);
+    rig.global().invoke_clear_filters();
+    rig.idle("reference source with all rows visible");
+    assert!(reference_selection(rig, document, &path, 71, 0, Some(0)).is_all());
+    rig.session.preview_input(PreviewInput::Zoom(4));
+    rig.settle("reference source at 4× zoom", |session| {
+        reference_picture(session, 4)
+    });
+
+    activate_reference_key(rig, &Input::Back);
+    rig.idle("keyboard returns to Bridge investigation");
     assert_eq!(
-        rig.session.analysis().shown().map(|d| d.bytes().cursor),
-        Some(70)
+        reference_selection(rig, document, &path, 85, 1, None),
+        bridge
     );
-
-    rig.global().invoke_back();
-    rig.idle("return to Bridge investigation");
-    assert_eq!(rig.selected(), bridge);
     assert_eq!(rig.global().get_evidence_tab(), 4);
+    assert_eq!(rig.session.preview().view().output, None);
 
-    rig.global().invoke_forward();
-    rig.idle("forward to the reference");
-    assert_eq!(rig.selected(), source);
+    activate_reference_key(rig, &Input::Forward);
+    rig.idle("keyboard returns to the reference source");
+    assert!(reference_selection(rig, document, &path, 71, 0, Some(0)).is_all());
+    rig.settle("restored reference picture and zoom", |session| {
+        reference_picture(session, 4)
+    });
+}
+
+fn filter_to_bridge_type(rig: &mut Rig) {
+    use studio_domain::analysis::{Element, KindFilter};
+
+    let kind = rig
+        .session
+        .analysis()
+        .shown()
+        .and_then(|doc| {
+            let Element::Obu { obu } = &doc.selected()?.row.element else {
+                return None;
+            };
+            Some(KindFilter::Obu {
+                obu_type: obu.obu_type,
+            })
+        })
+        .unwrap_or_else(|| unreachable!("Bridge OBU type"));
+    let index = rig
+        .session
+        .analysis()
+        .type_choices()
+        .iter()
+        .position(|choice| *choice == kind)
+        .and_then(|index| i32::try_from(index).ok())
+        .unwrap_or_else(|| unreachable!("Bridge type filter"));
+    rig.global().invoke_type_filter(index);
+    rig.idle("Bridge OBU type filter");
+}
+
+fn activate_reference_key(rig: &mut Rig, expected: &Input) {
+    rig.tab_to(Key::Return, |input| input == expected);
+    rig.inputs.borrow_mut().retain(|input| input == expected);
+}
+
+fn reference_selection(
+    rig: &Rig,
+    document: u64,
+    path: &std::path::Path,
+    offset: u64,
+    coded: u64,
+    output: Option<u64>,
+) -> studio_domain::analysis::RowFilter {
+    use studio_domain::analysis::Element;
+    use studio_domain::layers::LayerDecodeSelection;
+
+    let doc = rig
+        .session
+        .analysis()
+        .shown()
+        .unwrap_or_else(|| unreachable!("open reference fixture"));
+    assert_eq!(doc.id(), document);
+    assert_eq!(doc.path(), path);
+    assert_eq!(doc.layer_decode_selection(), LayerDecodeSelection::Default);
+    let selected = doc
+        .selected()
+        .unwrap_or_else(|| unreachable!("selected frame"));
+    assert!(matches!(&selected.row.element, Element::Obu { obu } if obu.header.offset == offset));
+    let target = doc
+        .timeline()
+        .selection()
+        .unwrap_or_else(|| unreachable!("selected timeline frame"));
+    assert_eq!(
+        (
+            target.coded_offset,
+            target.coded_ordinal,
+            target.output_ordinal
+        ),
+        (offset, coded, output)
+    );
+    assert_eq!(doc.bytes().cursor, offset);
+    doc.filter()
+}
+
+fn reference_picture(session: &Session, zoom: i32) -> bool {
+    let stage = session.preview().view();
+    stage.viewer.magnification == zoom
+        && stage.output.is_some_and(|output| {
+            output.ordinal == 0
+                && output.coded_offset == Some(71)
+                && output.showing_offset == Some(71)
+                && output.sequence_offset == Some(47)
+        })
 }
