@@ -47,8 +47,10 @@ fn check_output(depth: BitDepth, chroma: &'static str, sample_bytes: usize) -> T
     let mut encoder = Encoder::new(config.clone())?;
     let mut packets = Vec::new();
     for index in 0..clip.frames {
-        let mut planes = clip.samples(index).into_iter();
-        let samples = std::array::from_fn(|_| planes.next().expect("fixture has three planes"));
+        let samples = clip
+            .samples(index)
+            .try_into()
+            .map_err(|_| "The fixture must contain three planes.")?;
         encoder.send_frame(SourceFrame::new(&config, index as u64, samples)?)?;
         while let Some(packet) = encoder.receive_packet()? {
             packets.push(packet);
