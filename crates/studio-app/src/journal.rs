@@ -11,7 +11,8 @@
 //! to any of those forms needs a new [`VERSION`] and a migration.
 //!
 //! Version 2 adds the workspace and Analyze view. Version 3 adds typed
-//! settings, frozen submissions and effective attempt policies. Legacy
+//! settings, frozen submissions and effective attempt policies. Version 4 adds
+//! the job purpose and verified pass digest. Older jobs encode without a digest. Legacy
 //! journals keep their items and reports. Legacy settings become Simple
 //! requests, and unavailable policy and view data use their defaults. Waiting
 //! items with incomplete source facts need a new probe before preflight.
@@ -50,7 +51,7 @@ use crate::queue::{
 use crate::workspace::Workspace;
 
 /// The journal format this build writes.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// The oldest journal format this build reads and migrates.
 pub const OLDEST_VERSION: u32 = 1;
@@ -685,7 +686,7 @@ struct LegacyColor {
 }
 
 fn migrate(mut journal: Journal, bytes: &[u8]) -> Journal {
-    if journal.version < VERSION {
+    if journal.version < 3 {
         // SourceFacts defaults an absent colour record. Check the original
         // journal so explicitly unknown values from newer probes stay valid.
         let sources = serde_json::from_slice::<LegacySources>(bytes).ok();
@@ -1161,6 +1162,7 @@ mod tests {
                 assert_eq!(item.attempt_policy.as_slice(), &[]);
                 let job = &mut expected["items"][i]["state"]["job"];
                 job["settings"] = json!({"base": job["settings"], "values": {}});
+                job["purpose"] = json!("encode");
             }
             let bytes = encode(&migrated)?;
             let mut actual: Value = serde_json::from_slice(&bytes)?;
@@ -1208,7 +1210,7 @@ mod tests {
         with_color["id"] = json!(7);
         with_color["facts"]["color"] = json!({});
         legacy["items"] = json!([waiting, with_color]);
-        for version in [1, 2, VERSION] {
+        for version in [1, 2, 3, VERSION] {
             legacy["version"] = json!(version);
             assert!(fs::write(&path, serde_json::to_vec(&legacy)?).is_ok());
             let Loaded::Found(loaded) = load(&path) else {
@@ -1216,7 +1218,7 @@ mod tests {
             };
             let first = &loaded.items[0];
             let second = &loaded.items[1];
-            if version == VERSION {
+            if version >= 3 {
                 assert_eq!(first.state, JournalState::Waiting);
                 assert_eq!(first.video_stream, None);
             } else {
@@ -1234,7 +1236,7 @@ mod tests {
             let restored = crate::recovery::recover(loaded, &crate::recovery::RealDisk);
             assert_eq!(
                 restored.items[0].state(),
-                if version == VERSION {
+                if version >= 3 {
                     ItemState::Waiting
                 } else {
                     ItemState::Probing
@@ -1305,10 +1307,10 @@ mod tests {
     fn a_newer_version_is_left_untouched_and_not_saved_over() {
         let dir = Scratch::new("too-new");
         let path = dir.path(FILE_NAME);
-        let future = br#"{"version": 4, "items": "renamed", "view": {"tabs": []}}"#;
+        let future = br#"{"version": 5, "items": "renamed", "view": {"tabs": []}}"#;
         assert!(fs::write(&path, future).is_ok());
         let loaded = load(&path);
-        assert_eq!(loaded, Loaded::TooNew { version: 4 });
+        assert_eq!(loaded, Loaded::TooNew { version: 5 });
         assert!(!loaded.may_save());
         assert_eq!(fs::read(&path).ok().as_deref(), Some(&future[..]));
     }
