@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
+use studio_domain::preview::PictureBox;
+
 use super::*;
 
 pub(super) fn controls(rig: &mut Rig, scratch: &Scratch) {
@@ -167,7 +169,6 @@ fn check_output_order(rig: &mut Rig) {
             .contains("bit/s")
     );
     assert!(rig.window.global::<TimelineUi>().get_can_go_to_time());
-    use studio_domain::preview::PictureBox;
     let size = PictureBox::clamped(320, 180);
     rig.session
         .preview_input(studio_app::preview::Input::Resized {
