@@ -259,19 +259,23 @@ mod tests {
     }
 
     #[test]
-    fn low_disk_and_write_errors_do_not_report_written_bytes() {
+    fn low_disk_and_write_errors_do_not_report_written_bytes() -> io::Result<()> {
         for error in [io::ErrorKind::StorageFull, io::ErrorKind::PermissionDenied] {
             let io = FailingIo {
                 write_error: Some(error),
                 flush_error: false,
             };
             let mut writer = Tracked::new(io, &Control);
-            let error = writer.write_all(b"samples").expect_err("The writer fails.");
+            let error = writer
+                .write_all(b"samples")
+                .err()
+                .ok_or_else(|| io::Error::other("The test writer accepted bytes."))?;
             assert!(
                 matches!(failed(&Control, error), Stop::Failed(problem) if problem.code == FailureCode::Output)
             );
             assert_eq!(writer.finish().1.bytes, 0);
         }
+        Ok(())
     }
 
     #[test]
@@ -282,7 +286,10 @@ mod tests {
         };
         let mut writer = Tracked::new(io, &Control);
         writer.write_all(b"samples")?;
-        let error = writer.flush().expect_err("The flush fails.");
+        let error = writer
+            .flush()
+            .err()
+            .ok_or_else(|| io::Error::other("The test writer flushed successfully."))?;
         assert!(
             matches!(failed(&Control, error), Stop::Failed(problem) if problem.code == FailureCode::Output)
         );
