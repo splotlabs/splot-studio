@@ -290,7 +290,7 @@ fn serve<W: Write>(
             }
         };
         let id = envelope.request_id;
-        let (document, request) = match envelope.body {
+        match envelope.body {
             Command::Hello { .. } => {
                 shared.send(
                     id,
@@ -306,11 +306,9 @@ fn serve<W: Write>(
                         },
                     },
                 );
-                continue;
             }
             Command::AnalysisCancel { document } => {
                 shared.cancel(id, Pending::Open(document));
-                continue;
             }
             Command::AnalysisCancelValidation {
                 document,
@@ -323,94 +321,89 @@ fn serve<W: Write>(
                         validation,
                     },
                 );
-                continue;
-            }
-            Command::DescribeOptions { .. }
-            | Command::ResolveOptions { .. }
-            | Command::Probe { .. }
-            | Command::Start { .. }
-            | Command::StartChecked { .. }
-            | Command::ConfirmPolicy
-            | Command::Cancel
-            | Command::Picture { .. }
-            | Command::Play { .. }
-            | Command::StopPlayback => {
-                shared.send(
-                    id,
-                    refusal(
-                        ErrorCode::WrongState,
-                        "the inspect process serves only analysis commands; \
-                         analysis_cancel names the document to cancel",
-                    ),
-                );
-                continue;
             }
             Command::AnalysisOpen { document, source } => {
                 queue_open(shared, requests, id, document, source);
-                continue;
             }
-            Command::AnalysisPage {
-                document,
+            Command::AnalysisValidate { document, settings } => {
+                queue_validation(shared, requests, id, document, settings);
+            }
+            command => {
+                if let Some((document, request)) = queued_request(command) {
+                    if requests.try_send((id, document, request)).is_err() {
+                        busy(shared, id, document);
+                    }
+                } else {
+                    shared.send(
+                        id,
+                        refusal(
+                            ErrorCode::WrongState,
+                            "Use an analysis command with the inspect process.",
+                        ),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn queued_request(command: Command) -> Option<(u64, Request)> {
+    Some(match command {
+        Command::AnalysisPage {
+            document,
+            filter,
+            first,
+            count,
+        } => (
+            document,
+            Request::Inspect(Query::Page {
                 filter,
                 first,
                 count,
-            } => (
-                document,
-                Request::Inspect(Query::Page {
-                    filter,
-                    first,
-                    count,
-                }),
-            ),
-            Command::AnalysisLocate {
-                document,
-                filter,
-                target,
-            } => (document, Request::Inspect(Query::Locate { filter, target })),
-            Command::AnalysisBytes {
-                document,
-                offset,
-                len,
-            } => (document, Request::Inspect(Query::Bytes { offset, len })),
-            Command::AnalysisSyntax { document, element } => {
-                (document, Request::Inspect(Query::Syntax { element }))
-            }
-            Command::AnalysisSyntaxPage {
-                document,
+            }),
+        ),
+        Command::AnalysisLocate {
+            document,
+            filter,
+            target,
+        } => (document, Request::Inspect(Query::Locate { filter, target })),
+        Command::AnalysisBytes {
+            document,
+            offset,
+            len,
+        } => (document, Request::Inspect(Query::Bytes { offset, len })),
+        Command::AnalysisSyntax { document, element } => {
+            (document, Request::Inspect(Query::Syntax { element }))
+        }
+        Command::AnalysisSyntaxPage {
+            document,
+            trace,
+            first,
+            count,
+        } => (
+            document,
+            Request::Inspect(Query::SyntaxPage {
                 trace,
                 first,
                 count,
-            } => (
-                document,
-                Request::Inspect(Query::SyntaxPage {
-                    trace,
-                    first,
-                    count,
-                }),
-            ),
-            Command::AnalysisValidate { document, settings } => {
-                queue_validation(shared, requests, id, document, settings);
-                continue;
-            }
-            Command::AnalysisFindings {
-                document,
+            }),
+        ),
+        Command::AnalysisFindings {
+            document,
+            validation,
+            first,
+            count,
+        } => (
+            document,
+            Request::Inspect(Query::Findings {
                 validation,
                 first,
                 count,
-            } => (
-                document,
-                Request::Inspect(Query::Findings {
-                    validation,
-                    first,
-                    count,
-                }),
-            ),
-            Command::AnalysisClose { document } => (document, Request::Close),
-        };
-        if requests.try_send((id, document, request)).is_err() {
-            busy(shared, id, document);
-        }
-    }
+            }),
+        ),
+        Command::AnalysisClose { document } => (document, Request::Close),
+        _ => return None,
+    })
 }
 
 /// Queues an open, or refuses it: its id must be new, and the queue must
