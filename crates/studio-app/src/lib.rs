@@ -35,6 +35,7 @@ pub mod engine;
 pub mod instance;
 pub mod jobs;
 pub mod journal;
+pub mod portable_preset;
 pub mod present;
 pub mod preview;
 pub mod queue;
