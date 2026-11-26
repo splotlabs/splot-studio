@@ -577,6 +577,8 @@ fn source_changed() -> Refusal {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use studio_domain::analysis::{Element, LocateTarget, RowFilter};
     use studio_domain::job::WirePath;
@@ -594,11 +596,16 @@ mod tests {
         io::Error::other(error.message)
     }
 
+    fn source_fixture(bytes: &[u8]) -> io::Result<(tempfile::TempDir, PathBuf)> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("source");
+        std::fs::write(&path, bytes)?;
+        Ok((directory, path))
+    }
+
     #[test]
     fn distinct_temporal_units_and_non_output_frame_within_one_ivf_packet() -> TestResult {
-        let mut source = tempfile::NamedTempFile::new()?;
-        source.write_all(BRIDGE_IVF)?;
-        let source = source.into_temp_path();
+        let (_directory, source) = source_fixture(BRIDGE_IVF)?;
         let document = Document::open(&WirePath::from_path(&source), &|| false).map_err(refusal)?;
         let summary = document.summary();
         assert_eq!(summary.packets, 1);
@@ -697,14 +704,16 @@ mod tests {
             TimelineView,
         };
 
-        let mut source = tempfile::NamedTempFile::new()?;
-        source.write_all(BRIDGE_IVF)?;
-        let document =
-            Document::open(&WirePath::from_path(source.path()), &|| false).map_err(refusal)?;
+        let (_directory, source) = source_fixture(BRIDGE_IVF)?;
+        let document = Document::open(&WirePath::from_path(&source), &|| false).map_err(refusal)?;
         let summary = document.summary();
         let index = IdentityIndex::new(GrainPolicy::Skip, summary.fingerprint).map_err(refusal)?;
         index
-            .scan(&mut source.reopen()?, summary.digest.as_deref(), &|| false)
+            .scan(
+                &mut File::open(&source)?,
+                summary.digest.as_deref(),
+                &|| false,
+            )
             .map_err(refusal)?;
         let header = summary.ivf_header;
         let coded = index
@@ -792,16 +801,18 @@ mod tests {
     fn annex_b_timeline_links_show_existing_without_inventing_time() -> TestResult {
         use studio_domain::timeline::{TimelineClock, TimelineTarget, TimelineView};
 
-        let mut source = tempfile::NamedTempFile::new()?;
-        source.write_all(include_bytes!(
+        let (_directory, source) = source_fixture(include_bytes!(
             "../../tests/preview/fixtures/syn-mlayer2-derived-sef-8bit.obu"
         ))?;
-        let document =
-            Document::open(&WirePath::from_path(source.path()), &|| false).map_err(refusal)?;
+        let document = Document::open(&WirePath::from_path(&source), &|| false).map_err(refusal)?;
         let summary = document.summary();
         let index = IdentityIndex::new(GrainPolicy::Skip, summary.fingerprint).map_err(refusal)?;
         index
-            .scan(&mut source.reopen()?, summary.digest.as_deref(), &|| false)
+            .scan(
+                &mut File::open(&source)?,
+                summary.digest.as_deref(),
+                &|| false,
+            )
             .map_err(refusal)?;
         let page = index
             .timeline(None, TimelineView::Output, 0, u64::MAX, 2)
@@ -832,9 +843,7 @@ mod tests {
     fn ten_bit_output_paging_and_source_verification() -> TestResult {
         use studio_domain::timeline::{TimelineClock, TimelineTarget, TimelineTime, TimelineView};
 
-        let mut source = tempfile::NamedTempFile::new()?;
-        source.write_all(LAYERED_10_BIT)?;
-        let source = source.into_temp_path();
+        let (_directory, source) = source_fixture(LAYERED_10_BIT)?;
         let document = Document::open(&WirePath::from_path(&source), &|| false).map_err(refusal)?;
         let summary = document.summary();
         let index = IdentityIndex::new(GrainPolicy::Skip, summary.fingerprint).map_err(refusal)?;
@@ -917,12 +926,11 @@ mod tests {
 
     #[test]
     fn cancellation_returns_an_unverified_partial_index() -> TestResult {
-        let mut source = tempfile::NamedTempFile::new()?;
-        source.write_all(BRIDGE_IVF)?;
-        let fingerprint = SourceFingerprint::of(&source.as_file().metadata()?);
+        let (_directory, source) = source_fixture(BRIDGE_IVF)?;
+        let fingerprint = SourceFingerprint::of(&std::fs::metadata(&source)?);
         let index = IdentityIndex::new(GrainPolicy::Skip, fingerprint).map_err(refusal)?;
         index
-            .scan(&mut source.reopen()?, None, &|| true)
+            .scan(&mut File::open(&source)?, None, &|| true)
             .map_err(refusal)?;
         let page = index.page(IdentityKind::Output, 0, 1).map_err(refusal)?;
         assert_eq!(page.summary.completion, IdentityCompletion::Cancelled);
