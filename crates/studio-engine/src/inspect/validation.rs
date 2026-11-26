@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(summary.checked_obus, 1);
         assert_eq!(summary.last_checked_obu_end, Some(payload_start - 12));
         assert!(!summary.finalized);
-        assert!(findings.is_empty());
+        assert_eq!(findings.as_slice(), &[]);
         assert!(!summary.policy_failed());
         Ok(())
     }
