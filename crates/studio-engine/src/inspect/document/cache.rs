@@ -122,6 +122,15 @@ impl Drop for FileLease {
     }
 }
 
+#[cfg(not(windows))]
+type DirectoryLock = FileLease;
+
+#[cfg(windows)]
+struct DirectoryLock {
+    _file: FileLease,
+    _ancestry: Vec<File>,
+}
+
 impl Cache {
     pub(super) fn from_env() -> io::Result<Option<Self>> {
         let Some(path) = std::env::var_os(INSPECT_DATA_DIR_VAR).map(PathBuf::from) else {
@@ -135,11 +144,14 @@ impl Cache {
 
     /// Use the app data directory selected at startup.
     pub(super) fn new(app_data: &Path) -> io::Result<Self> {
-        let root = app_data.canonicalize()?.join(DIRECTORY);
+        let app_data = app_data.canonicalize()?;
+        let root = app_data.join(DIRECTORY);
         #[cfg(unix)]
         let directory = directory::Directory::create(&root)?;
         #[cfg(not(unix))]
         let root_id = {
+            #[cfg(windows)]
+            let _ancestry = pin_directories(&app_data)?;
             match fs::create_dir(&root) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
@@ -495,7 +507,9 @@ impl Cache {
             .join(format!("{ENTRY_PREFIX}{:016x}-{key}", digest.bytes)))
     }
 
-    fn lock(&self) -> io::Result<FileLease> {
+    fn lock(&self) -> io::Result<DirectoryLock> {
+        #[cfg(windows)]
+        let ancestry = pin_directories(&self.root)?;
         self.check_root()?;
         let path = self.root.join("cache.lock");
         #[cfg(unix)]
@@ -503,23 +517,39 @@ impl Cache {
         #[cfg(not(unix))]
         let file = self.open_lock(&path)?;
         file.try_lock().map_err(io::Error::from)?;
-        Ok(FileLease::leased(file))
+        let file = FileLease::leased(file);
+        #[cfg(windows)]
+        {
+            Ok(DirectoryLock {
+                _file: file,
+                _ancestry: ancestry,
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(file)
+        }
     }
 
     #[cfg(not(unix))]
     fn open_lock(&self, path: &Path) -> io::Result<File> {
-        let file = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(path)
+        let mut options = OpenOptions::new();
+        options.read(true).write(true);
+        #[cfg(windows)]
         {
+            use std::os::windows::fs::OpenOptionsExt as _;
+
+            // Keep the locked directory nonempty while cleanup is active.
+            const FILE_SHARE_READ_WRITE: u32 = 0x0003;
+            options.share_mode(FILE_SHARE_READ_WRITE);
+        }
+        let file = match options.clone().create_new(true).open(path) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 if !owned_regular(&fs::symlink_metadata(path)?) {
                     return Err(invalid("The cache lock is not a regular file."));
                 }
-                OpenOptions::new().read(true).write(true).open(path)?
+                options.open(path)?
             }
             Err(e) => return Err(e),
         };
@@ -723,6 +753,38 @@ fn has_magic(file: &mut File) -> io::Result<bool> {
 fn entry_name_of(path: &Path) -> io::Result<&OsStr> {
     path.file_name()
         .ok_or_else(|| invalid("The cache entry has no name."))
+}
+
+#[cfg(windows)]
+fn pin_directories(path: &Path) -> io::Result<Vec<File>> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    const FILE_LIST_DIRECTORY: u32 = 0x0001;
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const FILE_SHARE_READ: u32 = 0x0001;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    // Hold the path from the volume root. The handles deny rename and keep
+    // its ancestors nonempty, which prevents conversion to reparse points.
+    let mut directories = Vec::new();
+    let mut ancestry: Vec<_> = path.ancestors().filter(|part| part.is_absolute()).collect();
+    ancestry.reverse();
+    for dir in ancestry {
+        let file = OpenOptions::new()
+            .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(dir)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_dir() || is_link(&metadata) {
+            return Err(invalid(
+                "The cache directory path contains a reparse point.",
+            ));
+        }
+        directories.push(file);
+    }
+    Ok(directories)
 }
 
 #[cfg(not(unix))]
@@ -1036,6 +1098,35 @@ mod tests {
         assert!(cache.load(first.framing, digest, &|| false)?.is_none());
         cache.clear()?;
         assert_eq!(cache.entries()?.len(), 0);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_active_cache_operation_pins_its_windows_ancestors() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app_data = dir.path().join("app");
+        let moved_app_data = dir.path().join("app-moved");
+        fs::create_dir(&app_data)?;
+        let cache = Cache::new(&app_data)?;
+        let summary = summary(b"media");
+        let lock = cache.lock()?;
+        assert!(fs::rename(&app_data, &moved_app_data).is_err());
+        drop(lock);
+
+        cache.store(
+            &summary,
+            DATA.len() as u64,
+            |writer| {
+                assert!(fs::rename(&app_data, &moved_app_data).is_err());
+                writer.write_all(DATA)
+            },
+            &|| false,
+        )?;
+        assert_eq!(cache.entries()?.len(), 1);
+        fs::rename(&app_data, &moved_app_data)?;
+        assert!(cache.clear().is_err());
+        assert!(moved_app_data.join(DIRECTORY).is_dir());
         Ok(())
     }
 
