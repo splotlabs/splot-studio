@@ -36,6 +36,9 @@ const GRAIN: &[u8] =
     include_bytes!("../preview/fixtures/syn-3frame-filmgrain-inter-64x64-10bit.ivf");
 const PQ: &[u8] = include_bytes!("../preview/fixtures/syn-pq-420-10bit-64x64.ivf");
 const CROPPED: &[u8] = include_bytes!("../preview/fixtures/syn-2seq-crop-intra-64x64.obu");
+const DERIVED_SEF: &[u8] = include_bytes!("../preview/fixtures/syn-mlayer2-derived-sef-8bit.obu");
+const AVM_DERIVED_SEF: &[u8] =
+    include_bytes!("../preview/fixtures/syn-mlayer2-derived-sef-8bit.obu.yuv");
 
 fn inspected_source(path: &Path) -> Answer<ExportSource> {
     let path = WirePath::from_path(path);
@@ -213,6 +216,27 @@ fn reopen_y4m(path: &Path) -> Answer<(Y4mHeader, u64, String)> {
         }
     }
     Ok((header, frames, hex(&hash.finalize())))
+}
+
+fn check_hashes<'a>(
+    path: &Path,
+    expected: impl IntoIterator<Item = (usize, &'a [u8])>,
+) -> TestResult {
+    let report: serde_json::Value = serde_json::from_reader(fs::File::open(path)?)?;
+    assert_eq!(report["algorithm"], "splot-dfh-sha256-v1");
+    assert_eq!(report["byte_stream"], "av2-output-samples-v1");
+    assert_eq!(report["variant"], "raw_intermediate_output");
+    let outputs = report["outputs"]
+        .as_array()
+        .ok_or("missing output hashes")?;
+    let mut expected = expected.into_iter();
+    for output in outputs {
+        let (ordinal, samples) = expected.next().ok_or("unexpected export hash")?;
+        assert_eq!(output["ordinal"], ordinal);
+        assert_eq!(output["hash"], sha(samples));
+    }
+    assert!(expected.next().is_none());
+    Ok(())
 }
 
 #[test]
@@ -431,6 +455,51 @@ fn raw_ranges_follow_avm_output_order_without_extra_decode_prerequisites() -> Te
 }
 
 #[test]
+fn annex_b_same_unit_outputs_require_raw_or_hashes_unless_the_layer_is_narrowed() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let source = input(dir.path(), "layers.obu", DERIVED_SEF)?;
+    let dest = dir.path().join("one-layer.y4m");
+    let mut export = request(&source, 8, ChromaLayout::Yuv420, y4m(&dest))?;
+    export.frame_rate = Some(Rational { num: 24, den: 1 });
+
+    // The two outputs in each temporal unit share one presentation time.
+    failed(run(export.clone())?);
+    assert!(!dest.exists());
+    export.layer = Some(ExportLayer {
+        extended: 0,
+        embedded: 1,
+        temporal: 0,
+    });
+    done(run(export)?, 1, 1);
+    let (header, frames, hash) = reopen_y4m(&dest)?;
+    assert_eq!(header.frame_rate, (24, 1));
+    assert_eq!((frames, hash), (1, sha(&AVM_DERIVED_SEF[6144..12_288])));
+
+    let samples = dir.path().join("all-outputs.yuv");
+    let layout = dir.path().join("all-outputs.json");
+    let export = request(&source, 8, ChromaLayout::Yuv420, raw(&samples, &layout))?;
+    done(run(export)?, 4, 2);
+    assert_eq!(fs::read(samples)?, AVM_DERIVED_SEF);
+    let layout: serde_json::Value = serde_json::from_reader(fs::File::open(layout)?)?;
+    assert_eq!(layout["timing"]["kind"], "variable");
+    assert_eq!(layout["outputs"][2]["unit_offset"], 783);
+    assert_eq!(layout["outputs"][3]["unit_offset"], 783);
+
+    let hashes = dir.path().join("hashes.json");
+    let export = request(
+        &source,
+        8,
+        ChromaLayout::Yuv420,
+        ExportFormat::Hashes {
+            path: WirePath::from_path(&hashes),
+        },
+    )?;
+    done(run(export)?, 4, 1);
+    check_hashes(&hashes, AVM_DERIVED_SEF.chunks_exact(6144).enumerate())?;
+    Ok(())
+}
+
+#[test]
 fn the_single_frame_export_keeps_the_selected_grain_variant() -> TestResult {
     let dir = tempfile::tempdir()?;
     let source = input(dir.path(), "grain.ivf", GRAIN)?;
@@ -481,19 +550,13 @@ fn hashes_keep_absolute_ordinals_through_the_layer_filter() -> TestResult {
         temporal: 1,
     });
     done(run(export.clone())?, 2, 1);
-    let report: serde_json::Value = serde_json::from_reader(fs::File::open(dest)?)?;
-    assert_eq!(report["algorithm"], "splot-dfh-sha256-v1");
-    assert_eq!(report["byte_stream"], "av2-output-samples-v1");
-    assert_eq!(report["variant"], "raw_intermediate_output");
-    let outputs = report["outputs"]
-        .as_array()
-        .ok_or("missing output hashes")?;
-    assert_eq!(outputs.len(), 2);
-    for (output, ordinal) in outputs.iter().zip([1, 3]) {
-        let start = ordinal * 12_288;
-        assert_eq!(output["ordinal"], ordinal);
-        assert_eq!(output["hash"], sha(&AVM_10[start..start + 12_288]));
-    }
+    check_hashes(
+        &dest,
+        [1, 3].map(|ordinal| {
+            let start = ordinal * 12_288;
+            (ordinal, &AVM_10[start..start + 12_288])
+        }),
+    )?;
 
     let dest = dir.path().join("applied-grain-hashes.json");
     export.format = ExportFormat::Hashes {
