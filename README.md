@@ -25,6 +25,16 @@ codec is young.
 - Advanced lets you search encoder settings by name or option key. It shows each
   effective value and its origin. You can edit individual frame contexts, preview
   a base preset change, undo edits, and return to Simple with your overrides intact.
+- Save a custom preset from Advanced. Import shows the changes before you apply them.
+  A preset records the codec revision, schema, and portable settings. Source paths,
+  crop coordinates, explicit tile dimensions, and first-pass statistics stay local.
+- For two-pass variable bitrate (VBR), select a source, set the bitrate in Advanced,
+  and choose Generate first pass. In Jobs, choose Encode with pass on the completed
+  analysis. The engine checks the source content, stream, encoder settings, and frame
+  costs before it opens the output.
+- In Jobs, Clone settings restores a captured request to the editable draft.
+  Re-encode checks the source and current encoder policy, shows changes for review,
+  and writes to a new destination.
 - Preview: the real encoded picture while converting, press and hold to compare with the
   original, scrubbing and playback of source and result.
 - Every result is verified, then published without ever replacing an existing file. Source
