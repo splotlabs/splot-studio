@@ -22,6 +22,9 @@ codec is young.
   video-only AV2, as IVF or an Annex B `.obu` stream. 8-bit and 10-bit SDR.
 - One compact window, the Encode workspace: pick Quality and Priority, press Convert, watch
   real progress, cancel. Several files queue up, and the list survives restarts and crashes.
+- Advanced lets you search encoder settings by name or option key. It shows each
+  effective value and its origin. You can edit individual frame contexts, preview
+  a base preset change, undo edits, and return to Simple with your overrides intact.
 - Preview: the real encoded picture while converting, press and hold to compare with the
   original, scrubbing and playback of source and result.
 - Every result is verified, then published without ever replacing an existing file. Source

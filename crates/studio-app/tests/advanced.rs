@@ -214,13 +214,13 @@ fn change_key_interval(rig: &Rig) {
     assert_eq!(keys(window), ["keyint"]);
 
     window.invoke_advanced_reset("selected".into());
-    assert!(keys(window).is_empty());
+    assert_eq!(keys(window), Vec::<String>::new());
     assert!(window.get_advanced_can_undo());
     window.invoke_advanced_undo();
     assert_eq!(keys(window), ["keyint"]);
     assert!(window.get_advanced_can_redo());
     window.invoke_advanced_redo();
-    assert!(keys(window).is_empty());
+    assert_eq!(keys(window), Vec::<String>::new());
     window.invoke_advanced_undo();
     window.invoke_advanced_modified(false);
 }
