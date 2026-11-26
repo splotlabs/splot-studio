@@ -4379,6 +4379,7 @@ dependencies = [
  "splot-core",
  "splot-decode",
  "splot-encode",
+ "splot-recon",
  "splot-validate",
  "studio-domain",
  "tempfile",
