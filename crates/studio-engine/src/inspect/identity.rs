@@ -71,11 +71,37 @@ impl<const WORDS: usize> Table<WORDS> {
     fn read(&mut self) -> io::Result<[u64; WORDS]> {
         let mut bytes = [0; 64];
         self.file.read_exact(&mut bytes[..Self::BYTES])?;
+        Ok(Self::decode(&bytes))
+    }
+
+    fn decode(bytes: &[u8]) -> [u64; WORDS] {
         let mut words = [0; WORDS];
         for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<8>().0) {
             *word = u64::from_le_bytes(*chunk);
         }
-        Ok(words)
+        words
+    }
+
+    fn read_window(
+        &mut self,
+        first: u64,
+        end: u64,
+        mut consume: impl FnMut(u64, [u64; WORDS]),
+    ) -> io::Result<()> {
+        let mut block = [0; 2048];
+        let rows = u64::try_from(block.len() / Self::BYTES).map_err(io::Error::other)?;
+        self.seek(first)?;
+        let mut at = first;
+        while at < end {
+            let count = rows.min(end - at);
+            let bytes = usize::try_from(count).map_err(io::Error::other)? * Self::BYTES;
+            self.file.read_exact(&mut block[..bytes])?;
+            for record in block[..bytes].chunks_exact(Self::BYTES) {
+                consume(at, Self::decode(record));
+                at += 1;
+            }
+        }
+        Ok(())
     }
 
     fn at(&mut self, row: u64) -> io::Result<[u64; WORDS]> {
@@ -349,6 +375,8 @@ impl IdentityIndex {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(), String> {
         let mut cursor = AnnexBObuCursor::new(unit.bytes, unit.offset);
+        let ambiguous = unit.pts.is_some() && multiple_temporal_units(unit, cancelled);
+        let pts = unit.pts.filter(|_| !ambiguous);
         let mut prefix = 0;
         let mut access = false;
         self.state().timeline.start_unit(unit.offset.get());
@@ -370,7 +398,7 @@ impl IdentityIndex {
                 );
             access &= !marked;
             let bytes = u64::from(obu.size);
-            let result = state.timeline.obu(offset, bytes, unit.pts, marked);
+            let result = state.timeline.obu(offset, bytes, pts, ambiguous, marked);
             state.timeline_result(result);
             prefix = usize::try_from(offset - unit.offset.get() + bytes)
                 .map_err(|_| "The OBU exceeds the supported input size.")?;
@@ -456,6 +484,22 @@ impl IdentityIndex {
             state.timeline_result(result);
         }
     }
+}
+
+fn multiple_temporal_units(unit: &TemporalUnit<'_>, cancelled: &dyn Fn() -> bool) -> bool {
+    let mut cursor = AnnexBObuCursor::new(unit.bytes, unit.offset);
+    let mut delimiter = false;
+    while !cancelled() {
+        let Ok(Some(obu)) = cursor.next_obu() else {
+            break;
+        };
+        if obu.header.obu_type == ObuType::TemporalDelimiter
+            && std::mem::replace(&mut delimiter, true)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn picture_interval(picture: &Picture) -> Option<(u64, u64)> {
@@ -595,7 +639,95 @@ mod tests {
     }
 
     #[test]
+    fn timeline_reconciles_bridge_bytes_and_rejects_ambiguous_clock() -> TestResult {
+        use studio_domain::timeline::{
+            ByteDistribution, TimelineClock, TimelineFileBytes, TimelineTarget, TimelineTime,
+            TimelineView,
+        };
+
+        let mut source = tempfile::NamedTempFile::new()?;
+        source.write_all(BRIDGE_IVF)?;
+        let document =
+            Document::open(&WirePath::from_path(source.path()), &|| false).map_err(refusal)?;
+        let summary = document.summary();
+        let index = IdentityIndex::new(GrainPolicy::Skip, summary.fingerprint).map_err(refusal)?;
+        index
+            .scan(&mut source.reopen()?, summary.digest.as_deref(), &|| false)
+            .map_err(refusal)?;
+        let header = summary.ivf_header;
+        let coded = index
+            .timeline(header, TimelineView::Coded, 0, u64::MAX, 3)
+            .map_err(refusal)?;
+        assert_eq!(
+            coded.file_bytes,
+            TimelineFileBytes {
+                file: 101,
+                obu: 51,
+                assigned_obu: 26,
+                unassigned_obu: 25,
+                framing: 50,
+                unclassified: 0
+            }
+        );
+        assert_eq!(
+            coded.bytes,
+            Some(ByteDistribution {
+                min: 4,
+                max: 11,
+                sum: 26
+            })
+        );
+        assert_eq!(coded.clock, TimelineClock::Conflicting);
+        assert!(
+            coded.buckets[0]
+                .entry
+                .ok_or("Missing first row.")?
+                .random_access
+        );
+        assert_eq!(
+            coded.buckets[1]
+                .entry
+                .ok_or("Missing bridge row.")?
+                .output_ordinal,
+            None
+        );
+        let output = index
+            .timeline(header, TimelineView::Output, 0, u64::MAX, 1)
+            .map_err(refusal)?;
+        assert_eq!(
+            output.bytes,
+            Some(ByteDistribution {
+                min: 11,
+                max: 11,
+                sum: 22
+            })
+        );
+        assert_eq!(output.buckets[0].count, 2);
+        assert_eq!(output.rate, None);
+        let selected = index
+            .timeline_locate(header, TimelineTarget::Output { index: 1 })
+            .map_err(refusal)?;
+        assert_eq!(
+            (selected.coded_ordinal, selected.coded_offset, selected.time),
+            (2, 90, None)
+        );
+        assert!(
+            index
+                .timeline_locate(
+                    header,
+                    TimelineTarget::Time {
+                        time: TimelineTime { num: 0, den: 1 }
+                    }
+                )
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn ten_bit_output_paging_and_source_verification() -> TestResult {
+        use studio_domain::timeline::{TimelineClock, TimelineTarget, TimelineTime, TimelineView};
+
         let mut source = tempfile::NamedTempFile::new()?;
         source.write_all(LAYERED_10_BIT)?;
         let source = source.into_temp_path();
@@ -620,6 +752,29 @@ mod tests {
                 .map_err(refusal)?
                 .rows
         );
+
+        let header = summary.ivf_header;
+        let rate = index
+            .timeline(header, TimelineView::Output, 0, 2, 1)
+            .map_err(refusal)?;
+        assert_eq!(rate.clock, TimelineClock::Ivf);
+        assert_eq!(
+            rate.rate,
+            Some(TimelineTime {
+                num: 175_440,
+                den: 2
+            })
+        );
+        let located = index
+            .timeline_locate(
+                header,
+                TimelineTarget::Time {
+                    time: TimelineTime { num: 3, den: 100 },
+                },
+            )
+            .map_err(refusal)?;
+        assert_eq!(located.output_ordinal, Some(1));
+        assert_eq!(located.time, Some(TimelineTime { num: 1, den: 30 }));
 
         let mut wrong = summary.digest.clone().ok_or("Missing source digest.")?;
         wrong.sha256 = "wrong".into();

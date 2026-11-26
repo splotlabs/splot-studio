@@ -22,6 +22,7 @@ const IVF_PTS: u64 = 1;
 const RANDOM_ACCESS: u64 = 2;
 const DISPLAY_COUNTED: u64 = 4;
 const CODED_COUNTED: u64 = 8;
+const AMBIGUOUS_PTS: u64 = 16;
 
 #[derive(Debug)]
 pub(super) struct TimelineIndex {
@@ -32,9 +33,11 @@ pub(super) struct TimelineIndex {
     // Coded ordinal, display OBU bytes, packet PTS, interval numerator and denominator, PTS flag.
     output: Track<6>,
     obu_bytes: u64,
+    assigned_obu_bytes: u64,
     through: u64,
     last_pts: Option<u64>,
     decreasing: bool,
+    ambiguous: bool,
 }
 
 impl TimelineIndex {
@@ -44,9 +47,11 @@ impl TimelineIndex {
             coded: Track::new()?,
             output: Track::new()?,
             obu_bytes: 0,
+            assigned_obu_bytes: 0,
             through: 0,
             last_pts: None,
             decreasing: false,
+            ambiguous: false,
         })
     }
 
@@ -59,10 +64,12 @@ impl TimelineIndex {
         offset: u64,
         bytes: u64,
         pts: Option<u64>,
+        ambiguous: bool,
         random_access: bool,
     ) -> io::Result<()> {
         let flags = (if pts.is_some() { IVF_PTS } else { 0 })
-            | (if random_access { RANDOM_ACCESS } else { 0 });
+            | (if random_access { RANDOM_ACCESS } else { 0 })
+            | (if ambiguous { AMBIGUOUS_PTS } else { 0 });
         self.budget(Table::<4>::BYTES)?;
         self.obus.append([offset, bytes, pts.unwrap_or(0), flags])?;
         self.obu_bytes += bytes;
@@ -100,13 +107,15 @@ impl TimelineIndex {
             coded[2] = self.output.rows.count + 1;
             self.coded.rows.write(ordinal, coded)?;
         }
+        let (num, den) = interval.unwrap_or_default();
+        self.output
+            .append([ordinal, obu[1], obu[2], num, den, obu[3] & IVF_PTS])?;
         if obu[3] & IVF_PTS != 0 {
             self.decreasing |= self.last_pts.is_some_and(|pts| obu[2] < pts);
             self.last_pts = Some(obu[2]);
         }
-        let (num, den) = interval.unwrap_or_default();
-        self.output
-            .append([ordinal, obu[1], obu[2], num, den, obu[3] & IVF_PTS])
+        self.ambiguous |= obu[3] & AMBIGUOUS_PTS != 0;
+        Ok(())
     }
 
     fn claim(&mut self, offset: u64, flag: u64) -> io::Result<(u64, [u64; 4])> {
@@ -121,8 +130,12 @@ impl TimelineIndex {
         if obu[3] & flag != 0 {
             obu[1] = 0;
         } else {
+            let unassigned = obu[3] & (DISPLAY_COUNTED | CODED_COUNTED) == 0;
             obu[3] |= flag;
             self.obus.write(row, obu)?;
+            if unassigned {
+                self.assigned_obu_bytes += obu[1];
+            }
         }
         Ok((row, obu))
     }
@@ -166,7 +179,9 @@ impl TimelineIndex {
     }
 
     fn clock(&self, clock: Option<IvfClock>) -> TimelineClock {
-        if self.decreasing {
+        if self.ambiguous {
+            TimelineClock::Conflicting
+        } else if self.decreasing {
             TimelineClock::Discontinuous
         } else if clock.is_some() && self.last_pts.is_some() {
             TimelineClock::Ivf
@@ -204,23 +219,25 @@ impl<const WORDS: usize> Track<WORDS> {
     }
 
     fn update(&mut self, row: u64, record: [u64; WORDS]) -> io::Result<()> {
-        self.rows.write(row, record)?;
         let block = row / BLOCK_ROWS;
         let first = block * BLOCK_ROWS;
         let end = self.rows.count.min(first + BLOCK_ROWS);
-        if let Some(summary) = self.scan(first, end)? {
-            let index = usize::try_from(block).map_err(io::Error::other)?;
-            self.blocks[index] = summary;
-        }
+        let mut summary = one(record[1]);
+        self.rows.read_window(first, end, |at, value| {
+            if at != row {
+                summary = combine(summary, one(value[1]));
+            }
+        })?;
+        let index = usize::try_from(block).map_err(io::Error::other)?;
+        self.rows.write(row, record)?;
+        self.blocks[index] = summary;
         Ok(())
     }
 
     fn scan(&mut self, first: u64, end: u64) -> io::Result<Option<ByteDistribution>> {
-        self.rows.seek(first)?;
         let mut summary = None;
-        for _ in first..end {
-            merge(&mut summary, one(self.rows.read()?[1]));
-        }
+        self.rows
+            .read_window(first, end, |_, row| merge(&mut summary, one(row[1])))?;
         Ok(summary)
     }
 
@@ -333,7 +350,9 @@ impl State {
         let output_ordinal = if is_output {
             Some(ordinal)
         } else {
-            first_output.checked_sub(1)
+            first_output
+                .checked_sub(1)
+                .filter(|&index| index < self.timeline.output.rows.count)
         };
         let mut entry = TimelineEntry {
             ordinal,
@@ -466,6 +485,8 @@ impl IdentityIndex {
             file_bytes: TimelineFileBytes {
                 file,
                 obu,
+                assigned_obu: state.timeline.assigned_obu_bytes,
+                unassigned_obu: obu - state.timeline.assigned_obu_bytes,
                 framing: classified - obu,
                 unclassified: file - classified,
             },
@@ -521,5 +542,56 @@ impl IdentityIndex {
             showing_offset: entry.showing_offset,
             time: entry.time,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summaries_keep_exact_bucket_edges_and_continuation_sizes() -> io::Result<()> {
+        let mut track = Track::<4>::new()?;
+        for row in 0..143 {
+            track.append([row, row + 1, 0, 0])?;
+        }
+        track.update(35, [35, 200, 0, 0])?;
+        assert_eq!(
+            track.bytes(11, 103)?,
+            Some(ByteDistribution {
+                min: 12,
+                max: 200,
+                sum: (12..=103).sum::<u64>() + 200 - 36,
+            })
+        );
+        assert_eq!(track.bytes(36, 37)?, Some(one(37)));
+        Ok(())
+    }
+
+    #[test]
+    fn rational_clock_handles_overflow_and_nonintegral_input() {
+        let clock = IvfClock {
+            num: 1001,
+            den: 30_000,
+        };
+        assert_eq!(clock.target_tick(TimelineTime { num: 1, den: 30 }), Some(1));
+        assert_eq!(clock.target_tick(TimelineTime { num: 2, den: 30 }), Some(2));
+        assert_eq!(
+            clock.target_tick(TimelineTime {
+                num: u128::MAX,
+                den: 1
+            }),
+            None
+        );
+        assert_eq!(clock.target_tick(TimelineTime { num: 1, den: 0 }), None);
+        assert_eq!(
+            clock.rate(10, 2),
+            Some(TimelineTime {
+                num: 2_400_000,
+                den: 2002
+            })
+        );
+        assert_eq!(clock.rate(10, 0), None);
+        assert_eq!(clock.time(u64::MAX).num, u128::from(u64::MAX) * 1001);
     }
 }

@@ -36,6 +36,8 @@ pub enum TimelineClock {
     Unavailable,
     /// All indexed output timestamps use the IVF time base and never decrease.
     Ivf,
+    /// One IVF packet timestamp covers multiple temporal units.
+    Conflicting,
     /// Output timestamps decrease. A time search or rate is ambiguous.
     Discontinuous,
 }
@@ -49,7 +51,17 @@ pub enum TimelineQuantizer {
     /// The frame header's base quantizer index.
     HeaderBase {
         /// Unscaled quantizer index from the frame header.
-        value: u16,
+        value: u32,
+    },
+    /// Derived from TIP reference quantizers.
+    DerivedBase {
+        /// Base quantizer index before segment or block deltas.
+        value: u32,
+    },
+    /// Inherited from a bridge or inactive BRU reference.
+    InheritedBase {
+        /// Base quantizer index before segment or block deltas.
+        value: u32,
     },
 }
 
@@ -134,6 +146,10 @@ pub struct TimelineFileBytes {
     pub file: u64,
     /// OBU bytes, including OBU headers.
     pub obu: u64,
+    /// OBU bytes assigned to coded frames or display events, counted once.
+    pub assigned_obu: u64,
+    /// OBU bytes outside those assignments, such as sequence headers and padding.
+    pub unassigned_obu: u64,
     /// Length prefixes and IVF wrapper bytes.
     pub framing: u64,
     /// Bytes outside the classified prefix, including any unparsed tail.
@@ -191,5 +207,32 @@ mod numerator {
         String::deserialize(deserializer)?
             .parse()
             .map_err(D::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{Command, Envelope, ProtocolError, decode, read_frame, write_message};
+
+    #[test]
+    fn tagged_timeline_request_round_trips_a_wide_rational() -> Result<(), ProtocolError> {
+        let command = Command::AnalysisTimelineLocate {
+            document: 5,
+            scan: 8,
+            target: TimelineTarget::Time {
+                time: TimelineTime {
+                    num: u128::MAX,
+                    den: u64::MAX,
+                },
+            },
+        };
+        let envelope = Envelope::new(9, command);
+        let mut bytes = Vec::new();
+        write_message(&mut bytes, &envelope)?;
+        let frame = read_frame(&mut bytes.as_slice())?.ok_or(ProtocolError::Truncated)?;
+        let decoded: Envelope<Command> = decode(&frame)?;
+        assert_eq!(decoded, envelope);
+        Ok(())
     }
 }
