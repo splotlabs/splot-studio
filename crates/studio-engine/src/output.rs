@@ -48,7 +48,8 @@ pub(crate) trait ExportControl {
     /// Reports counts. The worker may replace a progress event that is still pending.
     fn progress(&self, progress: ExportProgress);
 
-    /// Claims publication for the full batch. Flush, sync and verify the files first.
+    /// Waits for permission to publish the full batch.
+    /// Flush, sync and verify the files first.
     fn claim_publish(&self, frames: u64) -> Result<(), Stop>;
 
     /// Publishes one verified file. Records its path even if a directory sync fails.

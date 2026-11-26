@@ -695,7 +695,7 @@ mod tests {
         assert!(matches!(result, Err(Stop::Cancelled)));
         drop(layout);
         drop(samples);
-        control.finish(result);
+        control.finish(result.map(|()| 6));
         assert!(!fixture.path("samples.yuv").exists());
         assert!(!fixture.path("layout.json").exists());
         assert!(matches!(
