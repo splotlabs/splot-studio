@@ -8,6 +8,7 @@ mod context;
 use std::fs::File;
 use std::io::BufReader;
 
+use splot_core::span::{BitOffset, ByteOffset};
 use splot_validate::{
     StreamValidateError, ValidationCompletion as NativeCompletion, ValidationLimits, Validator,
 };
@@ -61,7 +62,7 @@ pub(super) fn validate(
          These checks cover part of AV2 v1.0.0. They exclude independent decoding.",
     );
     if context.is_some() {
-        scope.push_str(" Splot uses the supplied sequence headers and operating point sets as initial validation state.");
+        scope.push_str(" Splot uses the supplied sequence headers and operating point sets as initial validation state. Random access checks cannot distinguish some in-band replacements of supplied objects.");
     }
     let counts = result.counts;
     let findings: Vec<_> = result
@@ -77,8 +78,8 @@ pub(super) fn validate(
                 splot_validate::Severity::Info => Severity::Info,
             },
             spec_section: d.spec_section,
-            file_offset: d.byte_offset.map(|offset| offset.get()),
-            bit_offset: d.bit_offset.map(|bit| bit.get()),
+            file_offset: d.byte_offset.map(ByteOffset::get),
+            bit_offset: d.bit_offset.map(BitOffset::get),
         })
         .collect();
     let coverage = result.coverage;
@@ -97,7 +98,7 @@ pub(super) fn validate(
             scope,
             completion,
             checked_obus: coverage.checked_obus,
-            last_checked_obu_end: coverage.last_checked_obu_end.map(|end| end.get()),
+            last_checked_obu_end: coverage.last_checked_obu_end.map(ByteOffset::get),
             malformed_units: coverage.malformed_units,
             finalized: coverage.finalized,
             errors: counts.errors as u64,

@@ -109,7 +109,7 @@ enum Request {
 }
 
 /// Reads the selected document on the work thread.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum Query {
     Page {
         filter: RowFilter,
