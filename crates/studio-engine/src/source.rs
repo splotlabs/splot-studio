@@ -609,6 +609,13 @@ fn hash_io(error: impl std::fmt::Display) -> Stop {
 pub(crate) fn open_verified(path: &Path) -> io::Result<File> {
     let mut options = File::options();
     options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // A replacement between the regular-file check and open can be a FIFO.
+        options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
