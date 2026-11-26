@@ -273,6 +273,38 @@ mod tests {
     use studio_domain::layers::LayerDecodeSelection;
 
     #[test]
+    fn ten_bit_replay_preserves_a_reference_across_embedded_layers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let source = include_bytes!("../../tests/preview/fixtures/syn-mlayer2-crossref-10bit.obu");
+        let query = ReferenceQuery {
+            coded_offset: 758,
+            selection: LayerDecodeSelection::Default,
+            generation: 1,
+        };
+        let evidence = replay(
+            source.as_slice(),
+            source.len() as u64,
+            false,
+            query,
+            &|| false,
+        )
+        .map_err(|error| error.message)?;
+        assert_eq!(evidence.frame.sequence_offset, 9);
+        assert_eq!(evidence.frame.layers.embedded, 1);
+        assert!(evidence.dependencies.iter().any(|dependency| {
+            evidence.slots.iter().any(|slot| {
+                slot.slot == dependency.slot
+                    && matches!(
+                        slot.before,
+                        ReferenceSlotState::Retained { frame, .. }
+                            if frame.coded_offset == 35 && frame.layers.embedded == 0
+                    )
+            })
+        }));
+        Ok(())
+    }
+
+    #[test]
     fn a_partial_raw_prefix_needs_the_next_temporal_delimiter()
     -> Result<(), Box<dyn std::error::Error>> {
         let source =
