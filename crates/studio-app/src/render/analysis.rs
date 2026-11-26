@@ -34,6 +34,12 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
     global.set_document_index(int(analysis.shown_index() as u64));
     let notice = analysis.notice_line().unwrap_or_default();
     global.set_notice(notice.into());
+    global.set_can_playback(
+        analysis
+            .shown()
+            .and_then(Document::summary)
+            .is_some_and(|summary| summary.digest.is_some()),
+    );
     let Some(doc) = analysis.shown() else {
         global.set_state(AnalysisState::Empty);
         global.set_message(

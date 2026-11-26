@@ -111,7 +111,9 @@ fn advance(
     out: &mut Vec<String>,
 ) -> Option<Phase> {
     match phase {
-        Phase::Poster(started) if win.get_stage_state() == StageState::Picture => {
+        Phase::Poster(started)
+            if win.global::<studio_app::Playback>().get_state() == StageState::Picture =>
+        {
             out.push(format!(
                 "poster shown {:?} after launch (probe included); scale factor {}, picture area \
                  {}x{} px",
@@ -120,7 +122,7 @@ fn advance(
                 win.get_stage_px_width(),
                 win.get_stage_px_height()
             ));
-            win.invoke_stage_seek(0);
+            win.global::<studio_app::Playback>().invoke_seek(0);
             Some(Phase::Step {
                 pass: 1,
                 frame: 0,
@@ -134,12 +136,13 @@ fn advance(
             asked,
             mut times,
         } if win
-            .get_stage_frame_text()
+            .global::<studio_app::Playback>()
+            .get_frame_text()
             .starts_with(&format!("{} / ", frame + 1)) =>
         {
             times.push(asked.elapsed());
             if frame + 1 < frames {
-                win.invoke_stage_step(1);
+                win.global::<studio_app::Playback>().invoke_step(1);
                 return Some(Phase::Step {
                     pass,
                     frame: frame + 1,
@@ -155,7 +158,7 @@ fn advance(
                 status("VmHWM")
             ));
             if pass < passes {
-                win.invoke_stage_seek(0);
+                win.global::<studio_app::Playback>().invoke_seek(0);
                 return Some(Phase::Step {
                     pass: pass + 1,
                     frame: 0,

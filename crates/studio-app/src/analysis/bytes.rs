@@ -54,30 +54,32 @@ impl Analysis {
         let Some(len) = doc.len() else {
             return;
         };
-        match parse_offset(text).filter(|o| *o < len) {
-            Some(offset) => {
-                doc.bytes.cursor = offset;
-                if !in_window(doc.bytes.offset, offset) {
-                    doc.bytes.offset = line_of(offset);
-                    doc.bytes.data = None;
-                }
-                self.locate(
-                    at,
-                    LocateTarget::Offset { offset },
-                    Purpose::Select { from_list: false },
-                    out,
-                );
-                self.fetch_bytes(at, out);
-            }
-            None => {
-                doc.notice = Some(format!(
-                    "\u{201c}{}\u{201d} is not a byte of this file. Type 0 to {} or 0x0 to 0x{:X}.",
-                    text.trim(),
-                    len.saturating_sub(1),
-                    len.saturating_sub(1)
-                ));
-            }
+        if let Some(offset) = parse_offset(text).filter(|o| *o < len) {
+            self.select_byte_at(at, offset, out);
+        } else {
+            doc.notice = Some(format!(
+                "\u{201c}{}\u{201d} is not a byte of this file. Type 0 to {} or 0x0 to 0x{:X}.",
+                text.trim(),
+                len.saturating_sub(1),
+                len.saturating_sub(1)
+            ));
         }
+    }
+
+    pub(super) fn select_byte_at(&mut self, at: usize, offset: u64, out: &mut Vec<Effect>) {
+        let doc = &mut self.documents[at];
+        doc.bytes.cursor = offset;
+        if !in_window(doc.bytes.offset, offset) {
+            doc.bytes.offset = line_of(offset);
+            doc.bytes.data = None;
+        }
+        self.locate(
+            at,
+            LocateTarget::Offset { offset },
+            Purpose::Select { from_list: false },
+            out,
+        );
+        self.fetch_bytes(at, out);
     }
 
     /// Asks for the byte window if it is shown and not read or asked for.

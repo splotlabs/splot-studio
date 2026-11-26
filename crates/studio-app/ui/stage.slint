@@ -4,6 +4,7 @@
 // The picture area and its transport controls. Values come from Rust; every
 // callback is an intent. Nothing here decodes or asks for pictures.
 
+import { Caption } from "controls.slint";
 import { Tokens } from "tokens.slint";
 import { FocusRing, KeyboardFocus } from "focus.slint";
 
@@ -310,6 +311,7 @@ export component Stage inherits KeyboardFocus {
     in property <bool> can-compare;
     in property <bool> comparing;
     in property <bool> navigable;
+    in property <bool> can-end: true;
     in property <string> accessible-text;
     callback compare(bool);
     callback step(int);
@@ -323,7 +325,8 @@ export component Stage inherits KeyboardFocus {
     accessible-role: image;
     accessible-label: root.accessible-text;
     accessible-description: (root.can-compare ? "Press and hold, or hold O, to see the original. " : "")
-        + (root.navigable ? "Space plays or pauses. Left and Right step one frame; Home and End go to the first and last." : "");
+        + (root.navigable ? "Space plays or pauses. Left and Right step one frame. Home goes to the first." : "")
+        + (root.navigable && root.can-end ? " End goes to the last." : "");
     // Screen readers cannot hold: activating switches sides until activated again.
     accessible-action-default => {
         if root.can-compare || root.comparing {
@@ -362,7 +365,7 @@ export component Stage inherits KeyboardFocus {
             root.seek-start();
             return accept;
         }
-        if event.text == Key.End {
+        if event.text == Key.End && root.can-end {
             root.keyboard-used();
             root.seek-end();
             return accept;
@@ -466,5 +469,168 @@ export component Stage inherits KeyboardFocus {
             }
             reject
         }
+    }
+}
+
+export global Playback {
+    in property <StageState> state;
+    in property <image> image;
+    in property <bool> native;
+    in property <string> badge;
+    in property <string> hint;
+    in property <string> message;
+    in property <string> accessible;
+    in property <bool> transport;
+    in property <bool> navigable;
+    in property <int> frames;
+    in property <float> position;
+    in property <string> frame-text;
+    in property <string> time-text;
+    in property <bool> can-play;
+    in property <bool> playing;
+    in property <string> play-note;
+    in property <bool> can-compare;
+    in property <bool> comparing;
+    in property <bool> can-native;
+    in property <bool> native-on;
+    in property <string> decode-work;
+    in property <string> output-layers;
+    in property <string> output-unit;
+    in property <string> output-coded;
+    in property <string> output-showing;
+    in property <string> output-sequence;
+
+    callback compare(bool);
+    callback step(int);
+    callback seek(int);
+    callback end();
+    callback play-pause();
+    callback toggle-native();
+    callback pan(length, length);
+    callback cancel-decode();
+    callback seek-output(string);
+    callback show-bytes(int);
+}
+
+export component PlaybackPanel inherits VerticalLayout {
+    in property <length> picture-height;
+    in property <bool> document;
+    spacing: Tokens.space-1;
+
+    Stage {
+        height: Playback.state == StageState.unavailable ? 4 * Tokens.space-6 : root.picture-height;
+        state: Playback.state;
+        picture: Playback.image;
+        native: Playback.native;
+        badge: Playback.badge;
+        hint: Playback.hint;
+        message: Playback.message;
+        can-compare: Playback.can-compare;
+        comparing: Playback.comparing;
+        navigable: Playback.navigable;
+        accessible-text: Playback.accessible;
+        can-end: !root.document || Playback.frames > 0;
+        compare(on) => {
+            Playback.compare(on);
+        }
+        step(delta) => {
+            Playback.step(delta);
+        }
+        seek-start => {
+            Playback.seek(0);
+        }
+        seek-end => {
+            Playback.end();
+        }
+        play-pause => {
+            Playback.play-pause();
+        }
+        pan(dx, dy) => {
+            Playback.pan(dx, dy);
+        }
+    }
+
+    // Frame stepping, the scrubber, play and actual pixels.
+    // The step buttons are no Tab stops: the picture's
+    // own Left and Right keys do the same.
+    if Playback.transport: HorizontalLayout {
+        spacing: Tokens.space-1;
+
+        IconButton {
+            label: root.document ? "Previous output" : "Previous frame";
+            description: "Left arrow on the picture";
+            enabled: Playback.navigable;
+            tab-stop: false;
+            icon: "M 3 3 L 4.8 3 L 4.8 13 L 3 13 Z M 13 3 L 13 13 L 6.2 8 Z";
+            clicked => {
+                Playback.step(-1);
+            }
+        }
+
+        IconButton {
+            label: Playback.playing ? "Pause" : "Play";
+            description: root.document ? "Space on the picture plays or pauses. " + Playback.play-note : Playback.play-note != "" ? Playback.play-note : "Plays the video only, without sound (Space on the picture)";
+            enabled: Playback.can-play || Playback.playing;
+            icon: Playback.playing ? "M 3.5 2.5 L 6.6 2.5 L 6.6 13.5 L 3.5 13.5 Z M 9.4 2.5 L 12.5 2.5 L 12.5 13.5 L 9.4 13.5 Z" : "M 4.2 2.4 L 13.6 8 L 4.2 13.6 Z";
+            clicked => {
+                Playback.play-pause();
+            }
+        }
+
+        IconButton {
+            label: root.document ? "Next output" : "Next frame";
+            description: "Right arrow on the picture";
+            enabled: Playback.navigable;
+            tab-stop: false;
+            icon: "M 11.2 3 L 13 3 L 13 13 L 11.2 13 Z M 3 3 L 9.8 8 L 3 13 Z";
+            clicked => {
+                Playback.step(1);
+            }
+        }
+
+        if Playback.frames > 1: Scrubber {
+            count: Playback.frames;
+            value: Playback.position;
+            value-text: Playback.frame-text;
+            enabled: Playback.navigable;
+            seek(frame) => {
+                Playback.seek(frame);
+            }
+        }
+
+        if Playback.frames <= 1: Rectangle {
+            horizontal-stretch: 1;
+        }
+
+        Text {
+            horizontal-stretch: 0;
+            min-width: self.preferred-width;
+            text: Playback.frame-text + (Playback.time-text != "" ? "  ·  " + Playback.time-text : "");
+            color: Tokens.text-secondary;
+            font-size: Tokens.type-caption * 1rem;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+
+        Rectangle {
+            width: Tokens.space-1;
+        }
+
+        if !root.document: ToggleChip {
+            text: "1:1";
+            label: "Actual pixels";
+            description: "Shows the frame's own pixels, one to one, from the centre. Scroll on the picture to move.";
+            checked: Playback.native-on;
+            enabled: Playback.can-native;
+            y: (parent.height - self.height) / 2;
+            toggled => {
+                Playback.toggle-native();
+            }
+        }
+    }
+
+    if Playback.transport && Playback.play-note != "": Caption {
+        text: Playback.play-note;
+        accessible-live-region: polite;
     }
 }

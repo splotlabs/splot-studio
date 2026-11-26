@@ -14,7 +14,7 @@ import { AboutSlint, Button, ComboBox, Palette, ScrollView, SpinBox } from "std-
 import { Tokens } from "tokens.slint";
 import { FocusRing, KeyboardFocus } from "focus.slint";
 import { Caption, Label, LinkButton, SectionTitle, WorkspaceSwitch } from "controls.slint";
-import { IconButton, Scrubber, Stage, StageState, ToggleChip } from "stage.slint";
+import { IconButton, Playback, PlaybackPanel, StageState } from "stage.slint";
 import { AnalyzeView } from "analyze.slint";
 import { ValidationSetup } from "validation-setup.slint";
 import { AdvancedEditor, AdvancedOptionRow, FieldRow } from "advanced.slint";
@@ -23,7 +23,7 @@ export { AdvancedOptionRow, FieldRow }
 
 // Re-exported so Rust can pin the appearance for renderer snapshots, and the
 // picture area's state for Rust to set.
-export { Palette, StageState }
+export { Palette, Playback, StageState }
 export { Analysis, AnalysisState, ByteCell, ByteLine, ByteRegion, EvidenceRow, Legend, NavRow, NavStep, Property } from "analyze.slint";
 
 // Which workspace the shell shows.
@@ -1133,43 +1133,14 @@ export component AppWindow inherits Window {
         root.advanced-focus-request += 1;
     }
 
-    // The picture area. Rust sets everything; only the slider position is
-    // also moved here while dragging.
-    in property <StageState> stage-state;
-    in property <image> stage-image;
-    // The picture is actual pixels, one per physical pixel.
-    in property <bool> stage-native;
-    // "Original", "AV2 result · colours assumed (BT.709)", "Live · frame 117 of 300".
-    in property <string> stage-badge;
-    // "Hold to see the original", or empty.
-    in property <string> stage-hint;
-    in property <string> stage-message;
-    in property <string> stage-accessible;
-    // The transport row is shown, and usable.
-    in property <bool> stage-transport;
-    in property <bool> stage-navigable;
-    // The frame count; 0 when it is not known (no scrubber then).
-    in property <int> stage-frames;
-    in property <float> stage-position;
-    // "12 / 300" and "0:00.40".
-    in property <string> stage-frame-text;
-    in property <string> stage-time-text;
-    in property <bool> stage-can-play;
-    in property <bool> stage-playing;
-    // Why Play is not offered, when it is not.
-    in property <string> stage-play-note;
-    in property <bool> stage-can-compare;
-    in property <bool> stage-comparing;
-    in property <bool> stage-can-native;
-    in property <bool> stage-native-on;
     // Row thumbnails, by row index.
     in property <[image]> row-thumbs;
     // What preview pictures are: under Advanced.
     in property <string> preview-note;
     // The picture area and a row thumbnail in physical pixels: what Rust asks
     // the engine for. They change with the scale factor only.
-    out property <int> stage-px-width: round(root.main-width / 1phx);
-    out property <int> stage-px-height: round(root.main-width * 9 / 16 / 1phx);
+    out property <int> stage-px-width: round((root.workspace == WorkspaceView.analyze ? analyze-view.full-width : root.main-width) / 1phx);
+    out property <int> stage-px-height: round((root.workspace == WorkspaceView.analyze ? analyze-view.playback-height : root.main-width * 9 / 16) / 1phx);
     out property <int> thumb-px-width: round(64px / 1phx);
     out property <int> thumb-px-height: round(36px / 1phx);
 
@@ -1211,13 +1182,6 @@ export component AppWindow inherits Window {
     callback omissions-confirmed();
     callback omissions-declined();
     callback stage-geometry-changed();
-    callback stage-compare(bool);
-    callback stage-step(int);
-    callback stage-seek(int);
-    callback stage-end();
-    callback stage-play-pause();
-    callback stage-toggle-native();
-    callback stage-pan(length, length);
     changed stage-px-width => {
         root.stage-geometry-changed();
     }
@@ -1456,6 +1420,9 @@ export component AppWindow inherits Window {
                             copy(text) => {
                                 root.copy-text(text);
                             }
+                            reveal-bytes => {
+                                card-scroll.content-y = min(0px, card-scroll.height - card-scroll.content-height);
+                            }
                         }
 
                     encode-view := HorizontalLayout {
@@ -1496,123 +1463,8 @@ export component AppWindow inherits Window {
                             }
 
                             // The picture area, on top of the card once a file is open.
-                            if root.has-source && root.stage-state != StageState.none: VerticalLayout {
-                                spacing: Tokens.space-1;
-
-                                Stage {
-                                    height: root.stage-state == StageState.unavailable ? 4 * Tokens.space-6 : root.main-width * 9 / 16;
-                                    state: root.stage-state;
-                                    picture: root.stage-image;
-                                    native: root.stage-native;
-                                    badge: root.stage-badge;
-                                    hint: root.stage-hint;
-                                    message: root.stage-message;
-                                    can-compare: root.stage-can-compare;
-                                    comparing: root.stage-comparing;
-                                    navigable: root.stage-navigable;
-                                    accessible-text: root.stage-accessible;
-                                    compare(on) => {
-                                        root.stage-compare(on);
-                                    }
-                                    step(delta) => {
-                                        root.stage-step(delta);
-                                    }
-                                    seek-start => {
-                                        root.stage-seek(0);
-                                    }
-                                    seek-end => {
-                                        root.stage-end();
-                                    }
-                                    play-pause => {
-                                        root.stage-play-pause();
-                                    }
-                                    pan(dx, dy) => {
-                                        root.stage-pan(dx, dy);
-                                    }
-                                }
-
-                                // Frame stepping, the scrubber, play and actual pixels.
-                                // The step buttons are no Tab stops: the picture's
-                                // own Left and Right keys do the same.
-                                if root.stage-transport: HorizontalLayout {
-                                    spacing: Tokens.space-1;
-
-                                    IconButton {
-                                        label: "Previous frame";
-                                        description: "Left arrow on the picture";
-                                        enabled: root.stage-navigable;
-                                        tab-stop: false;
-                                        icon: "M 3 3 L 4.8 3 L 4.8 13 L 3 13 Z M 13 3 L 13 13 L 6.2 8 Z";
-                                        clicked => {
-                                            root.stage-step(-1);
-                                        }
-                                    }
-
-                                    IconButton {
-                                        label: root.stage-playing ? "Pause" : "Play";
-                                        description: root.stage-play-note != "" ? root.stage-play-note : "Plays the video only, without sound (Space on the picture)";
-                                        enabled: root.stage-can-play || root.stage-playing;
-                                        icon: root.stage-playing ? "M 3.5 2.5 L 6.6 2.5 L 6.6 13.5 L 3.5 13.5 Z M 9.4 2.5 L 12.5 2.5 L 12.5 13.5 L 9.4 13.5 Z" : "M 4.2 2.4 L 13.6 8 L 4.2 13.6 Z";
-                                        clicked => {
-                                            root.stage-play-pause();
-                                        }
-                                    }
-
-                                    IconButton {
-                                        label: "Next frame";
-                                        description: "Right arrow on the picture";
-                                        enabled: root.stage-navigable;
-                                        tab-stop: false;
-                                        icon: "M 11.2 3 L 13 3 L 13 13 L 11.2 13 Z M 3 3 L 9.8 8 L 3 13 Z";
-                                        clicked => {
-                                            root.stage-step(1);
-                                        }
-                                    }
-
-                                    if root.stage-frames > 1: Scrubber {
-                                        count: root.stage-frames;
-                                        value: root.stage-position;
-                                        value-text: root.stage-frame-text;
-                                        enabled: root.stage-navigable;
-                                        seek(frame) => {
-                                            root.stage-seek(frame);
-                                        }
-                                    }
-
-                                    if root.stage-frames <= 1: Rectangle {
-                                        horizontal-stretch: 1;
-                                    }
-
-                                    Text {
-                                        horizontal-stretch: 0;
-                                        min-width: self.preferred-width;
-                                        text: root.stage-frame-text + (root.stage-time-text != "" ? "  ·  " + root.stage-time-text : "");
-                                        color: Tokens.text-secondary;
-                                        font-size: Tokens.type-caption * 1rem;
-                                        vertical-alignment: center;
-                                        accessible-role: none;
-                                    }
-
-                                    Rectangle {
-                                        width: Tokens.space-1;
-                                    }
-
-                                    ToggleChip {
-                                        text: "1:1";
-                                        label: "Actual pixels";
-                                        description: "Shows the frame's own pixels, one to one, from the centre. Scroll on the picture to move.";
-                                        checked: root.stage-native-on;
-                                        enabled: root.stage-can-native;
-                                        y: (parent.height - self.height) / 2;
-                                        toggled => {
-                                            root.stage-toggle-native();
-                                        }
-                                    }
-                                }
-
-                                if root.stage-transport && root.stage-play-note != "": Caption {
-                                    text: root.stage-play-note;
-                                }
+                            if root.has-source && Playback.state != StageState.none: PlaybackPanel {
+                                picture-height: root.main-width * 9 / 16;
                             }
 
                             // Source zone: an intentional empty state or the file card.

@@ -549,6 +549,35 @@ fn go_to_selects_the_element_at_an_offset_and_refuses_others() {
 }
 
 #[test]
+fn playback_links_reveal_bytes_only_in_the_current_read() {
+    let (mut analysis, engine) = opened(100);
+    let document = doc(&analysis).id();
+    let effects = analysis.input(Input::ToggleBytes);
+    engine.settle(&mut analysis, effects);
+    assert!(!doc(&analysis).bytes().shown);
+
+    let effects = analysis.input(Input::PlaybackByte {
+        document: document + 1,
+        offset: 723,
+    });
+    assert_eq!(effects, []);
+    assert!(selected(&analysis).is_none());
+    assert!(!doc(&analysis).bytes().shown);
+
+    let effects = analysis.input(Input::PlaybackByte {
+        document,
+        offset: 723,
+    });
+    engine.settle(&mut analysis, effects);
+    assert_eq!(selected(&analysis), Some((80, Position::Row(80))));
+    let bytes = doc(&analysis).bytes();
+    assert!(bytes.shown);
+    assert_eq!(bytes.cursor, 723);
+    assert_eq!(bytes.offset, 720);
+    assert!(bytes.data.is_some());
+}
+
+#[test]
 fn the_byte_cursor_moves_the_window_by_lines() {
     let (mut analysis, engine) = opened(100);
     let effects = analysis.input(Input::Cursor(Step::End));

@@ -172,6 +172,15 @@ pub enum Input {
     SelectAtCursor,
     /// Show or hide the byte view.
     ToggleBytes,
+    /// Show or hide playback for this inspection read.
+    TogglePlayback,
+    /// Select the source byte linked to an output picture.
+    PlaybackByte {
+        /// The current inspection read.
+        document: u64,
+        /// The byte offset in the source file.
+        offset: u64,
+    },
     /// Back in the selection history.
     Back,
     /// Forward in the selection history.
@@ -521,6 +530,17 @@ impl Analysis {
                     self.shown = at;
                 }
             }
+            Input::PlaybackByte { document, offset } => {
+                if let Some(doc) = self.documents.get_mut(self.shown)
+                    && doc.id == document
+                    && doc.len().is_some_and(|len| offset < len)
+                {
+                    doc.notice = None;
+                    doc.bytes.shown = true;
+                    self.select_byte_at(self.shown, offset, &mut out);
+                }
+            }
+            Input::TogglePlayback => {}
             other => {
                 if let Some(at) = self.open_index() {
                     self.document_input(at, other, &mut out);
@@ -633,7 +653,9 @@ impl Analysis {
             | Input::Cancel
             | Input::CancelDocument(_)
             | Input::Resolve
-            | Input::Relink { .. } => {}
+            | Input::Relink { .. }
+            | Input::TogglePlayback
+            | Input::PlaybackByte { .. } => {}
         }
     }
 
