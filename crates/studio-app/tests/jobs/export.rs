@@ -20,6 +20,7 @@ pub(super) fn shared_worker_and_restore(rig: &mut Rig) -> Result<(), Box<dyn std
         .export_sources()
         .pop()
         .ok_or("no complete source digest")?;
+    assert_eq!(source.source.path.to_path_buf()?, source_path);
     let request = |path: &Path| ExportRequest {
         source: source.source.clone(),
         range: ExportRange::Inclusive { first: 1, last: 2 },
