@@ -100,6 +100,9 @@ pub fn summary_line(summary: &DocumentSummary) -> String {
         framing(summary.framing).to_owned(),
         byte_count(summary.fingerprint.len),
     ];
+    if matches!(summary.outcome, ScanOutcome::Scanning) {
+        return parts.join(" · ");
+    }
     let mut counts = Vec::new();
     if summary.framing == Framing::Ivf {
         counts.push(plural(summary.packets, "packet", "packets"));
@@ -309,16 +312,19 @@ pub fn layer_label(layer: Option<LayerFilter>, summary: Option<&DocumentSummary>
 
 /// `5 rows`, or `2 of 8 elements` under a filter.
 #[must_use]
-pub fn rows_line(filter: RowFilter, total: Option<u64>, elements: u64) -> String {
+pub fn rows_line(filter: RowFilter, total: Option<u64>, elements: Option<u64>) -> String {
     match total {
         None => "Loading rows…".to_owned(),
         Some(total) if filter.is_all() => plural(total, "element", "elements"),
         Some(0) => "No element matches the filters.".to_owned(),
-        Some(total) => format!(
-            "{} of {} match",
-            count(total),
-            plural(elements, "element", "elements")
-        ),
+        Some(total) => match elements {
+            Some(elements) => format!(
+                "{} of {} match",
+                count(total),
+                plural(elements, "element", "elements")
+            ),
+            None => plural(total, "matching element", "matching elements"),
+        },
     }
 }
 
@@ -721,15 +727,22 @@ mod tests {
             ),
             "tlayer 0 · mlayer 0 inferred in 2 (3)"
         );
-        assert_eq!(rows_line(RowFilter::default(), Some(8), 8), "8 elements");
-        assert_eq!(rows_line(RowFilter::default(), None, 8), "Loading rows…");
+        assert_eq!(
+            rows_line(RowFilter::default(), Some(8), Some(8)),
+            "8 elements"
+        );
+        assert_eq!(
+            rows_line(RowFilter::default(), None, Some(8)),
+            "Loading rows…"
+        );
         let tds = RowFilter {
             kind: KindFilter::Obu { obu_type: 2 },
             layer: None,
         };
-        assert_eq!(rows_line(tds, Some(2), 8), "2 of 8 elements match");
+        assert_eq!(rows_line(tds, Some(2), Some(8)), "2 of 8 elements match");
+        assert_eq!(rows_line(tds, Some(2), None), "2 matching elements");
         assert_eq!(
-            rows_line(tds, Some(0), 8),
+            rows_line(tds, Some(0), Some(8)),
             "No element matches the filters."
         );
     }

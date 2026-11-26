@@ -265,9 +265,9 @@ fn read(doc: &crate::analysis::Document, state: State) -> String {
     }
 }
 
-/// What a finished read kept.
+/// The elements found or retained by the scan.
 fn found(summary: &DocumentSummary) -> String {
-    let elements = format!("{} elements", count(summary.elements));
+    let elements = plural(summary.elements, "element", "elements");
     match &summary.outcome {
         ScanOutcome::Scanning => format!("{elements} found so far."),
         ScanOutcome::Complete => format!("{elements}; every byte parsed."),

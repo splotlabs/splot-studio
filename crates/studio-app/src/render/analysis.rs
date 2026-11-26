@@ -5,7 +5,7 @@
 //! the visible rows and the one byte window, as display strings.
 
 use slint::{ComponentHandle, SharedString};
-use studio_domain::analysis::{DocumentSummary, Element, Span};
+use studio_domain::analysis::{DocumentSummary, Element, ScanOutcome, Span};
 use studio_domain::syntax::SyntaxSpan;
 
 use super::{model, refill};
@@ -92,7 +92,8 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
     ));
     global.set_layer_index(index_of(&layers, &filter.layer));
     global.set_filtered(!filter.is_all());
-    global.set_rows_line(text::rows_line(filter, doc.total(), summary.elements).into());
+    let elements = (!matches!(summary.outcome, ScanOutcome::Scanning)).then_some(summary.elements);
+    global.set_rows_line(text::rows_line(filter, doc.total(), elements).into());
     global.set_hidden_note(text::hidden_note(doc.selected()).into());
     if let Some(rows) = refill(&global.get_rows(), rows(doc)) {
         global.set_rows(rows);
