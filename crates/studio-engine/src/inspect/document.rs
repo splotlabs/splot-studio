@@ -248,10 +248,11 @@ impl Document {
         if self.scan.is_none() {
             return Ok(true);
         }
-        // Cache verification gets one bounded step per scan batch. Cold
-        // discovery continues while a candidate is verified.
+        // Keep a useful cold prefix available while the worker verifies a cache candidate.
+        let has_prefix =
+            self.summary.elements > 1 && (self.summary.obus > 0 || self.summary.packets > 1);
         let mut cache_cancelled = false;
-        if let Some(cache) = &mut self.cache {
+        if has_prefix && let Some(cache) = &mut self.cache {
             match cache.advance(&self.summary, cancelled) {
                 Ok(Progress::Warm(entry)) => {
                     let (index, summary) = *entry;
@@ -261,7 +262,11 @@ impl Document {
                     self.scan = None;
                     return Ok(true);
                 }
-                Ok(Progress::Cold | Progress::Reading) => {}
+                Ok(Progress::Reading) => {
+                    self.check()?;
+                    return Ok(false);
+                }
+                Ok(Progress::Cold) => {}
                 Err(error) if error.code == AnalysisFailure::Cancelled => cache_cancelled = true,
                 Err(error) => return Err(error),
             }
