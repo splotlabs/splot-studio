@@ -662,6 +662,35 @@ mod tests {
     }
 
     #[test]
+    fn delimiter_only_packets_preserve_partial_framing() -> TestResult {
+        use splot_core::span::ByteOffset;
+        use studio_domain::timeline::TimelineView;
+
+        let delimiters = [1, 8].repeat(16_384);
+        let unit = TemporalUnit {
+            index: 0,
+            pts: Some(0),
+            offset: ByteOffset::new(44),
+            bytes: &delimiters,
+        };
+        let source = SourceFingerprint {
+            len: unit.offset.get() + unit.bytes.len() as u64,
+            modified: None,
+        };
+        let index = IdentityIndex::new(GrainPolicy::Skip, source).map_err(refusal)?;
+        index.index_unit(&unit, &|| false)?;
+        let page = index
+            .timeline(None, TimelineView::Coded, 0, 1, 1)
+            .map_err(refusal)?;
+        assert!(!page.complete);
+        assert_eq!(page.bytes, None);
+        assert_eq!(index.summary().temporal, 16_384);
+        assert_eq!(page.file_bytes.obu, 16_384);
+        assert_eq!(page.file_bytes.unclassified, 0);
+        Ok(())
+    }
+
+    #[test]
     fn timeline_reconciles_bridge_bytes_and_rejects_ambiguous_clock() -> TestResult {
         use studio_domain::timeline::{
             ByteDistribution, TimelineClock, TimelineFileBytes, TimelineTarget, TimelineTime,
