@@ -16,7 +16,7 @@ use studio_domain::export::{
 };
 use studio_domain::job::{ChromaLayout, FailureCode, Rational, WirePath};
 use studio_domain::preview::GrainPolicy;
-use studio_domain::protocol::{Command, Event};
+use studio_domain::protocol::{Command, ErrorCode, Event};
 use studio_engine::inspect::document::Document;
 
 use super::{Live, TestResult, leftovers};
@@ -722,6 +722,16 @@ fn loss_of_worker_before_proceed_names_only_unpublished_temporaries() -> TestRes
     let mut worker = Live::spawn()?;
     prepared(&mut worker, export)?;
     worker.send(REQUEST + 1, Command::Cancel)?;
+    let wrong_id = worker.next()?;
+    assert_eq!(wrong_id.request_id, REQUEST + 1);
+    assert!(matches!(
+        wrong_id.body,
+        Event::Error {
+            code: ErrorCode::WrongState,
+            ..
+        }
+    ));
+    worker.send(REQUEST, Command::Cancel)?;
     assert_eq!(terminal(&mut worker)?, ExportOutcome::Cancelled);
     close(worker)?;
     assert!(leftovers(dir.path(), &[&source]).is_empty());
