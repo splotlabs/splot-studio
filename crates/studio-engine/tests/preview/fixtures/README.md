@@ -73,3 +73,26 @@ avmdec --select-ops=0,1 --skip-film-grain --i420 --rawvideo -o - syn-msdo-ops-ra
 
 The last picture's SHA-256 is
 `4aaa603600b5c9c73dd0408845e59302b4e18974211eddb2ef3f203f459f1c44`.
+
+## Block motion
+
+The motion tests also use [the 8-bit transform fixture][motion-vector] from
+Splot `8e08378f2bbb08213f2fc89685fe471c740e3cbf`. Its input SHA-256 is
+`cd633dec894cf0c14ea2e32112208894b3b069dddb17f464cdd10166b74dda81`.
+
+Use AVM `a1ec4594d97028ebc34083ec8346616d697c2fc9` with
+`CONFIG_INSPECTION=1` for the motion checks. Read the modes and vectors from
+`ifd_inspect`. Read leaf coordinates from `inspect_sb_cb` and the partition
+tree. Resolve each used reference list index with `get_ref_frame_map_idx`.
+Read the retained picture's order hint and layer from `get_ref_frame_buf`.
+
+The 8-bit fixture has a `NEWMV` leaf at `(64, 0)` in the coded OBU at byte
+11269. Its base vector is column 12, row 4 in eighths of a luma sample.
+List index 0 uses slot 0, which retains the picture coded at byte 72.
+
+The existing 10-bit `syn-mlayer2-crossref-10bit.obu` has a `NEARMV` leaf at
+`(0, 0)` in the coded OBU at byte 1370. Its two base components are zero.
+In embedded layer 1, list index 0 uses slot 1. This slot retains the embedded
+layer 0 picture coded at byte 776.
+
+[motion-vector]: https://github.com/splotlabs/splot/blob/8e08378f2bbb08213f2fc89685fe471c740e3cbf/tests/conformance/vectors/valid/syn-4frame-dct-adst-tools-off-200x104.ivf

@@ -25,7 +25,7 @@ pub(super) struct History {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct References {
-    pending: Option<u64>,
+    pending: Option<(u64, ReferenceQuery)>,
     evidence: Option<Box<ReferenceEvidence>>,
     notice: Option<String>,
     preview: Option<PreviewLookup>,
@@ -59,14 +59,14 @@ impl References {
     }
 
     pub(super) fn accept(&mut self, request: u64, evidence: Box<ReferenceEvidence>) {
-        if self.pending == Some(request) {
+        if self.pending == Some((request, evidence.query)) {
             self.pending = None;
             self.evidence = Some(evidence);
         }
     }
 
     pub(super) fn fail(&mut self, request: u64, code: Option<AnalysisFailure>, message: &str) {
-        if self.pending == Some(request) {
+        if self.pending.is_some_and(|(id, _)| id == request) {
             self.pending = None;
             self.notice = Some(match code {
                 Some(AnalysisFailure::Cancelled) => "Reference inspection stopped.".to_owned(),
@@ -95,7 +95,10 @@ impl Document {
     }
 
     pub(crate) fn reference_evidence(&self) -> Option<&ReferenceEvidence> {
-        let offset = self.coded_offset()?;
+        self.reference_evidence_for(self.coded_offset()?)
+    }
+
+    pub(crate) fn reference_evidence_for(&self, offset: u64) -> Option<&ReferenceEvidence> {
         self.references.evidence().filter(|evidence| {
             evidence.query.coded_offset == offset
                 && evidence.query.selection == self.layer_decode_selection()
@@ -147,16 +150,36 @@ impl Analysis {
         let Some(coded_offset) = doc.coded_offset() else {
             return;
         };
+        self.request_references_for(at, coded_offset, out);
+    }
+
+    pub(super) fn request_references_for(
+        &mut self,
+        at: usize,
+        coded_offset: u64,
+        out: &mut Vec<Effect>,
+    ) {
+        let doc = &self.documents[at];
+        let selection = doc.layer_decode_selection();
+        if doc.references.pending.is_some_and(|(_, pending)| {
+            pending.coded_offset == coded_offset && pending.selection == selection
+        }) {
+            return;
+        }
+        self.cancel_references(at, out);
         let query = ReferenceQuery {
             coded_offset,
-            selection: doc.layer_decode_selection(),
+            selection,
             generation: self.next_request + 1,
         };
-        let request = self.send(doc.id, Asked::References(query), out, |document| {
-            Command::AnalysisReferences { document, query }
-        });
+        let request = self.send(
+            self.documents[at].id,
+            Asked::References(query),
+            out,
+            |document| Command::AnalysisReferences { document, query },
+        );
         self.documents[at].references = References {
-            pending: Some(request),
+            pending: Some((request, query)),
             ..References::default()
         };
     }
@@ -164,7 +187,7 @@ impl Analysis {
     pub(super) fn cancel_references(&mut self, at: usize, out: &mut Vec<Effect>) {
         self.cancel_reference_preview(at);
         let doc = &mut self.documents[at];
-        if let Some(reference) = doc.references.pending.take() {
+        if let Some((reference, _)) = doc.references.pending.take() {
             self.pending.remove(&reference);
             let document = doc.id;
             self.send(document, Asked::Cancel, out, |document| {
@@ -187,14 +210,19 @@ impl Analysis {
     pub(super) fn request_reference_preview(
         &mut self,
         at: usize,
+        scope: ReferenceQuery,
         frame: ReferenceFrame,
         out: &mut Vec<Effect>,
     ) {
         self.cancel_reference_preview(at);
         let doc = &mut self.documents[at];
-        let Some(scope) = doc.reference_evidence().map(|evidence| evidence.query) else {
+        if doc
+            .reference_evidence_for(scope.coded_offset)
+            .map(|evidence| evidence.query)
+            != Some(scope)
+        {
             return;
-        };
+        }
         let Some(scan) = doc.timeline.scan_for(scope.selection) else {
             doc.references.preview = Some(PreviewLookup::Unavailable(
                 "Index the timeline for this operating point to preview the reference.".to_owned(),
@@ -229,7 +257,10 @@ impl Analysis {
         }
         if doc.timeline.scan_for(query.scope.selection) != Some(scan)
             || query.scan != scan
-            || doc.reference_evidence().map(|evidence| evidence.query) != Some(query.scope)
+            || doc
+                .reference_evidence_for(query.scope.coded_offset)
+                .map(|evidence| evidence.query)
+                != Some(query.scope)
             || selection.coded_offset != query.frame.coded_offset
         {
             doc.references.preview = Some(PreviewLookup::Unavailable(

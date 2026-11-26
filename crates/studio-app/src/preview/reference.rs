@@ -20,15 +20,12 @@ pub(super) struct ReferencePreview {
 
 impl ReferencePreview {
     fn matches_frame(&self, header: &PictureHeader) -> bool {
-        // A first indexed output can come from a later display OBU. Match the
-        // decoded sample source and its layers instead of the display OBU.
+        // A later display OBU can request the same coded picture in another layer.
+        // The source OBU offset and sequence identify the retained samples.
         header.origin == PictureOrigin::Document
             && header.output.is_some_and(|event| {
                 event.coded_offset == Some(self.frame.coded_offset)
                     && event.sequence_offset == Some(self.frame.sequence_offset)
-                    && event.extended_layer == self.frame.layers.extended
-                    && event.embedded_layer == self.frame.layers.embedded
-                    && event.temporal_layer == self.frame.layers.temporal
             })
     }
 }
@@ -91,6 +88,12 @@ impl Preview {
             Ok(picture) => Some(Ok(picture)),
             Err(error) => Some(Err(error)),
         }
+    }
+
+    pub(crate) fn reference_preview_pending(&self) -> bool {
+        self.reference
+            .as_ref()
+            .is_some_and(|request| request.result.is_none())
     }
 
     pub(super) fn next_reference(&self) -> Option<Key> {

@@ -1,0 +1,129 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+import { Caption, Label, LinkButton, SectionTitle } from "controls.slint";
+import { Tokens } from "tokens.slint";
+
+export struct PredictionFact {
+    label: string,
+    value: string,
+}
+
+export struct PredictorRow {
+    position: int,
+    label: string,
+    detail: string,
+    available: bool,
+}
+
+export global BlockMotionView {
+    in property <bool> active;
+    in property <[PredictionFact]> facts;
+    in property <[PredictorRow]> predictors;
+    in property <bool> can-inspect-references;
+    in property <string> reference-status;
+    in property <string> preview-status;
+    in property <image> preview-picture;
+    in property <bool> can-show-overlay;
+    in property <bool> show-overlay;
+    callback inspect-references();
+    callback preview-reference(int);
+    callback follow-reference(int);
+    callback set-overlay(bool);
+}
+
+export component BlockMotionPane inherits VerticalLayout {
+    spacing: Tokens.space-2;
+
+    HorizontalLayout {
+        spacing: Tokens.space-2;
+
+        SectionTitle { horizontal-stretch: 1; text: "Prediction and motion"; }
+        if BlockMotionView.can-show-overlay: LinkButton {
+            text: BlockMotionView.show-overlay ? "Hide motion" : "Show motion";
+            description: "Show or hide the selected block's motion on the picture.";
+            clicked => { BlockMotionView.set-overlay(!BlockMotionView.show-overlay); }
+        }
+    }
+
+    VerticalLayout {
+        spacing: Tokens.space-1;
+        accessible-role: list;
+        accessible-label: "Prediction facts";
+
+        for fact[index] in BlockMotionView.facts: Rectangle {
+            accessible-role: list-item;
+            accessible-label: fact.label + ". " + fact.value;
+            accessible-item-index: index;
+            accessible-item-count: BlockMotionView.facts.length;
+            background: Tokens.surface;
+
+            HorizontalLayout {
+                padding: Tokens.space-2;
+                spacing: Tokens.space-2;
+
+                Caption { width: 108px; text: fact.label; wrap: word-wrap; accessible-role: none; }
+                Label { horizontal-stretch: 1; text: fact.value; wrap: word-wrap; accessible-role: none; }
+            }
+        }
+    }
+
+    if BlockMotionView.reference-status != "" || BlockMotionView.can-inspect-references: HorizontalLayout {
+        spacing: Tokens.space-2;
+
+        Caption {
+            horizontal-stretch: 1;
+            text: BlockMotionView.reference-status;
+            wrap: word-wrap;
+            accessible-live-region: polite;
+        }
+        if BlockMotionView.can-inspect-references: LinkButton {
+            text: "Read references";
+            description: "Read the selected coded frame's input buffer slots.";
+            clicked => { BlockMotionView.inspect-references(); }
+        }
+    }
+
+    for predictor in BlockMotionView.predictors: Rectangle {
+        background: Tokens.surface;
+
+        VerticalLayout {
+            padding: Tokens.space-2;
+            spacing: Tokens.space-2;
+
+            Label { text: predictor.label; wrap: word-wrap; }
+            Caption { text: predictor.detail; wrap: word-wrap; }
+            if predictor.available: HorizontalLayout {
+                spacing: Tokens.space-2;
+
+                LinkButton {
+                    text: "Preview";
+                    description: "Preview. " + predictor.label;
+                    clicked => { BlockMotionView.preview-reference(predictor.position); }
+                }
+                LinkButton {
+                    text: "Follow";
+                    description: "Follow. " + predictor.label;
+                    clicked => { BlockMotionView.follow-reference(predictor.position); }
+                }
+            }
+        }
+    }
+
+    if BlockMotionView.preview-status != "": Caption {
+        text: BlockMotionView.preview-status;
+        wrap: word-wrap;
+        accessible-live-region: polite;
+    }
+
+    if BlockMotionView.preview-picture.width > 0 && BlockMotionView.preview-picture.height > 0: Image {
+        preferred-width: 240px;
+        min-width: 0px;
+        max-width: 240px;
+        height: 136px;
+        source: BlockMotionView.preview-picture;
+        image-fit: contain;
+        accessible-role: image;
+        accessible-label: "Decoded reference preview";
+    }
+}

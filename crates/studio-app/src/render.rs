@@ -6,6 +6,7 @@
 //! phase, [`render_counters`] for progress ticks.
 
 mod analysis;
+mod block_motion;
 mod block_overlay;
 pub(crate) mod blocks;
 mod evidence;
@@ -29,8 +30,8 @@ use crate::queue::{Ending, Item, ItemState};
 use crate::simple::{self, Priority, Quality};
 use crate::state::{AppState, Mode, RelatedPreview, Severity};
 use crate::ui::{
-    AppWindow, CheckRow, Fact, JobRow, JobView, Notice, Playback, QueueRow, RowState, SourceView,
-    StageState, Tone, ViewMode, WorkspaceView,
+    AppWindow, BlockMotionView, CheckRow, Fact, JobRow, JobView, Notice, Playback, QueueRow,
+    RowState, SourceView, StageState, Tone, ViewMode, WorkspaceView,
 };
 use crate::workspace::Workspace;
 
@@ -564,6 +565,19 @@ pub fn render_preview(window: &AppWindow, state: &AppState, preview: &Preview, d
                 .map(|i| image(preview.thumbnail(i.id())))
                 .collect(),
         ));
+    }
+    if dirty.view {
+        let motion = window.global::<BlockMotionView>();
+        let (picture, message) = match preview.reference_preview() {
+            Some(Ok(picture)) => (Some(picture), ""),
+            Some(Err(message)) => (None, message),
+            None if preview.reference_preview_pending() => {
+                (None, "Decoding the reference preview…")
+            }
+            None => (None, ""),
+        };
+        motion.set_preview_picture(image(picture));
+        motion.set_preview_status(message.into());
     }
 }
 
