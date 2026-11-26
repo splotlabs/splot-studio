@@ -264,8 +264,10 @@ pub fn row_line(row: &Row) -> String {
 /// The type filter's label for one choice.
 #[must_use]
 pub fn kind_label(kind: KindFilter, summary: Option<&DocumentSummary>) -> String {
+    let scanning = summary.is_some_and(|s| matches!(s.outcome, ScanOutcome::Scanning));
     match kind {
         KindFilter::All => "All elements".to_owned(),
+        KindFilter::Unparsed if scanning => "Unparsed regions".to_owned(),
         KindFilter::Unparsed => format!(
             "Unparsed regions ({})",
             count(summary.map_or(0, |s| s.unparsed))
@@ -273,6 +275,7 @@ pub fn kind_label(kind: KindFilter, summary: Option<&DocumentSummary>) -> String
         KindFilter::Obu { obu_type } => {
             let found = summary.and_then(|s| s.obu_types.iter().find(|t| t.obu_type == obu_type));
             match found {
+                Some(t) if scanning => t.type_name.clone(),
                 Some(t) => format!("{} ({})", t.type_name, count(t.count)),
                 None => format!("OBU type {obu_type}"),
             }
@@ -286,6 +289,10 @@ pub fn layer_label(layer: Option<LayerFilter>, summary: Option<&DocumentSummary>
     match layer {
         None => "All layers".to_owned(),
         Some(layer) => {
+            let label = format!("tlayer {} · mlayer {}", layer.temporal, layer.embedded);
+            if summary.is_some_and(|s| matches!(s.outcome, ScanOutcome::Scanning)) {
+                return label;
+            }
             let (n, inferred) = summary
                 .and_then(|s| {
                     s.layers
@@ -300,12 +307,7 @@ pub fn layer_label(layer: Option<LayerFilter>, summary: Option<&DocumentSummary>
                 i if i == n => format!(" {INFERRED}"),
                 i => format!(" {INFERRED} in {}", count(i)),
             };
-            format!(
-                "tlayer {} · mlayer {}{mark} ({})",
-                layer.temporal,
-                layer.embedded,
-                count(n)
-            )
+            format!("{label}{mark} ({})", count(n))
         }
     }
 }
@@ -375,17 +377,19 @@ fn file_properties(
             framing(summary.framing),
             "identified from the contents",
         ),
-        property("Elements", count(summary.elements), ""),
     ];
-    if summary.framing == Framing::Ivf {
-        rows.push(property(
-            "Packets",
-            count(summary.packets),
-            "IVF frame records",
-        ));
+    if !matches!(summary.outcome, ScanOutcome::Scanning) {
+        rows.push(property("Elements", count(summary.elements), ""));
+        if summary.framing == Framing::Ivf {
+            rows.push(property(
+                "Packets",
+                count(summary.packets),
+                "IVF frame records",
+            ));
+        }
+        rows.push(property("OBUs", count(summary.obus), ""));
+        rows.push(property("Unparsed", count(summary.unparsed), "regions"));
     }
-    rows.push(property("OBUs", count(summary.obus), ""));
-    rows.push(property("Unparsed", count(summary.unparsed), "regions"));
     if let Origin::Result(result) = origin {
         rows.push(property(
             "Converted from",
