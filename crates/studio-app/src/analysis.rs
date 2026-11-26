@@ -55,6 +55,7 @@ use studio_domain::protocol::{Command, Event};
 
 mod bytes;
 mod document;
+pub(crate) mod evidence;
 #[cfg(test)]
 mod tests;
 
@@ -62,7 +63,8 @@ pub use document::{
     Bytes, Document, Origin, Phase, Position, ReadEnd, Restore, ResultOf, Saved, Selected, extent,
     parse_offset, same_file,
 };
-use document::{Place, in_window, line_of};
+use document::{in_window, line_of};
+use evidence::{Pick, Request as EvidenceRequest, VIEW_ROWS};
 
 use crate::recovery::{Disk, Kind, RestoredView};
 
@@ -181,12 +183,35 @@ pub enum Input {
     LayerFilter(i32),
     /// Admit every element again.
     ClearFilters,
+    /// Show Properties, Syntax or Findings.
+    EvidenceView(i32),
+    /// Search the open evidence view.
+    EvidenceSearch(String),
+    /// Filter finding rule IDs.
+    EvidenceRule(String),
+    /// Select a finding severity filter.
+    EvidenceSeverity(i32),
+    /// Select a finding layer filter.
+    EvidenceLayer(i32),
+    /// Select a visible evidence row.
+    EvidencePick(i32),
+    /// Move the selection within the current evidence list.
+    EvidenceMove(Step),
+    /// Change the current evidence page.
+    EvidencePage(i32),
+    /// Select the previous or next matching finding.
+    FindingStep(i32),
+    /// Validate the current source.
+    Validate,
+    /// Stop validation of the current source.
+    CancelValidation,
 }
 
 /// What a request was for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Asked {
     Open,
+    Evidence(EvidenceRequest),
     Cancel,
     Close,
     Page { generation: u64, first: u64 },
@@ -199,11 +224,17 @@ enum Asked {
 enum Purpose {
     /// Select what it found. From a byte or an offset the byte window
     /// stays; from the list it moves to the element.
-    Select { from_list: bool },
+    Select {
+        from_list: bool,
+    },
     /// Select the element of a restored view, as from the list. Unlike a
     /// selection of the user's, it keeps a restored view the read could
     /// not apply in full.
     Restore,
+    Evidence {
+        pick: Pick,
+        offset: u64,
+    },
     /// Learn the selection's row under the filter.
     Position,
 }
@@ -449,9 +480,8 @@ impl Analysis {
                     self.restore_from_live(at);
                     let document = self.documents[at].id;
                     self.pending.retain(|_, (d, _)| *d != document);
-                    self.send(document, Asked::Close, &mut out, |document| {
-                        Command::AnalysisClose { document }
-                    });
+                    let validation = self.documents[at].evidence.running;
+                    self.release(document, validation, &mut out);
                     self.read(at, &mut out);
                 } else if matches!(
                     self.documents.get(at).map(Document::phase),
@@ -583,6 +613,17 @@ impl Analysis {
             Input::TypeFilter(index) => self.choose_kind(at, index, out),
             Input::LayerFilter(index) => self.choose_layer(at, index, out),
             Input::ClearFilters => self.refilter(at, RowFilter::default(), out),
+            Input::EvidenceView(_)
+            | Input::EvidenceSearch(_)
+            | Input::EvidenceRule(_)
+            | Input::EvidenceSeverity(_)
+            | Input::EvidenceLayer(_)
+            | Input::EvidencePick(_)
+            | Input::EvidenceMove(_)
+            | Input::EvidencePage(_)
+            | Input::FindingStep(_)
+            | Input::Validate
+            | Input::CancelValidation => self.evidence_input(at, input, out),
             Input::Open(_)
             | Input::OpenResult(_)
             | Input::Show(_)
@@ -592,6 +633,74 @@ impl Analysis {
             | Input::CancelDocument(_)
             | Input::Resolve
             | Input::Relink { .. } => {}
+        }
+    }
+
+    fn evidence_input(&mut self, at: usize, input: Input, out: &mut Vec<Effect>) {
+        match input {
+            Input::EvidenceView(tab) => {
+                let evidence = &mut self.documents[at].evidence;
+                evidence.tab = tab.clamp(0, 2);
+                let doc = &mut self.documents[at];
+                if doc.evidence.selected.is_none()
+                    && let Some(place) = doc.history.get_mut(doc.at)
+                {
+                    place.evidence_tab = doc.evidence.tab;
+                }
+                let evidence = &mut doc.evidence;
+                evidence.first = 0;
+                evidence.reveal_selection();
+                self.ensure_syntax(at, out);
+            }
+            Input::EvidenceSearch(query) => {
+                let evidence = &mut self.documents[at].evidence;
+                if evidence.tab == 2 {
+                    evidence.finding_query = query;
+                } else {
+                    evidence.syntax_query = query;
+                }
+                evidence.first = 0;
+            }
+            Input::EvidenceRule(rule) => {
+                self.documents[at].evidence.rule_query = rule;
+                self.documents[at].evidence.first = 0;
+            }
+            Input::EvidenceSeverity(severity) => {
+                self.documents[at].evidence.severity = severity;
+                self.documents[at].evidence.first = 0;
+            }
+            Input::EvidenceLayer(layer) => {
+                self.documents[at].evidence.layer = layer;
+                self.documents[at].evidence.first = 0;
+            }
+            Input::EvidencePick(slot) => {
+                let evidence = &self.documents[at].evidence;
+                if let Ok(slot) = usize::try_from(slot)
+                    && let Some(&index) =
+                        evidence.matching().get(evidence.first.saturating_add(slot))
+                {
+                    self.pick_evidence(at, index, out);
+                }
+            }
+            Input::EvidenceMove(step) => self.move_evidence(at, step, out),
+            Input::EvidencePage(direction) => {
+                let evidence = &mut self.documents[at].evidence;
+                if direction < 0 {
+                    evidence.first = evidence.first.saturating_sub(VIEW_ROWS);
+                } else if evidence.first + VIEW_ROWS < evidence.matching().len() {
+                    evidence.first += VIEW_ROWS;
+                }
+            }
+            Input::FindingStep(direction) => {
+                self.move_evidence(at, if direction < 0 { Step::Up } else { Step::Down }, out);
+            }
+            Input::Validate => self.start_validation(
+                at,
+                studio_domain::validation::ValidationSettings::default(),
+                out,
+            ),
+            Input::CancelValidation => self.stop_validation(at, out),
+            _ => {}
         }
     }
 
@@ -697,12 +806,27 @@ impl Analysis {
         // it is closed. The close waits behind the open in the engine's
         // queue, so the slot is free before any later open.
         if doc.in_engine() {
-            self.send(doc.id, Asked::Close, out, |document| {
-                Command::AnalysisClose { document }
-            });
+            self.release(doc.id, doc.evidence.running, out);
         }
         self.shown = self.shown.min(self.documents.len().saturating_sub(1));
         self.notice = None;
+    }
+
+    fn release(&mut self, document: u64, validation: Option<u64>, out: &mut Vec<Effect>) {
+        if let Some(validation) = validation {
+            self.send(
+                document,
+                Asked::Evidence(EvidenceRequest::Cancel),
+                out,
+                |document| Command::AnalysisCancelValidation {
+                    document,
+                    validation,
+                },
+            );
+        }
+        self.send(document, Asked::Close, out, |document| {
+            Command::AnalysisClose { document }
+        });
     }
 
     fn send(
@@ -732,16 +856,7 @@ impl Analysis {
         let Some((document, asked)) = self.pending.remove(&request_id) else {
             return out;
         };
-        let answered = match &event {
-            Event::AnalysisOpened { document: d, .. }
-            | Event::AnalysisPage { document: d, .. }
-            | Event::AnalysisLocated { document: d, .. }
-            | Event::AnalysisBytes { document: d, .. }
-            | Event::AnalysisClosed { document: d }
-            | Event::AnalysisFailed { document: d, .. } => Some(*d),
-            _ => None,
-        };
-        if answered.is_some_and(|d| d != document) {
+        if reply_document(&event).is_some_and(|d| d != document) {
             return out;
         }
         let Some(at) = self.index_of(document) else {
@@ -827,6 +942,9 @@ impl Analysis {
             (_, Event::Error { message, .. }) => {
                 self.failed(at, request_id, asked, None, message);
             }
+            (Asked::Evidence(request), event) => {
+                self.evidence_event(at, request_id, request, event, &mut out);
+            }
             // An answer of the wrong kind breaks the protocol.
             (Asked::Cancel | Asked::Close, _) => {}
             _ => self.broken(at, "an answer of the wrong kind", &mut out),
@@ -899,6 +1017,24 @@ impl Analysis {
                     self.position_selection(at, out);
                 }
             }
+            Purpose::Evidence { pick, offset } => {
+                if doc.locating != Some(request_id) {
+                    return;
+                }
+                doc.locating = None;
+                if !doc.evidence.has_finding(pick) {
+                    return;
+                }
+                let position = if current {
+                    Position::of(row)
+                } else {
+                    Position::Unknown
+                };
+                self.select_evidence(at, found, position, pick, Some(offset), out);
+                if !current {
+                    self.position_selection(at, out);
+                }
+            }
             Purpose::Position => {
                 let same = doc
                     .selected
@@ -953,6 +1089,16 @@ impl Analysis {
                     doc.locating = None;
                 }
                 fail_or_notice(doc, code, &message);
+            }
+            Asked::Evidence(request) => {
+                if matches!(
+                    code,
+                    Some(AnalysisFailure::SourceChanged | AnalysisFailure::UnknownDocument)
+                ) {
+                    fail_or_notice(doc, code, &message);
+                } else {
+                    doc.evidence.fail(request_id, request, message);
+                }
             }
             Asked::Cancel | Asked::Close => {}
         }
@@ -1039,6 +1185,8 @@ impl Analysis {
     ) {
         let doc = &mut self.documents[at];
         doc.wanted = None;
+        doc.locating = None;
+        doc.evidence.selected = None;
         if doc
             .selected
             .as_ref()
@@ -1062,24 +1210,14 @@ impl Analysis {
                 doc.bytes.data = None;
             }
         }
-        // Forward history ends at a new selection.
-        doc.history
-            .truncate(doc.at.saturating_add(1).min(doc.history.len()));
-        doc.history.push(Place {
-            row: row.clone(),
-            window: doc.bytes.offset,
-            cursor: doc.bytes.cursor,
-        });
-        if doc.history.len() > HISTORY {
-            doc.history.remove(0);
-        }
-        doc.at = doc.history.len() - 1;
         doc.selected = Some(Selected { row, position });
+        doc.remember_selection();
         if let Position::Row(position) = position {
             self.reveal(at, position);
         }
         self.fill(at, out);
         self.fetch_bytes(at, out);
+        self.ensure_syntax(at, out);
     }
 
     fn travel(&mut self, at: usize, forward: bool, out: &mut Vec<Effect>) {
@@ -1103,12 +1241,19 @@ impl Analysis {
             doc.bytes.data = None;
         }
         doc.bytes.cursor = place.cursor;
-        doc.selected = Some(Selected {
-            row: place.row,
+        doc.selected = place.row.map(|row| Selected {
+            row,
             position: Position::Unknown,
         });
+        doc.evidence.selected = place.evidence.filter(|pick| {
+            !matches!(pick, Pick::Finding { .. }) || doc.evidence.has_finding(*pick)
+        });
+        doc.evidence.tab = place.evidence_tab;
+        doc.bytes.shown = place.bytes_shown;
+        doc.evidence.reveal_selection();
         self.position_selection(at, out);
         self.fetch_bytes(at, out);
+        self.ensure_syntax(at, out);
     }
 
     /// Asks where the selection is under the current filter.
@@ -1134,7 +1279,7 @@ impl Analysis {
                 target,
             },
         );
-        if let Purpose::Select { .. } | Purpose::Restore = purpose {
+        if let Purpose::Select { .. } | Purpose::Restore | Purpose::Evidence { .. } = purpose {
             self.documents[at].locating = Some(id);
         }
     }
@@ -1328,4 +1473,20 @@ fn page_fits(first: u64, total: u64, len: usize) -> bool {
     len <= u64::from(PAGE_ROWS)
         && end.is_some_and(|end| end <= total)
         && (len > 0 || first >= total)
+}
+
+fn reply_document(event: &Event) -> Option<u64> {
+    match event {
+        Event::AnalysisOpened { document: d, .. }
+        | Event::AnalysisPage { document: d, .. }
+        | Event::AnalysisLocated { document: d, .. }
+        | Event::AnalysisBytes { document: d, .. }
+        | Event::AnalysisSyntaxReady { document: d, .. }
+        | Event::AnalysisSyntaxPage { document: d, .. }
+        | Event::AnalysisValidated { document: d, .. }
+        | Event::AnalysisFindings { document: d, .. }
+        | Event::AnalysisClosed { document: d }
+        | Event::AnalysisFailed { document: d, .. } => Some(*d),
+        _ => None,
+    }
 }

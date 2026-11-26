@@ -29,12 +29,11 @@ Splot Studio is a Rust/Slint desktop AV2 workbench for Windows, macOS, and Linux
 No browser target.
 
 Approved direction (owner, November 2026; roadmap #33): one application with
-three task workspaces, Encode, Analyze and Compare, and shared Jobs. This is a
-roadmap, not shipped capability. Today Encode, a read-only Analyze (envelope
-and header facts and bytes) and shared Jobs exist. Do not show Compare as
-available, or describe it or deeper Analyze features as working, until their
-flows land.
-Analyze starts read-only: no bitstream rewriting, repair or source mutation.
+three task workspaces, Encode, Analyze and Compare, and shared Jobs. Encode
+and shared Jobs are available. Read-only Analyze shows envelope and header
+facts, bytes, observed syntax and validation findings. Show Compare and deeper
+Analyze features only when their workflows are available.
+Keep Analyze read-only. Preserve the source bitstream.
 Splot owns AV2 parsing, validation, and codec instrumentation.
 
 Encode writes IVF and AV2 Annex B `.obu`.

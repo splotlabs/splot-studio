@@ -6,6 +6,7 @@
 //! phase, [`render_counters`] for progress ticks.
 
 mod analysis;
+mod evidence;
 
 use std::time::Instant;
 

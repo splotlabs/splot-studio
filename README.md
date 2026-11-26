@@ -42,8 +42,12 @@ codec is young.
 - The Analyze workspace (File > Open to Analyze, or Open in Analyze on a converted file)
   reads AV2 IVF and Annex B files without changing them: a navigator of IVF records, OBUs and
   regions that did not parse, the selected element's envelope and header properties with
-  their exact offsets, and its bytes. Filters by OBU type and layer, Back and Forward, go to
-  offset and copy. A cancelled read keeps what it read. The open documents, their selection
+  their exact offsets, and its bytes. The Syntax view shows fields and bit spans that
+  Splot can observe. In Findings, Validate runs the native checks on the current stream.
+  Select a finding to inspect its location and field evidence where available. The report
+  shows the scope of the checks and indicates partial coverage or a truncated report. Use the type and
+  layer filters, Back and Forward, go to offset, and copy to navigate. A cancelled read
+  keeps what it read. The open documents, their selection
   and filters, and the workspace are restored at the next start, after each file is checked
   again: a file that changed or is missing is said so, and nothing about it is shown until
   you read it again or locate it.
@@ -60,9 +64,8 @@ rotation or cropping, RGB or alpha, encrypted streams, network and playlist inpu
 
 - Compare, and more of Analyze. The approved direction is one AV2 workbench with three
   workspaces (Encode, Analyze and Compare) and shared Jobs; see the
-  [roadmap](https://github.com/splotlabs/splot-studio/issues/33). Analyze shows envelope and
-  header facts only: no syntax trees, validation findings or playback yet. Compare is not
-  built. A stream read reports no progress until it ends.
+  [roadmap](https://github.com/splotlabs/splot-studio/issues/33). Playback in Analyze and
+  the Compare workspace are planned. A stream read reports no progress until it ends.
 - Audio, subtitles and chapters are not carried over; the app lists what a file would lose
   and asks before converting. Container output with audio is planned in
   [#12](https://github.com/splotlabs/splot-studio/issues/12).
@@ -79,8 +82,8 @@ stands between the test builds and a real release is tracked in
 - `studio-app` (`splot-studio`): the Slint desktop app.
 - `studio-engine` (`splot-studio-engine`): the headless engine. `worker` runs one job per
   process over a versioned, length-prefixed control protocol, `preview` serves pictures,
-  `inspect` reads IVF and Annex B files read-only for their OBU envelope and header facts, and
-  `encode` runs the same job from the command line.
+  `inspect` serves stream structure, syntax observations and validation findings from
+  read-only IVF and Annex B files, and `encode` runs the same job from the command line.
 - `studio-domain`: shared settings, job and protocol values (no GUI, codec or native types).
 
 The engine accepts typed overrides with repeated `--option KEY JSON` arguments.

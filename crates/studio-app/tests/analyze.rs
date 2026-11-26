@@ -619,8 +619,181 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
 
     offsets_are_never_cut(&rig);
     line_offsets_are_never_cut(&rig);
+    linked_validation_evidence(&mut rig, &scratch, &clipboard);
+    a_large_findings_view_pages_retained_rows(&mut rig, &scratch);
+    a_byte_only_finding_keeps_both_offsets(&mut rig, &scratch);
 
     eprintln!("Tab stops: navigator after {tabs}, byte view {byte_tabs} later");
+}
+
+/// A malformed trailing bit has a native rule, a known bit position and
+/// an independently identifiable syntax row.
+fn linked_validation_evidence(rig: &mut Rig, scratch: &Scratch, clipboard: &RefCell<String>) {
+    let path = scratch.0.join("bad trailing bit.obu");
+    fs::write(&path, [0x01, 0x08, 0x02, 0x08, 0x00]).unwrap_or_else(|e| unreachable!("{e}"));
+    rig.session.analysis_input(Input::Open(vec![path]));
+    rig.idle("the trailing bit fixture");
+    rig.global().invoke_row_clicked(0);
+    rig.idle("the first delimiter");
+    assert_eq!(rig.selected(), Some((0, Position::Row(0))));
+
+    rig.global().invoke_evidence_view(1);
+    rig.idle("the first delimiter syntax");
+    assert!(
+        rig.global()
+            .get_syntax_status()
+            .contains("parsed the modeled syntax")
+    );
+    rig.global().invoke_evidence_search("obu_type".into());
+    rig.idle("the OBU type field");
+    let rows = rig.global().get_evidence_rows();
+    assert_eq!(rows.row_count(), 1);
+    assert!(
+        rows.row_data(0)
+            .is_some_and(|row| row.label == "obu_type" && row.detail == "2 · f(5)")
+    );
+    rig.global().invoke_evidence_pick(0);
+    rig.idle("the selected OBU type field");
+    rig.global().invoke_evidence_search("".into());
+    rig.idle("clear the syntax search");
+
+    rig.global().invoke_validate_stream();
+    rig.idle("validation findings");
+    let status = rig.global().get_findings_status();
+    assert!(status.contains("completed with errors"), "{status}");
+    rig.global()
+        .invoke_evidence_rule("trailing-bits/missing-one-bit".into());
+    rig.idle("the rule filter");
+    assert_eq!(rig.global().get_evidence_rows().row_count(), 1);
+
+    rig.tab_to(Key::Home, |input| matches!(input, Input::EvidenceMove(_)));
+    // Earlier probe keys can also reach the navigator and byte view.
+    rig.inputs
+        .borrow_mut()
+        .retain(|input| matches!(input, Input::EvidenceMove(_)));
+    rig.idle("the exact finding location");
+    assert_eq!(rig.selected(), Some((1, Position::Row(1))));
+    assert!(
+        rig.global()
+            .get_evidence_note()
+            .contains("File byte 4, bit 0")
+    );
+    assert!(
+        rig.global()
+            .get_evidence_note()
+            .contains("trailing_one_bit")
+    );
+    let lines = rig.global().get_byte_lines();
+    let highlighted = lines.row_data(0).and_then(|line| line.cells.row_data(4));
+    assert!(highlighted.is_some_and(|cell| cell.evidence && cell.cursor));
+    rig.chord(Key::Control, "c");
+    assert!(clipboard.borrow().contains("trailing-bits/missing-one-bit"));
+
+    // The same logical viewport must render at two physical pixels per
+    // logical pixel, with the evidence pane and byte view both present.
+    let window = rig.window.window();
+    window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: 2.0 });
+    window.set_size(PhysicalSize::new(SIZE.0 * 2, SIZE.1 * 2));
+    let mut pixels = vec![Rgb8Pixel::default(); (SIZE.0 * SIZE.1 * 4) as usize];
+    window.request_redraw();
+    assert!(rig.platform.draw_if_needed(|renderer| {
+        renderer.render(&mut pixels, (SIZE.0 * 2) as usize);
+    }));
+    assert!(pixels.windows(2).any(|pair| pair[0] != pair[1]));
+    assert_eq!(window.size(), PhysicalSize::new(SIZE.0 * 2, SIZE.1 * 2));
+    window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: 1.0 });
+    window.set_size(PhysicalSize::new(SIZE.0, SIZE.1));
+
+    rig.global().invoke_evidence_view(1);
+    rig.idle("the linked syntax field");
+    assert!(
+        rig.global()
+            .get_evidence_rows()
+            .iter()
+            .any(|row| { row.selected && row.label == "trailing_one_bit" })
+    );
+
+    rig.global().invoke_back();
+    rig.idle("the selection before the finding jump");
+    assert_eq!(rig.selected(), Some((0, Position::Row(0))));
+    assert_eq!(rig.global().get_evidence_tab(), 1);
+    assert!(
+        rig.global()
+            .get_evidence_rows()
+            .iter()
+            .any(|row| { row.selected && row.label == "obu_type" })
+    );
+    rig.global().invoke_forward();
+    rig.idle("the restored finding");
+    assert_eq!(rig.selected(), Some((1, Position::Row(1))));
+    assert_eq!(rig.global().get_evidence_tab(), 2);
+
+    rig.global()
+        .invoke_evidence_search("no matching diagnostics".into());
+    rig.idle("the empty filtered view");
+    assert_eq!(rig.global().get_evidence_rows().row_count(), 0);
+    assert_eq!(rig.global().get_findings_status(), status);
+    assert!(rig.global().get_evidence_note().contains("filters hide"));
+}
+
+/// The worker sends multiple finding pages. The displayed page still has
+/// only eight rows and selection keeps the native position.
+fn a_large_findings_view_pages_retained_rows(rig: &mut Rig, scratch: &Scratch) {
+    let path = scratch.0.join("many bad trailing bits.obu");
+    fs::write(&path, [0x02, 0x08, 0x00].repeat(160)).unwrap_or_else(|e| unreachable!("{e}"));
+    rig.session.analysis_input(Input::Close);
+    rig.session.analysis_input(Input::Open(vec![path]));
+    rig.idle("the large findings fixture");
+    rig.global().invoke_validate_stream();
+    rig.idle("the complete retained findings");
+    rig.global()
+        .invoke_evidence_rule("trailing-bits/missing-one-bit".into());
+    rig.idle("the filtered findings");
+    assert_eq!(rig.global().get_evidence_page_label(), "1–8 of 160");
+    assert_eq!(rig.global().get_evidence_rows().row_count(), 8);
+    rig.global().invoke_evidence_page(1);
+    rig.idle("the second findings page");
+    assert_eq!(rig.global().get_evidence_page_label(), "9–16 of 160");
+    rig.global().invoke_evidence_pick(0);
+    rig.idle("the ninth finding");
+    assert_eq!(rig.selected(), Some((8, Position::Row(8))));
+    assert!(
+        rig.global()
+            .get_evidence_note()
+            .contains("File byte 26, bit 0")
+    );
+}
+
+/// The validator identifies a header byte and layer for this rule. It
+/// supplies no exact field position.
+fn a_byte_only_finding_keeps_both_offsets(rig: &mut Rig, scratch: &Scratch) {
+    let path = scratch.0.join("delimiter layer 5.obu");
+    fs::write(&path, [0x02, 0x88, 0x05]).unwrap_or_else(|e| unreachable!("{e}"));
+    rig.session.analysis_input(Input::Close);
+    rig.session.analysis_input(Input::Open(vec![path]));
+    rig.idle("the invalid layer fixture");
+    rig.global().invoke_validate_stream();
+    rig.idle("validation of the invalid layer fixture");
+    rig.global()
+        .invoke_evidence_rule("obu-header/global-xlayer-required".into());
+    rig.global().invoke_evidence_layer(6);
+    rig.idle("the verified layer filter");
+    assert_eq!(rig.global().get_evidence_rows().row_count(), 1);
+    rig.global().invoke_evidence_pick(0);
+    rig.idle("the byte-only location");
+    assert_eq!(rig.selected(), Some((0, Position::Row(0))));
+    let location = rig.global().get_evidence_note();
+    assert!(
+        location.contains("File byte 1") && location.contains("Stream byte 1"),
+        "{location}"
+    );
+    assert!(
+        location.contains("Field-level evidence is unavailable"),
+        "{location}"
+    );
+    let bytes = rig.global().get_byte_lines();
+    let byte = bytes.row_data(0).and_then(|line| line.cells.row_data(1));
+    assert!(byte.is_some_and(|cell| cell.cursor && !cell.evidence));
 }
 
 /// An offset of 16 hex digits, the most a `u64` has, is drawn whole in the

@@ -340,6 +340,8 @@ pub fn bind_analysis(window: &AppWindow, send: impl Fn(analysis::Input) + Clone 
     global.on_back(on(Input::Back));
     global.on_forward(on(Input::Forward));
     global.on_clear_filters(on(Input::ClearFilters));
+    global.on_validate_stream(on(Input::Validate));
+    global.on_cancel_validation(on(Input::CancelValidation));
     let on = |input: fn(i32) -> Input| {
         let send = send.clone();
         move |value| send(input(value))
@@ -350,6 +352,28 @@ pub fn bind_analysis(window: &AppWindow, send: impl Fn(analysis::Input) + Clone 
     global.on_byte_clicked(on(Input::ByteClicked));
     global.on_type_filter(on(Input::TypeFilter));
     global.on_layer_filter(on(Input::LayerFilter));
+    global.on_evidence_view(on(Input::EvidenceView));
+    global.on_evidence_severity(on(Input::EvidenceSeverity));
+    global.on_evidence_layer(on(Input::EvidenceLayer));
+    global.on_evidence_pick(on(Input::EvidencePick));
+    global.on_evidence_page(on(Input::EvidencePage));
+    global.on_finding_step(on(Input::FindingStep));
+    global.on_evidence_move({
+        let send = send.clone();
+        move |s| {
+            if let Some(s) = step(s) {
+                send(Input::EvidenceMove(s));
+            }
+        }
+    });
+    global.on_evidence_search({
+        let send = send.clone();
+        move |text| send(Input::EvidenceSearch(text.to_string()))
+    });
+    global.on_evidence_rule({
+        let send = send.clone();
+        move |text| send(Input::EvidenceRule(text.to_string()))
+    });
     global.on_move({
         let send = send.clone();
         move |s| {

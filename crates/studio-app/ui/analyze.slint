@@ -11,7 +11,7 @@
 import { Button, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 import { Tokens } from "tokens.slint";
 import { FocusRing, KeyboardFocus } from "focus.slint";
-import { Caption, LinkButton } from "controls.slint";
+import { Caption, LinkButton, WorkspaceSwitch } from "controls.slint";
 import { IconButton } from "stage.slint";
 
 // What the shown document is doing; `empty` when none is open.
@@ -65,6 +65,7 @@ export struct ByteCell {
     text: string,
     region: ByteRegion,
     cursor: bool,
+    evidence: bool,
 }
 
 // One line of the byte window.
@@ -78,6 +79,15 @@ export struct ByteLine {
 export struct Legend {
     label: string,
     region: ByteRegion,
+}
+
+// A syntax observation or validation finding on the current page.
+export struct EvidenceRow {
+    depth: int,
+    label: string,
+    detail: string,
+    selected: bool,
+    accessible: string,
 }
 
 export global Analysis {
@@ -126,6 +136,37 @@ export global Analysis {
     in property <[Legend]> legend;
     // The byte under the cursor, in words.
     in property <string> cursor-line;
+
+    in property <int> evidence-tab;
+    in property <string> syntax-status;
+    in property <string> findings-status;
+    in property <[EvidenceRow]> evidence-rows;
+    in property <string> evidence-detail;
+    in property <string> evidence-note;
+    in property <string> evidence-copy;
+    in property <string> evidence-page-label;
+    in-out property <string> evidence-query;
+    in-out property <string> evidence-rule-query;
+    in-out property <int> severity-index;
+    in property <[string]> finding-layers;
+    in-out property <int> finding-layer-index;
+    in property <bool> evidence-can-prev;
+    in property <bool> evidence-can-next;
+    in property <bool> finding-can-prev;
+    in property <bool> finding-can-next;
+    in property <bool> validation-running;
+
+    callback evidence-view(int);
+    callback evidence-search(string);
+    callback evidence-rule(string);
+    callback evidence-severity(int);
+    callback evidence-layer(int);
+    callback evidence-pick(int);
+    callback evidence-move(NavStep);
+    callback evidence-page(int);
+    callback finding-step(int);
+    callback validate-stream();
+    callback cancel-validation();
 
     callback open();
     callback close();
@@ -410,6 +451,260 @@ component Inspector inherits KeyboardFocus {
     }
 }
 
+// One page of the active evidence list. Rust owns its selection and paging.
+component EvidenceList inherits KeyboardFocus {
+    callback copy(string);
+
+    height: max(24px, Analysis.evidence-rows.length * 24px);
+    accessible-role: list;
+    accessible-label: Analysis.evidence-tab == 1 ? "Syntax observations" : "Validation findings";
+    accessible-description: Analysis.evidence-page-label + ". Use the arrow keys to choose a row.";
+    key-pressed(event) => {
+        if event.modifiers.control && (event.text == "c" || event.text == "C") && Analysis.evidence-copy != "" {
+            root.copy(Analysis.evidence-copy);
+            return accept;
+        }
+        let step = Steps.of(event.text);
+        if step == NavStep.none {
+            return reject;
+        }
+        root.keyboard-used();
+        Analysis.evidence-move(step);
+        accept
+    }
+
+    FocusRing {
+        shown: root.ring;
+        x: -3px;
+        y: -3px;
+        width: root.width + 6px;
+        height: root.height + 6px;
+        radius: Tokens.radius-small;
+    }
+
+    for row[i] in Analysis.evidence-rows: Rectangle {
+        x: 0;
+        y: i * 24px;
+        height: 24px;
+        width: root.width;
+        background: row.selected ? Tokens.row-selected : hit.has-hover ? Tokens.row-hover : transparent;
+        accessible-role: list-item;
+        accessible-label: row.accessible;
+        accessible-item-selectable: true;
+        accessible-item-selected: row.selected;
+        accessible-item-index: i;
+        accessible-item-count: Analysis.evidence-rows.length;
+        accessible-action-default => {
+            Analysis.evidence-pick(i);
+        }
+
+        if row.selected: Rectangle {
+            x: 0;
+            width: 3px;
+            height: parent.height;
+            background: Tokens.accent;
+        }
+
+        HorizontalLayout {
+            padding-left: Tokens.space-2 + min(8, row.depth) * Tokens.space-2;
+            padding-right: Tokens.space-2;
+            spacing: Tokens.space-2;
+
+            Text {
+                horizontal-stretch: 1;
+                text: row.label;
+                color: Tokens.text;
+                font-size: Tokens.type-caption * 1rem;
+                font-weight: row.selected ? Tokens.weight-semibold : Tokens.weight-regular;
+                vertical-alignment: center;
+                overflow: elide;
+                accessible-role: none;
+            }
+
+            if row.detail != "": Text {
+                max-width: 128px;
+                text: row.detail;
+                color: Tokens.text-secondary;
+                font-size: Tokens.type-caption * 1rem;
+                vertical-alignment: center;
+                overflow: elide;
+                accessible-role: none;
+            }
+        }
+
+        hit := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.focus();
+                Analysis.evidence-pick(i);
+            }
+        }
+    }
+}
+
+component EvidencePane inherits VerticalLayout {
+    callback copy(string);
+    property <bool> findings: Analysis.evidence-tab == 2;
+    spacing: Tokens.space-1;
+
+    HorizontalLayout {
+        spacing: Tokens.space-2;
+
+        LineEdit {
+            horizontal-stretch: 1;
+            text <=> Analysis.evidence-query;
+            placeholder-text: root.findings ? "Search findings" : "Search syntax fields";
+            accessible-label: self.placeholder-text;
+            accessible-description: root.findings ? "Search rule IDs and messages." : "Search canonical syntax names.";
+            edited(value) => {
+                Analysis.evidence-search(value);
+            }
+        }
+
+        if root.findings: LinkButton {
+            text: Analysis.validation-running ? "Cancel" : "Validate";
+            description: Analysis.validation-running ? "Stop stream validation." : "Run validation on this stream.";
+            clicked => {
+                if Analysis.validation-running {
+                    Analysis.cancel-validation();
+                } else {
+                    Analysis.validate-stream();
+                }
+            }
+        }
+    }
+
+    if root.findings: HorizontalLayout {
+        spacing: Tokens.space-2;
+
+        ComboBox {
+            width: 108px;
+            model: ["All levels", "Errors", "Warnings", "Info"];
+            current-index <=> Analysis.severity-index;
+            accessible-label: "Severity filter";
+            selected => {
+                Analysis.evidence-severity(self.current-index);
+            }
+        }
+
+        ComboBox {
+            width: 100px;
+            model: Analysis.finding-layers;
+            current-index <=> Analysis.finding-layer-index;
+            accessible-label: "Finding layer filter";
+            selected => {
+                Analysis.evidence-layer(self.current-index);
+            }
+        }
+
+        LineEdit {
+            horizontal-stretch: 1;
+            text <=> Analysis.evidence-rule-query;
+            placeholder-text: "Filter by rule ID";
+            accessible-label: self.placeholder-text;
+            edited(value) => {
+                Analysis.evidence-rule(value);
+            }
+        }
+    }
+
+    Text {
+        text: root.findings ? Analysis.findings-status : Analysis.syntax-status;
+        color: Tokens.text-secondary;
+        font-size: Tokens.type-caption * 1rem;
+        wrap: word-wrap;
+        accessible-live-region: polite;
+    }
+
+    if Analysis.evidence-rows.length > 0: EvidenceList {
+        copy(text) => {
+            root.copy(text);
+        }
+    }
+
+    if Analysis.evidence-page-label != "" || Analysis.evidence-can-prev || Analysis.evidence-can-next: HorizontalLayout {
+        spacing: Tokens.space-2;
+
+        LinkButton {
+            text: "Previous Page";
+            quiet: true;
+            enabled: Analysis.evidence-can-prev;
+            clicked => {
+                Analysis.evidence-page(-1);
+            }
+        }
+
+        Caption {
+            text: Analysis.evidence-page-label;
+            horizontal-stretch: 1;
+            vertical-alignment: center;
+        }
+
+        LinkButton {
+            text: "Next Page";
+            quiet: true;
+            enabled: Analysis.evidence-can-next;
+            clicked => {
+                Analysis.evidence-page(1);
+            }
+        }
+    }
+
+    if root.findings || Analysis.evidence-copy != "": HorizontalLayout {
+        spacing: Tokens.space-2;
+
+        if root.findings: LinkButton {
+            text: "Previous Finding";
+            quiet: true;
+            enabled: Analysis.finding-can-prev;
+            clicked => {
+                Analysis.finding-step(-1);
+            }
+        }
+
+        if root.findings: LinkButton {
+            text: "Next Finding";
+            quiet: true;
+            enabled: Analysis.finding-can-next;
+            clicked => {
+                Analysis.finding-step(1);
+            }
+        }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        if Analysis.evidence-copy != "": LinkButton {
+            text: "Copy Evidence";
+            quiet: true;
+            description: "Copy the selected syntax observation or finding.";
+            clicked => {
+                root.copy(Analysis.evidence-copy);
+            }
+        }
+    }
+
+    if Analysis.evidence-detail != "" || Analysis.evidence-note != "": ScrollView {
+        min-height: 64px;
+        preferred-height: 80px;
+        max-height: 104px;
+        VerticalLayout {
+            alignment: start;
+            spacing: Tokens.space-1;
+            Text {
+                text: Analysis.evidence-detail;
+                color: Tokens.text;
+                font-size: Tokens.type-caption * 1rem;
+                wrap: word-wrap;
+            }
+
+            if Analysis.evidence-note != "": Caption {
+                text: Analysis.evidence-note;
+                accessible-live-region: polite;
+            }
+        }
+    }
+}
+
 // The byte window, one Tab stop. The arrows move the cursor, Page Up and
 // Page Down a window, Home and End to the file's ends; Enter or Space
 // selects the element at the cursor, as a click on a byte does.
@@ -469,10 +764,17 @@ component ByteView inherits KeyboardFocus {
             HorizontalLayout {
                 for cell[c] in line.cells: Rectangle {
                     width: root.cell-width;
-                    background: Analysis.tint(cell.region);
+                    background: cell.evidence ? Tokens.row-selected : Analysis.tint(cell.region);
                     border-width: cell.cursor ? (root.has-focus ? 2px : 1px) : 0px;
                     border-color: root.has-focus ? Tokens.focus-ring : Tokens.text-secondary;
                     border-radius: 2px;
+
+                    if cell.evidence: Rectangle {
+                        y: parent.height - 2px;
+                        width: parent.width;
+                        height: 2px;
+                        background: Tokens.accent;
+                    }
 
                     Text {
                         text: cell.text;
@@ -793,6 +1095,7 @@ export component AnalyzeView inherits VerticalLayout {
 
             VerticalLayout {
                 width: root.navigator-width;
+                alignment: start;
                 spacing: Tokens.space-1;
 
                 // The list's description says this already. `accessible-role:
@@ -820,56 +1123,75 @@ export component AnalyzeView inherits VerticalLayout {
                 width: root.detail-width;
                 spacing: Tokens.space-1;
 
-                HorizontalLayout {
-                    spacing: Tokens.space-2;
-
-                    Text {
-                        horizontal-stretch: 1;
-                        text: Analysis.inspector-title;
-                        color: Tokens.text;
-                        font-size: Tokens.type-body * 1rem;
-                        font-weight: Tokens.weight-semibold;
-                        vertical-alignment: center;
-                        overflow: elide;
+                WorkspaceSwitch {
+                    options: ["Properties", "Syntax", "Findings"];
+                    accessible-label: "Inspector views";
+                    selected: Analysis.evidence-tab;
+                    chosen(index) => {
+                        Analysis.evidence-view(index);
                     }
+                }
 
-                    LinkButton {
-                        min-height: 20px;
-                        text: "Copy Value";
-                        quiet: true;
-                        description: "Copy the chosen property's value";
-                        enabled: Analysis.properties.length > 0;
-                        clicked => {
-                            root.copy(Analysis.properties[min(inspector.current, Analysis.properties.length - 1)].value);
+                if Analysis.evidence-tab == 0: VerticalLayout {
+                    spacing: Tokens.space-1;
+
+                    HorizontalLayout {
+                        spacing: Tokens.space-2;
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: Analysis.inspector-title;
+                            color: Tokens.text;
+                            font-size: Tokens.type-body * 1rem;
+                            font-weight: Tokens.weight-semibold;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        LinkButton {
+                            min-height: 20px;
+                            text: "Copy Value";
+                            quiet: true;
+                            description: "Copy the chosen property's value";
+                            enabled: Analysis.properties.length > 0;
+                            clicked => {
+                                root.copy(Analysis.properties[min(inspector.current, Analysis.properties.length - 1)].value);
+                            }
+                        }
+
+                        LinkButton {
+                            min-height: 20px;
+                            text: "Copy Row";
+                            quiet: true;
+                            description: "Copy the selected element's row";
+                            enabled: Analysis.selected-line != "";
+                            clicked => {
+                                root.copy(Analysis.selected-line);
+                            }
+                        }
+
+                        LinkButton {
+                            min-height: 20px;
+                            text: "Copy Offset";
+                            quiet: true;
+                            description: "Copy the selected element's first byte offset";
+                            enabled: Analysis.selected-offset != "";
+                            clicked => {
+                                root.copy(Analysis.selected-offset);
+                            }
                         }
                     }
 
-                    LinkButton {
-                        min-height: 20px;
-                        text: "Copy Row";
-                        quiet: true;
-                        description: "Copy the selected element's row";
-                        enabled: Analysis.selected-line != "";
-                        clicked => {
-                            root.copy(Analysis.selected-line);
-                        }
-                    }
-
-                    LinkButton {
-                        min-height: 20px;
-                        text: "Copy Offset";
-                        quiet: true;
-                        description: "Copy the selected element's first byte offset";
-                        enabled: Analysis.selected-offset != "";
-                        clicked => {
-                            root.copy(Analysis.selected-offset);
+                    inspector := Inspector {
+                        vertical-stretch: 1;
+                        min-height: 96px;
+                        copy(text) => {
+                            root.copy(text);
                         }
                     }
                 }
 
-                inspector := Inspector {
-                    vertical-stretch: 1;
-                    min-height: 96px;
+                if Analysis.evidence-tab != 0: EvidencePane {
                     copy(text) => {
                         root.copy(text);
                     }

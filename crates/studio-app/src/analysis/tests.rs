@@ -201,6 +201,7 @@ impl Engine {
                 }
             }
             Command::AnalysisClose { document } => Event::AnalysisClosed { document },
+            Command::AnalysisCancelValidation { .. } => Event::CancelRequested,
             _ => return None,
         })
     }
@@ -1076,3 +1077,246 @@ fn a_key_press_restarts_paging_that_failed() {
 }
 
 mod lifecycle;
+
+#[test]
+fn closing_cancels_validation_and_old_syntax_cannot_reach_a_new_generation() {
+    use studio_domain::syntax::{SYNTAX_SCHEMA, SyntaxStatus, SyntaxSummary};
+
+    let (mut analysis, engine) = opened(4);
+    let old = doc(&analysis).id();
+    let effects = analysis.input(Input::RowClicked(0));
+    engine.settle(&mut analysis, effects);
+    let effects = analysis.input(Input::EvidenceView(1));
+    let syntax = effects.first().map_or(0, |effect| effect.request_id);
+    assert_ne!(syntax, 0);
+    let effects = analysis.input(Input::Validate);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect.command, Command::AnalysisValidate { .. }))
+    );
+    let effects = analysis.input(Input::Close);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect.command, Command::AnalysisCancelValidation { .. }))
+    );
+    engine.settle(&mut analysis, effects);
+    let effects = analysis.input(Input::Open(vec![PathBuf::from("/media/clip.obu")]));
+    engine.settle(&mut analysis, effects);
+    assert_ne!(old, doc(&analysis).id());
+
+    let effects = analysis.event(
+        syntax,
+        Event::AnalysisSyntaxReady {
+            document: old,
+            element: 0,
+            summary: Box::new(SyntaxSummary {
+                schema_version: SYNTAX_SCHEMA,
+                spec_revision: "AV2 v1.0.0".to_owned(),
+                status: SyntaxStatus::Parsed,
+                error: None,
+                retained_events: 0,
+                observed_elements: 0,
+                elements_truncated: false,
+                depth_truncated: false,
+            }),
+            total: 0,
+        },
+    );
+    assert_eq!(effects.len(), 0);
+    assert!(doc(&analysis).evidence.syntax.is_none());
+    assert!(doc(&analysis).evidence.validation.is_none());
+}
+
+#[test]
+fn incompatible_syntax_schema_preserves_byte_inspection() {
+    use studio_domain::syntax::{SYNTAX_SCHEMA, SyntaxStatus, SyntaxSummary};
+
+    let (mut analysis, engine) = opened(4);
+    let effects = analysis.input(Input::RowClicked(0));
+    engine.settle(&mut analysis, effects);
+    let effects = analysis.input(Input::EvidenceView(1));
+    let syntax = effects.first().map_or(0, |effect| effect.request_id);
+    assert_ne!(syntax, 0);
+    let document = doc(&analysis).id();
+    let next = analysis.event(
+        syntax,
+        Event::AnalysisSyntaxReady {
+            document,
+            element: 0,
+            summary: Box::new(SyntaxSummary {
+                schema_version: SYNTAX_SCHEMA + 1,
+                spec_revision: "AV2 v1.0.0".to_owned(),
+                status: SyntaxStatus::Parsed,
+                error: None,
+                retained_events: 2,
+                observed_elements: 2,
+                elements_truncated: false,
+                depth_truncated: false,
+            }),
+            total: 2,
+        },
+    );
+    assert_eq!(next.len(), 0);
+    assert!(doc(&analysis).summary().is_some());
+    assert!(doc(&analysis).bytes().data.is_some());
+    assert!(doc(&analysis).evidence.syntax.is_none());
+    assert!(doc(&analysis).evidence.syntax_error.is_some());
+}
+
+fn load_fixture_findings(analysis: &mut Analysis) {
+    use studio_domain::validation::{
+        Finding, Severity, VALIDATION_SCHEMA, ValidationCompletion, ValidationSummary,
+    };
+
+    let validate = analysis.input(Input::Validate);
+    let report = validate[0].request_id;
+    let page = analysis.event(
+        report,
+        Event::AnalysisValidated {
+            document: 1,
+            summary: Box::new(ValidationSummary {
+                schema: VALIDATION_SCHEMA,
+                spec_revision: "AV2 v1.0.0".into(),
+                codec_revision: "fixture".into(),
+                engine_version: "fixture".into(),
+                strict: false,
+                context: None,
+                scope: "Fixture".into(),
+                completion: ValidationCompletion::EndOfInput,
+                checked_obus: 4,
+                last_checked_obu_end: Some(36),
+                malformed_units: 0,
+                finalized: true,
+                errors: 2,
+                warnings: 0,
+                info: 0,
+                finding_limit: 2,
+                omitted: 0,
+            }),
+            total: 2,
+        },
+    );
+    let findings = [None, Some(10)]
+        .into_iter()
+        .map(|file_offset| Finding {
+            rule_id: "fixture/rule".into(),
+            severity: Severity::Error,
+            message: "Fixture finding".into(),
+            spec_section: None,
+            file_offset,
+            stream_offset: file_offset,
+            bit_offset: None,
+            extended_layer_id: None,
+        })
+        .collect();
+    analysis.event(
+        page[0].request_id,
+        Event::AnalysisFindings {
+            document: 1,
+            validation: report,
+            first: 0,
+            total: 2,
+            findings,
+        },
+    );
+}
+
+#[test]
+fn unlocated_findings_keep_history_and_next_waits_for_the_locate() {
+    let (mut analysis, engine) = opened(4);
+    load_fixture_findings(&mut analysis);
+
+    analysis.input(Input::EvidencePick(0));
+    assert_eq!(doc(&analysis).evidence.selected_index(), Some(0));
+    assert!(selected(&analysis).is_none());
+
+    let next = analysis.input(Input::FindingStep(1));
+    assert_eq!(next.len(), 1);
+    assert_eq!(analysis.input(Input::FindingStep(1)).len(), 0);
+    engine.settle(&mut analysis, next);
+    assert_eq!(doc(&analysis).evidence.selected_index(), Some(1));
+    assert_eq!(selected(&analysis), Some((1, Position::Row(1))));
+
+    analysis.input(Input::FindingStep(-1));
+    assert_eq!(doc(&analysis).evidence.selected_index(), Some(0));
+    assert_eq!(selected(&analysis), Some((1, Position::Row(1))));
+    for expected in [Some(1), Some(0)] {
+        let back = analysis.input(Input::Back);
+        engine.settle(&mut analysis, back);
+        assert_eq!(doc(&analysis).evidence.selected_index(), expected);
+    }
+    assert!(selected(&analysis).is_none());
+    for expected in [Some(1), Some(0)] {
+        let forward = analysis.input(Input::Forward);
+        engine.settle(&mut analysis, forward);
+        assert_eq!(doc(&analysis).evidence.selected_index(), expected);
+        assert_eq!(selected(&analysis), Some((1, Position::Row(1))));
+    }
+}
+
+#[test]
+fn a_locate_for_a_replaced_report_releases_the_navigation_slot() {
+    let (mut analysis, engine) = opened(4);
+    load_fixture_findings(&mut analysis);
+    let old = analysis.input(Input::EvidencePick(1));
+    assert!(doc(&analysis).selection_pending());
+    assert_eq!(old.len(), 1);
+
+    analysis.input(Input::Validate);
+    engine.settle(&mut analysis, old);
+    assert!(!doc(&analysis).selection_pending());
+    assert!(selected(&analysis).is_none());
+}
+
+#[test]
+fn a_restored_syntax_row_is_visible_only_after_its_page_arrives() {
+    use studio_domain::syntax::{SYNTAX_SCHEMA, SyntaxEvent, SyntaxStatus, SyntaxSummary};
+
+    let (mut analysis, engine) = opened(4);
+    let effects = analysis.input(Input::RowClicked(0));
+    engine.settle(&mut analysis, effects);
+    let request = analysis.input(Input::EvidenceView(1));
+    let trace = request[0].request_id;
+    // History keeps the field identity while the new trace loads.
+    analysis.documents[0].evidence.selected = Some(Pick::Syntax {
+        element: 0,
+        index: 0,
+    });
+    let page = analysis.event(
+        trace,
+        Event::AnalysisSyntaxReady {
+            document: 1,
+            element: 0,
+            summary: Box::new(SyntaxSummary {
+                schema_version: SYNTAX_SCHEMA,
+                spec_revision: "AV2 v1.0.0".into(),
+                status: SyntaxStatus::Parsed,
+                error: None,
+                retained_events: 1,
+                observed_elements: 1,
+                elements_truncated: false,
+                depth_truncated: false,
+            }),
+            total: 1,
+        },
+    );
+    assert_eq!(doc(&analysis).evidence.selected_index(), None);
+    analysis.event(
+        page[0].request_id,
+        Event::AnalysisSyntaxPage {
+            document: 1,
+            trace,
+            element: 0,
+            first: 0,
+            total: 1,
+            events: vec![SyntaxEvent::Absent {
+                name: "field".into(),
+                condition: "condition".into(),
+                inferred: None,
+            }],
+        },
+    );
+    assert_eq!(doc(&analysis).evidence.selected_index(), Some(0));
+}
