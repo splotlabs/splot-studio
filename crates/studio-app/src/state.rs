@@ -603,7 +603,7 @@ impl AppState {
             }
             Intent::RelatedPrepared { request, result } => self.related_prepared(request, result),
             Intent::RelatedApproved => self.approve_related(disk),
-            Intent::RelatedDeclined => self.related = None,
+            Intent::RelatedDeclined => self.decline_related(),
             Intent::OmissionsConfirmed => self.confirm(),
             Intent::OmissionsDeclined => self.decline(),
             Intent::CancelRequested => self.cancel(now, update),

@@ -263,7 +263,8 @@ impl AppState {
             facts.frame_count,
             facts.reader == SourceReader::Ffmpeg,
             now,
-        );
+        )
+        .with_purpose(job.purpose);
         if item.transition(Transition::Start).is_err() {
             return;
         }

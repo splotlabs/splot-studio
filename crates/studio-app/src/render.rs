@@ -10,7 +10,7 @@ mod analysis;
 use std::time::Instant;
 
 use slint::{Image, Model, ModelRc, SharedString, VecModel};
-use studio_domain::job::{FailureCode, JobPurpose};
+use studio_domain::job::FailureCode;
 use studio_domain::settings::OutputKind;
 
 use crate::activity::{self, Phase};
@@ -102,6 +102,9 @@ fn render_related(window: &AppWindow, state: &AppState) {
     );
     let (title, detail, ready, failed) = match state.related() {
         Some(RelatedPreview::Checking) => ("Checking job compatibility…", "", false, false),
+        Some(RelatedPreview::Cancelling) => {
+            ("Finishing the compatibility check…", "", false, false)
+        }
         Some(RelatedPreview::Ready { title, detail }) => {
             (title.as_str(), detail.as_str(), true, false)
         }
@@ -476,14 +479,7 @@ pub fn render_counters(window: &AppWindow, state: &AppState, now: Instant) {
     let fraction = activity.fraction();
     window.set_progress_known(fraction.is_some());
     window.set_progress_fraction(fraction.unwrap_or(0.0));
-    window.set_progress_text(
-        if activity.before_first_frame() {
-            "Waiting for the first frame".to_owned()
-        } else {
-            present::progress_text(activity)
-        }
-        .into(),
-    );
+    window.set_progress_text(present::progress_text(activity).into());
     window.set_progress_line(present::counters(activity).into());
     window.set_elapsed_text(present::elapsed(activity.elapsed(now)).into());
 }
@@ -567,11 +563,7 @@ pub fn render_jobs(window: &AppWindow, jobs: &[Job<'_>]) {
         .iter()
         .map(|job| {
             let line = present::jobs::line(job);
-            let kind = if job.purpose() == Some(JobPurpose::FirstPass) {
-                "First pass"
-            } else {
-                line.kind
-            };
+            let kind = line.kind;
             JobRow {
                 accessible: format!("{kind} {}. {}. {}", line.name, line.state, line.detail).into(),
                 kind: kind.into(),

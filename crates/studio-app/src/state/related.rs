@@ -42,6 +42,8 @@ pub type RelatedResolution = Result<(Box<SourceFacts>, Vec<EffectiveOption>), Fi
 pub enum RelatedPreview {
     /// The engine checks the source and requested options.
     Checking,
+    /// The user dismissed the check, which still owns the worker slot.
+    Cancelling,
     /// The source and options are valid. The user can approve the proposal.
     Ready {
         /// The proposed action.
@@ -180,10 +182,24 @@ impl AppState {
         })
     }
 
+    pub(super) fn decline_related(&mut self) {
+        if let Some(related) = &mut self.related {
+            match related.preview {
+                RelatedPreview::Checking => related.preview = RelatedPreview::Cancelling,
+                RelatedPreview::Cancelling => {}
+                _ => self.related = None,
+            }
+        }
+    }
+
     pub(super) fn related_prepared(&mut self, request: u64, result: RelatedResolution) {
         let Some(related) = self.related.as_mut().filter(|r| r.request == request) else {
             return;
         };
+        if related.preview == RelatedPreview::Cancelling {
+            self.related = None;
+            return;
+        }
         match result {
             Ok((facts, policy)) => {
                 if facts.fingerprint != related.job.fingerprint

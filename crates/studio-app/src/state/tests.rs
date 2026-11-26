@@ -1836,3 +1836,58 @@ fn final_pass_uses_its_completed_artifact_and_starts_no_other_job() {
     assert_eq!(app.state.items()[..2], original);
     assert_eq!(app.state.items()[2], pass_item);
 }
+
+#[test]
+fn dismissing_a_related_check_keeps_its_worker_slot_until_the_reply() {
+    use studio_domain::protocol::OptionsIdentity;
+
+    let mut app = App::new();
+    app.apply(Intent::EngineAnswered(Ok(Capabilities {
+        options: Some(OptionsIdentity {
+            schema: 1,
+            codec_revision: "current".into(),
+        }),
+        ..capabilities(true)
+    })));
+    app.add(&["/m/check.y4m"], ready);
+    app.apply(Intent::OptionEdited {
+        key: "rate_control".into(),
+        value: Some(OptionValue::Record(
+            [
+                ("mode".into(), OptionValue::Choice("vbr".into())),
+                ("bitrate_kbps".into(), OptionValue::Integer(300)),
+            ]
+            .into(),
+        )),
+    });
+    let item = app.state.items()[0].id();
+    let prepare = Intent::PrepareRelated {
+        item,
+        action: RelatedAction::FirstPass,
+    };
+    let update = app.apply(prepare.clone());
+    let [Effect::PrepareRelated { request, .. }] = update.effects.as_slice() else {
+        unreachable!("Expected one compatibility check.");
+    };
+
+    app.apply(Intent::RelatedDeclined);
+    assert_eq!(app.state.related(), Some(&RelatedPreview::Cancelling));
+    assert!(!app.state.can_generate_pass());
+    assert!(app.apply(prepare.clone()).effects.is_empty());
+    app.apply(Intent::RelatedPrepared {
+        request: request + 1,
+        result: Ok((Box::new(facts(None)), Vec::new())),
+    });
+    assert_eq!(app.state.related(), Some(&RelatedPreview::Cancelling));
+
+    app.apply(Intent::RelatedPrepared {
+        request: *request,
+        result: Ok((Box::new(facts(None)), Vec::new())),
+    });
+    assert_eq!(app.state.related(), None);
+    assert!(app.state.can_generate_pass());
+    assert!(matches!(
+        app.apply(prepare).effects.as_slice(),
+        [Effect::PrepareRelated { .. }]
+    ));
+}
