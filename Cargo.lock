@@ -4234,7 +4234,7 @@ dependencies = [
 [[package]]
 name = "splot-core"
 version = "0.0.0"
-source = "git+https://github.com/splotlabs/splot?branch=main#6d5ada491438c6a26c2e792bf733ba18c3fb90a9"
+source = "git+https://github.com/splotlabs/splot?branch=main#3a53f9fa18baad06f3c8baf74301fb2f4f2cf630"
 dependencies = [
  "fearless_simd",
  "serde",
@@ -4245,7 +4245,7 @@ dependencies = [
 [[package]]
 name = "splot-decode"
 version = "0.0.0"
-source = "git+https://github.com/splotlabs/splot?branch=main#6d5ada491438c6a26c2e792bf733ba18c3fb90a9"
+source = "git+https://github.com/splotlabs/splot?branch=main#3a53f9fa18baad06f3c8baf74301fb2f4f2cf630"
 dependencies = [
  "fearless_simd",
  "parking_lot 0.13.0",
@@ -4258,7 +4258,7 @@ dependencies = [
 [[package]]
 name = "splot-encode"
 version = "0.0.0"
-source = "git+https://github.com/splotlabs/splot?branch=main#6d5ada491438c6a26c2e792bf733ba18c3fb90a9"
+source = "git+https://github.com/splotlabs/splot?branch=main#3a53f9fa18baad06f3c8baf74301fb2f4f2cf630"
 dependencies = [
  "fearless_simd",
  "splot-core",
@@ -4271,7 +4271,7 @@ dependencies = [
 [[package]]
 name = "splot-parallel"
 version = "0.0.0"
-source = "git+https://github.com/splotlabs/splot?branch=main#6d5ada491438c6a26c2e792bf733ba18c3fb90a9"
+source = "git+https://github.com/splotlabs/splot?branch=main#3a53f9fa18baad06f3c8baf74301fb2f4f2cf630"
 dependencies = [
  "parking_lot 0.13.0",
  "rayon",
@@ -4281,7 +4281,7 @@ dependencies = [
 [[package]]
 name = "splot-recon"
 version = "0.0.0"
-source = "git+https://github.com/splotlabs/splot?branch=main#6d5ada491438c6a26c2e792bf733ba18c3fb90a9"
+source = "git+https://github.com/splotlabs/splot?branch=main#3a53f9fa18baad06f3c8baf74301fb2f4f2cf630"
 dependencies = [
  "fearless_simd",
  "sha2",
@@ -4293,12 +4293,12 @@ dependencies = [
 [[package]]
 name = "splot-tables"
 version = "0.0.0"
-source = "git+https://github.com/splotlabs/splot?branch=main#6d5ada491438c6a26c2e792bf733ba18c3fb90a9"
+source = "git+https://github.com/splotlabs/splot?branch=main#3a53f9fa18baad06f3c8baf74301fb2f4f2cf630"
 
 [[package]]
 name = "splot-validate"
 version = "0.0.0"
-source = "git+https://github.com/splotlabs/splot?branch=main#6d5ada491438c6a26c2e792bf733ba18c3fb90a9"
+source = "git+https://github.com/splotlabs/splot?branch=main#3a53f9fa18baad06f3c8baf74301fb2f4f2cf630"
 dependencies = [
  "serde",
  "splot-core",
