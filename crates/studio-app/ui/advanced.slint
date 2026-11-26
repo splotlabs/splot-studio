@@ -86,19 +86,32 @@ component SettingField inherits VerticalLayout {
     in property <int> focus-request;
     callback committed(string);
 
-    property <string> draft;
+    property <string> editor-text: root.item.text;
+    property <string> choice-text: root.item.text;
     property <string> draft-option;
     property <string> draft-field;
     property <bool> dirty;
     property <bool> same-field: root.draft-option == root.option-key && root.draft-field == root.item.id;
-    function commit-draft() {
-        if root.dirty && root.same-field && root.draft != root.item.text {
+    function sync-model() {
+        if !root.dirty || !root.same-field {
             root.dirty = false;
-            root.committed(root.draft);
+            root.editor-text = root.item.text;
+        }
+        root.choice-text = root.item.text;
+    }
+
+    function commit-draft() {
+        if root.dirty && root.same-field {
+            root.dirty = false;
+            if root.editor-text != root.item.text {
+                root.committed(root.editor-text);
+            }
         }
     }
 
     spacing: Tokens.space-1;
+    changed item => { root.sync-model(); }
+    changed option-key => { root.sync-model(); }
     changed focus-request => {
         if root.focus-request > 0 {
             if text-field.enabled { text-field.focus(); }
@@ -116,11 +129,10 @@ component SettingField inherits VerticalLayout {
         enabled: root.editable && self.visible;
         height: self.visible ? max(self.preferred-height, Tokens.control-height) : 0px;
         font-size: Tokens.type-caption * 1rem;
-        text: root.dirty && root.same-field ? root.draft : root.item.text;
+        text <=> root.editor-text;
         accessible-label: root.item.label;
         accessible-description: root.item.help;
-        edited(value) => {
-            root.draft = value;
+        edited => {
             root.draft-option = root.option-key;
             root.draft-field = root.item.id;
             root.dirty = true;
@@ -139,7 +151,7 @@ component SettingField inherits VerticalLayout {
         enabled: root.editable && self.visible;
         height: self.visible ? max(self.preferred-height, Tokens.control-height) : 0px;
         model: root.item.choices;
-        current-value: root.item.text;
+        current-value <=> root.choice-text;
         accessible-label: root.item.label;
         accessible-description: root.item.help;
         selected(value) => { root.committed(value); }
