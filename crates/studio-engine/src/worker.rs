@@ -151,51 +151,20 @@ fn serve<'scope>(
 ) -> (Result<(), ProtocolError>, bool) {
     let mut job: Option<ScopedJoinHandle<'scope, ()>> = None;
     let result = loop {
-        let frame = match read_frame(input) {
-            Ok(Some(frame)) => frame,
+        let envelope = match next_command(input, outbox) {
+            Ok(Some(command)) => command,
             Ok(None) => break Ok(()),
             Err(error) => break Err(error),
         };
-        let envelope = match decode::<Command>(&frame) {
-            Ok(envelope) => envelope,
-            Err(error) => {
-                let code = match error {
-                    ProtocolError::IncompatibleVersion { .. } => ErrorCode::IncompatibleVersion,
-                    _ => ErrorCode::Malformed,
-                };
-                outbox.reply(request_id_of(&frame), refusal(code, error.to_string()));
-                continue;
-            }
-        };
         let id = envelope.request_id;
         match envelope.body {
-            Command::Hello { .. } => outbox.reply(
-                id,
-                Event::Hello {
-                    engine: build_identity(),
-                    capabilities: studio_domain::protocol::Capabilities {
-                        options: Some(OptionsIdentity {
-                            schema: OPTIONS_SCHEMA_VERSION,
-                            codec_revision: env!("SPLOT_CODEC_REVISION").to_owned(),
-                        }),
-                        ..capabilities()
-                    },
-                },
-            ),
+            Command::Hello { .. } => outbox.reply(id, hello()),
             Command::DescribeOptions {
                 schema,
                 first,
                 count,
             } => {
-                let event = match options::describe(schema, first, count) {
-                    Ok((total, options)) => Event::OptionsDescribed {
-                        first,
-                        total,
-                        options,
-                    },
-                    Err(error) => Event::OptionsFailed { error },
-                };
-                outbox.reply_options(id, event);
+                outbox.reply_options(id, describe_options(schema, first, count));
             }
             Command::ResolveOptions {
                 schema,
@@ -204,26 +173,18 @@ fn serve<'scope>(
                 first,
                 count,
             } => {
-                let request = Resolution {
-                    id,
-                    schema,
-                    source,
-                    settings,
-                    first,
-                    count,
-                };
-                if let Err(error) = requests.try_send(request) {
-                    let event = match error {
-                        TrySendError::Full(_) => {
-                            refusal(ErrorCode::Busy, "Wait for a pending encoder option reply.")
-                        }
-                        TrySendError::Disconnected(_) => refusal(
-                            ErrorCode::WrongState,
-                            "The encoder option resolver stopped.",
-                        ),
-                    };
-                    outbox.reply(id, event);
-                }
+                queue_resolution(
+                    requests,
+                    outbox,
+                    Resolution {
+                        id,
+                        schema,
+                        source,
+                        settings,
+                        first,
+                        count,
+                    },
+                );
             }
             // A probe runs here, in order with the other replies, bounded by
             // the media tools' timeout; the end of input is seen after it.
@@ -302,6 +263,25 @@ fn serve<'scope>(
     (result, false)
 }
 
+fn next_command(
+    input: &mut impl Read,
+    outbox: &Outbox,
+) -> Result<Option<Envelope<Command>>, ProtocolError> {
+    while let Some(frame) = read_frame(input)? {
+        match decode::<Command>(&frame) {
+            Ok(command) => return Ok(Some(command)),
+            Err(error) => {
+                let code = match error {
+                    ProtocolError::IncompatibleVersion { .. } => ErrorCode::IncompatibleVersion,
+                    _ => ErrorCode::Malformed,
+                };
+                outbox.reply(request_id_of(&frame), refusal(code, error.to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
 struct Resolution {
     id: u64,
     schema: u32,
@@ -309,6 +289,46 @@ struct Resolution {
     settings: OptionRequest,
     first: u32,
     count: u32,
+}
+
+fn hello() -> Event {
+    Event::Hello {
+        engine: build_identity(),
+        capabilities: studio_domain::protocol::Capabilities {
+            options: Some(OptionsIdentity {
+                schema: OPTIONS_SCHEMA_VERSION,
+                codec_revision: env!("SPLOT_CODEC_REVISION").into(),
+            }),
+            ..capabilities()
+        },
+    }
+}
+
+fn describe_options(schema: u32, first: u32, count: u32) -> Event {
+    match options::describe(schema, first, count) {
+        Ok((total, options)) => Event::OptionsDescribed {
+            first,
+            total,
+            options,
+        },
+        Err(error) => Event::OptionsFailed { error },
+    }
+}
+
+fn queue_resolution(requests: &SyncSender<Resolution>, outbox: &Outbox, request: Resolution) {
+    let id = request.id;
+    if let Err(error) = requests.try_send(request) {
+        let event = match error {
+            TrySendError::Full(_) => {
+                refusal(ErrorCode::Busy, "Wait for a pending encoder option reply.")
+            }
+            TrySendError::Disconnected(_) => refusal(
+                ErrorCode::WrongState,
+                "The encoder option resolver stopped.",
+            ),
+        };
+        outbox.reply(id, event);
+    }
 }
 
 fn resolve_options(pending: Receiver<Resolution>, outbox: &Outbox) {

@@ -108,7 +108,7 @@ pub(crate) fn resolve(
     apply(&mut config, settings)?;
     let resolved = config
         .resolve()
-        .map_err(|error| config::error(&config, error))?;
+        .map_err(|error| config::error(&config, &error))?;
     let values = fields(range)
         .map(|field| match field {
             Field::Config(field) => {

@@ -69,7 +69,7 @@ fn base_config(
     config.rate_control = RateControlMode::Crf {
         crf: base.crf.get(),
     };
-    config.preset = Preset::new(base.preset.get()).map_err(|cause| error(&config, cause))?;
+    config.preset = Preset::new(base.preset.get()).map_err(|cause| error(&config, &cause))?;
     Ok(config)
 }
 
@@ -473,8 +473,8 @@ fn choice(value: &str) -> OptionValue {
     OptionValue::Choice(value.into())
 }
 
-pub(super) fn error(config: &Config, error: Error) -> FieldError {
-    let field = match &error {
+pub(super) fn error(config: &Config, error: &Error) -> FieldError {
+    let field = match error {
         Error::InvalidDimensions { .. } => "width".into(),
         Error::UnsupportedChroma { .. } => "chroma".into(),
         Error::InvalidResize { .. } => "resize_denominator".into(),
@@ -584,7 +584,7 @@ mod tests {
         )?;
         assert!(matches!(
             config.validate(),
-            Err(cause) if error(&config, cause).field == "rate_control.max_bitrate_kbps"
+            Err(cause) if error(&config, &cause).field == "rate_control.max_bitrate_kbps"
         ));
         Ok(())
     }
