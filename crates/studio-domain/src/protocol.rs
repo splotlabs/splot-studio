@@ -512,6 +512,11 @@ pub enum Event {
         /// Effective options in canonical order.
         values: Vec<EffectiveOption>,
     },
+    /// One temporary file now exists and can be recorded for crash recovery.
+    ExportTempCreated {
+        /// The registered path and identity.
+        file: ExportTemp,
+    },
     /// The worker has reserved the temporary files and is waiting for acknowledgement.
     ExportPrepared {
         /// The paths the client must save before sending [`Command::ExportProceed`].

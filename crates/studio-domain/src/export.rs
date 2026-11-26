@@ -202,6 +202,15 @@ pub enum ExportArtifactKind {
     Hashes,
 }
 
+/// A Unix file identity for safe recovery of a temporary output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExportTempIdentity {
+    /// Device number.
+    pub device: u64,
+    /// Inode number.
+    pub inode: u64,
+}
+
 /// An exclusively created temporary file and its intended destination.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportTemp {
@@ -211,6 +220,10 @@ pub struct ExportTemp {
     pub partial: WirePath,
     /// The requested output path.
     pub destination: WirePath,
+    /// The identity of the original open temporary file. Preserve the file if absent.
+    pub identity: Option<ExportTempIdentity>,
+    /// The identity of its original parent. Preserve the file if absent.
+    pub parent_identity: Option<ExportTempIdentity>,
 }
 
 /// The result of securing the published file name on disk.
