@@ -170,14 +170,8 @@ fn execute(
              chapters it leaves out",
         ));
     }
-    validate_policy_request(job)?;
-    let config = source_config(&source.header, source.content, job.settings.base)?;
-    let (config, policy) =
-        options::job_policy(config, &source.facts, &job.settings).map_err(invalid_policy)?;
+    let (config, policy) = prepare_job(job, &source)?;
     let output_kind = job.settings.base.output;
-    let coded = config.coded();
-    options::check_output_geometry(output_kind, coded.width, coded.height)
-        .map_err(|message| Stop::failed(FailureCode::TooLarge, message))?;
     output::check_destination(&destination, &source.id)?;
     // A decoded source is scanned first; that can take a while and writes
     // nothing.
@@ -255,6 +249,17 @@ fn execute(
     })
 }
 
+fn prepare_job(job: &JobSpec, source: &Source) -> Result<(Config, Vec<Event>), Stop> {
+    validate_policy_request(job)?;
+    let config = source_config(&source.header, source.content, job.settings.base)?;
+    let (config, policy) =
+        options::job_policy(config, &source.facts, &job.settings).map_err(invalid_policy)?;
+    let coded = config.coded();
+    options::check_output_geometry(job.settings.base.output, coded.width, coded.height)
+        .map_err(|message| Stop::failed(FailureCode::TooLarge, message))?;
+    Ok((config, policy))
+}
+
 /// Identifies the encoder option schema and codec used by this engine.
 #[must_use]
 pub fn options_identity() -> OptionsIdentity {
@@ -285,10 +290,10 @@ fn validate_policy_request(job: &JobSpec) -> Result<(), Stop> {
 }
 
 fn invalid_policy(error: FieldError) -> Stop {
-    Stop::failed(
-        FailureCode::InvalidSettings,
-        format!("{}: {}", error.field, error.message),
-    )
+    let mut message = error.field;
+    message.push_str(": ");
+    message.push_str(&error.message);
+    Stop::failed(FailureCode::InvalidSettings, message)
 }
 
 /// Runs the verification checks on the finished file.
@@ -575,7 +580,7 @@ mod tests {
             .insert("rate_control".into(), rate.clone());
         let mut events = Vec::new();
         let end = run(&spec, &AtomicBool::new(false), &mut |event| {
-            events.push(event)
+            events.push(event);
         });
         assert!(matches!(end, Event::Completed { .. }), "{end:?}");
 
@@ -632,7 +637,7 @@ mod tests {
             },
         );
         assert!(matches!(end, Event::Cancelled));
-        assert!(events.is_empty());
+        assert_eq!(events, [] as [Event; 0]);
         assert_eq!(dir.path().read_dir()?.count(), 1);
         Ok(())
     }
@@ -661,7 +666,7 @@ mod tests {
             }
             let mut events = Vec::new();
             let end = run(&spec, &AtomicBool::new(false), &mut |event| {
-                events.push(event)
+                events.push(event);
             });
             assert!(
                 matches!(
@@ -671,7 +676,7 @@ mod tests {
                 ),
                 "{end:?}"
             );
-            assert!(events.is_empty());
+            assert_eq!(events, [] as [Event; 0]);
             assert_eq!(dir.path().read_dir()?.count(), 1);
         }
         Ok(())

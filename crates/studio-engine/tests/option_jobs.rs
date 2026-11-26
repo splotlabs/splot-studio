@@ -279,7 +279,10 @@ fn invalid_options_and_stale_identity_fail_before_output_creation() -> TestResul
         assert_eq!(failure.code, FailureCode::InvalidSettings);
         assert!(failure.message.starts_with(field), "{failure:?}");
         assert!(working.is_none());
-        assert!(leftovers(dir.path(), &[&input]).is_empty());
+        assert_eq!(
+            leftovers(dir.path(), &[&input]),
+            [] as [std::path::PathBuf; 0]
+        );
     }
     Ok(())
 }

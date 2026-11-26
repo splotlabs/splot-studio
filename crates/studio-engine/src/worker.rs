@@ -195,36 +195,7 @@ fn serve<'scope>(
                 outbox.reply(id, probe(&source, video_stream));
             }
             Command::Start { job: spec, live } => {
-                if job.is_some() {
-                    outbox.reply(
-                        id,
-                        refusal(
-                            ErrorCode::WrongState,
-                            "this worker has already started its job",
-                        ),
-                    );
-                    continue;
-                }
-                if spec.identity.as_ref() != Some(&job::options_identity()) {
-                    outbox.reply(
-                        id,
-                        failed(Stop::failed(
-                            FailureCode::InvalidSettings,
-                            "identity: Use the option schema and codec revision reported by this engine.",
-                        )),
-                    );
-                    continue;
-                }
-                match start(scope, outbox, id, spec, live) {
-                    Ok(handle) => job = Some(handle),
-                    Err(error) => outbox.job_end(
-                        id,
-                        failed(Stop::failed(
-                            FailureCode::Encoder,
-                            format!("cannot start the job thread: {error}"),
-                        )),
-                    ),
-                }
+                start(scope, outbox, id, spec, live, &mut job);
             }
             Command::Cancel => {
                 if !outbox.cancel(id) {
@@ -380,6 +351,46 @@ fn resolve_options(pending: Receiver<Resolution>, outbox: &Outbox) {
 }
 
 fn start<'scope>(
+    scope: &'scope Scope<'scope, '_>,
+    outbox: &'scope Outbox,
+    id: u64,
+    spec: JobSpec,
+    live: Option<PictureBox>,
+    job: &mut Option<ScopedJoinHandle<'scope, ()>>,
+) {
+    if job.is_some() {
+        outbox.reply(
+            id,
+            refusal(
+                ErrorCode::WrongState,
+                "this worker has already started its job",
+            ),
+        );
+        return;
+    }
+    if spec.identity.as_ref() != Some(&job::options_identity()) {
+        outbox.reply(
+            id,
+            failed(Stop::failed(
+                FailureCode::InvalidSettings,
+                "identity: Use the option schema and codec revision reported by this engine.",
+            )),
+        );
+        return;
+    }
+    match spawn_job(scope, outbox, id, spec, live) {
+        Ok(handle) => *job = Some(handle),
+        Err(error) => outbox.job_end(
+            id,
+            failed(Stop::failed(
+                FailureCode::Encoder,
+                format!("cannot start the job thread: {error}"),
+            )),
+        ),
+    }
+}
+
+fn spawn_job<'scope>(
     scope: &'scope Scope<'scope, '_>,
     outbox: &'scope Outbox,
     id: u64,
