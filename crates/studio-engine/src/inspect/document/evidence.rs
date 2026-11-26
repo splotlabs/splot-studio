@@ -164,14 +164,17 @@ fn page<T: Clone + Serialize>(
             "Request 1 to {MAX_PAGE_ELEMENTS} entries per page."
         )));
     }
-    if first >= total && !(first == 0 && total == 0) {
-        return Err(invalid(format!(
-            "Entry {first} is outside the report of {total} entries."
-        )));
-    }
+    let index = usize::try_from(first)
+        .ok()
+        .filter(|&index| index < entries.len() || (index == 0 && entries.is_empty()))
+        .ok_or_else(|| {
+            invalid(format!(
+                "Entry {first} is outside the report of {total} entries."
+            ))
+        })?;
     let mut items = Vec::new();
     let mut remaining = PAGE_BUDGET;
-    for item in entries[first as usize..].iter().take(count as usize) {
+    for item in entries[index..].iter().take(count as usize) {
         let encoded = serde_json::to_vec(item).map_err(|error| {
             Refusal::new(
                 AnalysisFailure::Io,
@@ -196,4 +199,26 @@ fn page<T: Clone + Serialize>(
         total,
         entries: items,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PAGE_BUDGET, page};
+    use crate::inspect::document::Refusal;
+    use studio_domain::analysis::{AnalysisFailure, MAX_PAGE_ELEMENTS};
+
+    #[test]
+    fn pages_limit_bytes_after_json_escaping() -> Result<(), Refusal> {
+        let quote_heavy = "\"".repeat(PAGE_BUDGET / 3);
+        let entries = vec![quote_heavy; 3];
+        let first = page(&entries, 0, MAX_PAGE_ELEMENTS)?;
+        assert_eq!(first.total, 3);
+        assert_eq!(first.entries.len(), 1);
+        let second = page(&entries, 1, MAX_PAGE_ELEMENTS)?;
+        assert_eq!(second.total, 3);
+        assert_eq!(second.entries.len(), 1);
+        let error = page(&["\"".repeat(PAGE_BUDGET)], 0, 1).err();
+        assert!(error.is_some_and(|error| error.code == AnalysisFailure::LimitReached));
+        Ok(())
+    }
 }

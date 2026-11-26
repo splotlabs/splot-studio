@@ -11,12 +11,12 @@
 //! a cancel is always read). The work thread serves the requests in order,
 //! with at most [`MAX_DOCUMENTS`] documents open. Both write their replies
 //! under one lock, each frame whole. The process ends at the end of its
-//! input, which cancels every open not yet answered.
+//! input, which cancels pending open and validation requests.
 //!
 //! The [`Ledger`] records open and validation requests until the work thread
 //! answers them. The ledger serializes cancellation and completion. A request
-//! that already has an answer cannot be cancelled. A cancelled open stops reading at
-//! the next unit and is answered with what it read before, as a document
+//! that already has an answer cannot be cancelled. A cancelled open stops at
+//! the next unit. Its answer keeps the earlier data as a document
 //! whose outcome is stopped by [`ProblemKind::Cancelled`] (or, when the read
 //! finished first, with the whole document). Only an open cancelled before
 //! its framing was known is answered [`AnalysisFailure::Cancelled`].

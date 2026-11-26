@@ -309,6 +309,7 @@ pub enum Command {
         len: u32,
     },
     /// Inspect process only. Collects syntax for one indexed OBU.
+    /// Use increasing request IDs for successive traces of a document.
     AnalysisSyntax {
         /// The document generation.
         document: u64,
@@ -327,6 +328,7 @@ pub enum Command {
         count: u32,
     },
     /// Inspect process only. Validates the source with the requested settings.
+    /// Use increasing request IDs for successive validations of a document.
     AnalysisValidate {
         /// The document generation.
         document: u64,
@@ -334,6 +336,8 @@ pub enum Command {
         settings: ValidationSettings,
     },
     /// Inspect process only. Requests cancellation of a pending validation.
+    /// Acknowledges a pending request with [`Event::CancelRequested`].
+    /// The validation can return a completed report if its work already ended.
     AnalysisCancelValidation {
         /// The document generation.
         document: u64,
