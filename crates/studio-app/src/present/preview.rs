@@ -113,7 +113,8 @@ pub fn badge(header: &PictureHeader, frames: Option<u64>, waiting: bool) -> Stri
     if waiting {
         badge.push_str(" · converting");
     }
-    if header.basis.assumed {
+    if header.basis.assumed && header.options.surface == studio_domain::preview::PictureSurface::Rgb
+    {
         badge.push_str(" · colours assumed (");
         badge.push_str(matrix(header.basis.matrix));
         badge.push(')');
@@ -197,6 +198,93 @@ pub fn accessible(view: &StageView) -> String {
     }
 }
 
+pub(crate) fn viewer_policy(view: &mut crate::preview::ViewerView, header: Option<&PictureHeader>) {
+    use studio_domain::preview::{GrainPolicy, PictureSurface, PictureView};
+
+    let Some(header) = header else {
+        return;
+    };
+    let Some(info) = header.document_info.as_deref() else {
+        return;
+    };
+    let scale = match header.view {
+        PictureView::Fit => "Fit uses interpolation.",
+        _ => "Zoom uses nearest-neighbor scaling.",
+    };
+    let display = if header.options.surface == PictureSurface::Rgb {
+        let assumption = if header.basis.assumed {
+            " (assumed)"
+        } else {
+            ""
+        };
+        let grid = if info.u.is_some() {
+            " RGB uses a fixed chroma sampling grid."
+        } else {
+            ""
+        };
+        format!(
+            "Unmanaged SDR preview. Display matrix {}{assumption}.{grid}",
+            matrix(header.basis.matrix)
+        )
+    } else {
+        "Diagnostic grayscale. The readout gives the decoded sample value.".to_owned()
+    };
+    let grain = match (header.options.grain, info.film_grain) {
+        (_, false) => "The stream signals no film grain for this output.",
+        (GrainPolicy::Apply, true) => "Film grain applied.",
+        (GrainPolicy::Skip, true) => "Film grain skipped.",
+    };
+    let color = info.color.map_or_else(
+        || {
+            if header.options.surface == PictureSurface::Rgb {
+                "Color and range unspecified. RGB assumes limited range.".into()
+            } else {
+                "Color and range unspecified.".into()
+            }
+        },
+        |color| {
+            let range = if color.full_range { "Full" } else { "Limited" };
+            format!(
+                "{range} range. CICP primaries {}, transfer {}, matrix {}.",
+                color.primaries, color.transfer, color.matrix
+            )
+        },
+    );
+    let siting = info.chroma_position.map_or_else(
+        || "Chroma siting unspecified.".into(),
+        |position| {
+            format!(
+                "Chroma siting codes {} (top), {} (bottom).",
+                position.top, position.bottom
+            )
+        },
+    );
+    view.policy = format!("{display} {scale} {grain} {color} {siting}");
+    let visible = |rect: studio_domain::preview::SampleRect| {
+        format!(
+            "{} × {} at ({}, {})",
+            rect.width, rect.height, rect.x, rect.y
+        )
+    };
+    let plane = match header.options.surface {
+        PictureSurface::Rgb | PictureSurface::Y => String::new(),
+        PictureSurface::U => info.u.map_or_else(String::new, |rect| {
+            format!(" · Visible U {}", visible(rect))
+        }),
+        PictureSurface::V => info.v.map_or_else(String::new, |rect| {
+            format!(" · Visible V {}", visible(rect))
+        }),
+    };
+    view.geometry = format!(
+        "{}-bit · {} · Coded {} × {} · Visible Y {}{plane}",
+        info.bit_depth,
+        crate::present::chroma(info.chroma),
+        info.coded_width,
+        info.coded_height,
+        visible(info.y)
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,6 +298,8 @@ mod tests {
             time: None,
             frame_count: Some(300),
             output: None,
+            options: studio_domain::preview::PictureOptions::default(),
+            document_info: None,
             width: 4,
             height: 2,
             frame_width: 1920,

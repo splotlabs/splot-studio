@@ -27,8 +27,8 @@
 //! from the shown picture's own origin.
 
 use studio_domain::preview::{
-    OutputEvent, PictureBox, PictureFailure, PictureFrame, PictureOrigin, PictureTarget,
-    PictureView, SourceRef,
+    GrainPolicy, OutputEvent, PictureBox, PictureFailure, PictureFrame, PictureOptions,
+    PictureOrigin, PictureSurface, PictureTarget, PictureView, SourceRef,
 };
 use studio_domain::protocol::Command;
 
@@ -41,9 +41,12 @@ mod document;
 mod scene;
 #[cfg(test)]
 mod tests;
+mod viewer;
 
 use cache::Cache;
 pub use scene::{Scene, Subject, scene};
+use viewer::Viewer;
+pub use viewer::{ViewerView, ZOOMS};
 
 /// The memory answered pictures may hold, in bytes: about a dozen
 /// full-size (1280x720) pictures, or many more stage-sized ones.
@@ -82,6 +85,30 @@ pub enum Input {
     End,
     /// Play, or pause.
     PlayPause,
+    /// Select the RGB presentation or a decoded plane in Analyze.
+    Surface(PictureSurface),
+    /// Set the Analyze viewer scale. Zero fits the picture.
+    Zoom(u8),
+    /// Select the Analyze film grain policy.
+    Grain(GrainPolicy),
+    /// Read the sample at a point relative to the painted image.
+    PickSample {
+        /// Physical pixels from the left edge of the image.
+        x: i32,
+        /// Physical pixels from the top edge of the image.
+        y: i32,
+        /// The painted image width in physical pixels.
+        width: i32,
+        /// The painted image height in physical pixels.
+        height: i32,
+    },
+    /// Read a sample at typed coordinates in the selected visible plane.
+    ReadSample {
+        /// The column, when the text is a valid integer.
+        x: Option<u32>,
+        /// The row, when the text is a valid integer.
+        y: Option<u32>,
+    },
     /// Switch between fitting the frame and actual pixels.
     ToggleNative,
     /// Move the actual-pixels view by this many physical pixels.
@@ -174,6 +201,8 @@ pub struct StageView {
     pub decode_work: String,
     /// Output identity for the current Analyze picture.
     pub output: Option<OutputEvent>,
+    /// Precise controls for Analyze.
+    pub viewer: ViewerView,
     /// Press and hold shows the original.
     pub can_compare: bool,
     /// Showing the original while held.
@@ -192,6 +221,7 @@ struct Key {
     target: PictureTarget,
     frame: PictureFrame,
     view: PictureView,
+    options: PictureOptions,
     size: PictureBox,
 }
 
@@ -207,6 +237,7 @@ enum Sent {
         generation: u64,
         target: PictureTarget,
         view: PictureView,
+        options: PictureOptions,
         size: PictureBox,
         /// `StopPlayback` was sent; `PlaybackEnded` is due.
         stopping: bool,
@@ -220,6 +251,7 @@ enum Want {
         target: PictureTarget,
         from: u64,
         view: PictureView,
+        options: PictureOptions,
     },
 }
 
@@ -239,6 +271,7 @@ impl Shown {
         self.target.as_ref() == Some(&key.target)
             && self.size == key.size
             && self.picture.header.view == key.view
+            && self.picture.header.options == key.options
             && match key.frame {
                 PictureFrame::Poster => self.poster,
                 PictureFrame::Index { index } => self.picture.header.frame == index,
@@ -278,6 +311,7 @@ pub struct Preview {
     document_notice: String,
     /// The last output while Next checks for the end of a stream with an unknown count.
     before_next: Option<Shown>,
+    viewer: Viewer,
     /// The stage request that failed, not asked again.
     failed: Option<Key>,
     /// The newest live picture of the subject's job.
@@ -326,6 +360,7 @@ impl Preview {
             document_progress: String::new(),
             document_notice: String::new(),
             before_next: None,
+            viewer: Viewer::default(),
             failed: None,
             live: None,
             live_note: None,
@@ -380,6 +415,7 @@ impl Preview {
             self.document_progress.clear();
             self.document_notice.clear();
             self.before_next = None;
+            self.viewer = Viewer::default();
             self.stage_failure = None;
             self.failed = None;
             self.live = None;
@@ -423,7 +459,7 @@ impl Preview {
                     self.dirty.view = true;
                 }
                 if !visible && self.document_id().is_some() {
-                    return self.cancel_document_decode();
+                    return self.cancel_document_work();
                 }
             }
             Input::Compare(on) => self.compare(on),
@@ -448,7 +484,17 @@ impl Preview {
             }
             Input::Seek(frame) => self.seek(frame),
             Input::SeekOutput(output) => self.seek_output(output),
-            Input::CancelDecode => return self.cancel_document_decode(),
+            Input::CancelDecode => return self.cancel_document_work(),
+            Input::Surface(surface) => self.choose_surface(surface),
+            Input::Zoom(factor) => self.choose_zoom(factor),
+            Input::Grain(grain) => self.choose_grain(grain),
+            Input::PickSample {
+                x,
+                y,
+                width,
+                height,
+            } => return self.pick_sample(x, y, width, height),
+            Input::ReadSample { x, y } => return self.read_sample(x, y),
             Input::End => {
                 if let Some(count) = self.frames {
                     self.seek(count.saturating_sub(1));
@@ -481,7 +527,9 @@ impl Preview {
                 }
             }
             Input::Pan { dx, dy } => {
-                if let Some((x, y)) = self.native {
+                if self.document_id().is_some() {
+                    self.pan_document(dx, dy);
+                } else if let Some((x, y)) = self.native {
                     let moved = |at: u32, by: i64| {
                         let at = i64::from(at).saturating_add(by).max(0);
                         u32::try_from(at).unwrap_or(u32::MAX)
@@ -497,7 +545,7 @@ impl Preview {
     pub fn picture(&mut self, picture: Picture) -> Vec<Effect> {
         let generation = picture.header.generation;
         if !self.valid_document_answer(&picture.header) {
-            return self.refused("The engine sent an invalid document output identity.");
+            return self.refused("The engine sent invalid picture geometry or output identity.");
         }
         match self.inflight.clone() {
             Some(Sent::Picture {
@@ -547,6 +595,12 @@ impl Preview {
                         self.frames = Some(count);
                     }
                     self.position = Some(picture.header.frame);
+                    if matches!(target, PictureTarget::Document { .. })
+                        && let Some(Sent::Play { view, .. }) = &mut self.inflight
+                    {
+                        // Frame geometry can change while the same playback request runs.
+                        *view = picture.header.view;
+                    }
                     self.show(Shown {
                         picture,
                         target: Some(target),
@@ -568,6 +622,9 @@ impl Preview {
         code: PictureFailure,
         message: &str,
     ) -> Vec<Effect> {
+        if self.sample_unavailable(generation, code, message) {
+            return Vec::new();
+        }
         match self.inflight.clone() {
             Some(Sent::Picture {
                 generation: sent,
@@ -761,6 +818,7 @@ impl Preview {
             },
             frame: PictureFrame::Poster,
             view: PictureView::Fit,
+            options: PictureOptions::default(),
             size: self.thumb_box,
         }
     }
@@ -816,6 +874,9 @@ impl Preview {
             .map_or(frame, |count| frame.min(count.saturating_sub(1)));
         if self.document_id().is_some() {
             self.before_next = None;
+            if self.current_frame() != Some(frame) {
+                self.viewer.clear_sample();
+            }
             self.stage_failure = None;
             self.failed = None;
             self.document_notice.clear();
@@ -839,6 +900,9 @@ impl Preview {
 
     fn show(&mut self, shown: Shown) {
         self.before_next = None;
+        if shown.picture.header.origin == PictureOrigin::Document {
+            self.viewer.accept_picture(&shown.picture.header);
+        }
         self.shown = Some(shown);
         self.stage_failure = None;
         self.failed = None;
@@ -930,6 +994,7 @@ impl Preview {
 
     fn view_for(&self, subject: &Subject) -> PictureView {
         match (subject, self.native) {
+            (Subject::Document { .. }, _) => self.viewer.view(self.stage_box),
             (Subject::Source { .. } | Subject::Result { .. }, Some((x, y))) => {
                 PictureView::Native { x, y }
             }
@@ -956,14 +1021,25 @@ impl Preview {
                 .map_or(PictureFrame::Poster, |index| PictureFrame::Index { index });
             (subject.target()?, frame)
         };
+        let options = if matches!(target, PictureTarget::Document { .. }) {
+            self.viewer.options
+        } else {
+            PictureOptions::default()
+        };
         if self.playing {
             let from = self.current_frame().unwrap_or(0);
-            return Some(Want::Play { target, from, view });
+            return Some(Want::Play {
+                target,
+                from,
+                view,
+                options,
+            });
         }
         Some(Want::Picture(Key {
             target,
             frame,
             view,
+            options,
             size: self.stage_box,
         }))
     }
@@ -979,26 +1055,54 @@ impl Preview {
             return out;
         }
         match self.want() {
-            Some(Want::Play { target, from, view }) => match &self.inflight {
+            Some(Want::Play {
+                target,
+                from,
+                view,
+                options,
+            }) => match &self.inflight {
                 Some(Sent::Play {
                     target: t,
                     view: v,
+                    options: current_options,
                     size,
                     stopping: false,
                     ..
-                }) if *t == target && *v == view && *size == self.stage_box && !self.replay => {}
+                }) if *t == target
+                    && *v == view
+                    && *current_options == options
+                    && *size == self.stage_box
+                    && !self.replay => {}
                 None | Some(Sent::Play { .. }) => {
                     self.replay = false;
-                    self.send_play(target, from, view, &mut out);
+                    self.send_play(target, from, view, options, &mut out);
                 }
                 Some(Sent::Picture { .. }) if matches!(target, PictureTarget::Document { .. }) => {
                     self.replay = false;
-                    self.send_play(target, from, view, &mut out);
+                    self.send_play(target, from, view, options, &mut out);
                 }
                 Some(Sent::Picture { .. }) => {}
             },
             Some(Want::Picture(key)) => {
                 let shown = self.shown.as_ref().is_some_and(|s| s.shows(&key));
+                if shown
+                    && matches!(key.target, PictureTarget::Document { .. })
+                    && let Some(Sent::Picture {
+                        generation,
+                        key: pending,
+                        ..
+                    }) = &self.inflight
+                    && *pending != key
+                {
+                    // Panning can return to the picture on screen while the engine renders a new crop.
+                    out.push(Effect {
+                        request_id: *generation,
+                        command: Command::StopPlayback,
+                    });
+                    self.inflight = None;
+                    self.document_progress.clear();
+                    self.dirty.view = true;
+                }
                 if !shown && self.failed.as_ref() != Some(&key) {
                     if let Some(picture) = self.cache.get(&key) {
                         self.show(Shown {
@@ -1085,6 +1189,7 @@ impl Preview {
                 target: key.target.clone(),
                 frame: key.frame,
                 view: key.view,
+                options: key.options,
                 size: key.size,
             },
         });
@@ -1100,6 +1205,7 @@ impl Preview {
         target: PictureTarget,
         from: u64,
         view: PictureView,
+        options: PictureOptions,
         out: &mut Vec<Effect>,
     ) {
         let generation = self.take_generation();
@@ -1114,6 +1220,7 @@ impl Preview {
                 target: target.clone(),
                 from,
                 view,
+                options,
                 size: self.stage_box,
             },
         });
@@ -1121,6 +1228,7 @@ impl Preview {
             generation,
             target,
             view,
+            options,
             size: self.stage_box,
             stopping: false,
         });
@@ -1148,6 +1256,7 @@ impl Preview {
             seek_error: String::new(),
             decode_work: String::new(),
             output: None,
+            viewer: ViewerView::default(),
             can_compare: false,
             comparing: self.comparing,
             can_native: false,
@@ -1205,6 +1314,7 @@ impl Preview {
         view.transport = document || self.can_native() && view.state != StageState::Unavailable;
         if document {
             self.document_view(&mut view);
+            self.viewer_view(&mut view);
         }
         view.can_play = view.navigable && self.can_play();
         view.play_note = if document {

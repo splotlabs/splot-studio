@@ -10,7 +10,10 @@ use studio_domain::job::{
     ChromaLayout, JobReport, Omissions, Rational, SourceColor, SourceFacts, SourceFingerprint,
     SourceReader, Stage, WirePath,
 };
-use studio_domain::preview::{ColorBasis, ColorMatrix, MediaTime, PictureHeader};
+use studio_domain::preview::{
+    ColorBasis, ColorMatrix, DocumentPictureInfo, MediaTime, PictureHeader, SamplePlane,
+    SamplePoint, SampleRect,
+};
 use studio_domain::protocol::Event;
 
 use super::*;
@@ -97,6 +100,8 @@ fn header(generation: u64, origin: PictureOrigin, frame: u64, w: u16, h: u16) ->
         }),
         frame_count: Some(300),
         output: None,
+        document_info: None,
+        options: PictureOptions::default(),
         width: w,
         height: h,
         frame_width: 1920,
@@ -122,6 +127,7 @@ fn answer(effect: &Effect) -> Picture {
         target,
         frame,
         view,
+        options,
         size,
     } = &effect.command
     else {
@@ -138,6 +144,7 @@ fn answer(effect: &Effect) -> Picture {
     };
     picture(PictureHeader {
         view: *view,
+        options: *options,
         ..header(*generation, origin, index, size.width, size.height)
     })
 }
@@ -299,6 +306,7 @@ fn the_cache_is_bounded_in_bytes_and_drops_the_oldest() {
         },
         frame: PictureFrame::Index { index },
         view: PictureView::Fit,
+        options: PictureOptions::default(),
         size: STAGE,
     };
     for frame in 0..40 {
@@ -350,6 +358,7 @@ fn removing_a_file_drops_its_pictures_and_its_late_answer() {
                     },
                     frame: PictureFrame::Poster,
                     view: PictureView::Fit,
+                    options: PictureOptions::default(),
                     size: STAGE,
                 },
             })
@@ -783,10 +792,37 @@ fn document_subject(document: u64) -> Subject {
     }
 }
 
+fn test_picture_info() -> DocumentPictureInfo {
+    let chroma = SampleRect {
+        x: 1,
+        y: 2,
+        width: 960,
+        height: 540,
+    };
+    DocumentPictureInfo {
+        bit_depth: 10,
+        chroma: ChromaLayout::Yuv420,
+        coded_width: 1924,
+        coded_height: 1084,
+        y: SampleRect {
+            x: 2,
+            y: 4,
+            width: 1920,
+            height: 1080,
+        },
+        u: Some(chroma),
+        v: Some(chroma),
+        color: None,
+        chroma_position: None,
+        film_grain: true,
+    }
+}
+
 fn output_picture(generation: u64, frame: u64, interval: Option<MediaTime>) -> Picture {
     picture(PictureHeader {
         time: None,
         frame_count: None,
+        document_info: Some(Box::new(test_picture_info())),
         output: Some(OutputEvent {
             ordinal: frame,
             unit_offset: 20,
@@ -942,4 +978,197 @@ fn next_at_the_end_restores_the_last_output_and_confirms_the_count() {
     assert_eq!(view.picture.map(|picture| picture.header.frame), Some(0));
     assert_eq!(preview.output_byte(1), Some((7, 15)));
     none(preview.input(Input::Step(1)));
+}
+
+#[test]
+fn exact_samples_follow_the_displayed_output_plane_and_grain() {
+    let (mut preview, opening) = shown(document_subject(7));
+    preview.picture(output_picture(only(&opening).request_id, 0, None));
+    let plane_request = preview.input(Input::Surface(PictureSurface::U));
+    assert!(preview.view().picture.is_none());
+    let plane_generation = only(&plane_request).request_id;
+    let chroma_picture = |generation, grain| {
+        let mut picture = output_picture(generation, 0, None);
+        picture.header.options = PictureOptions {
+            surface: PictureSurface::U,
+            grain,
+        };
+        picture.header.frame_width = 960;
+        picture.header.frame_height = 540;
+        picture
+    };
+    preview.picture(chroma_picture(plane_generation, GrainPolicy::Apply));
+    let point = SamplePoint {
+        plane: SamplePlane::U,
+        x: 959,
+        y: 539,
+    };
+    let ask = || Input::ReadSample {
+        x: Some(point.x),
+        y: Some(point.y),
+    };
+    let sample = preview.input(ask());
+    assert!(matches!(only(&sample).command,
+        Command::PictureSample { ordinal: 0, grain: GrainPolicy::Apply, point: sent, .. } if sent == point));
+    let old_sample = only(&sample).request_id;
+    preview.sample_answer(old_sample, 1, GrainPolicy::Apply, point, 900);
+    assert_eq!(preview.view().viewer.sample_copy, "");
+
+    let grain_request = preview.input(Input::Grain(GrainPolicy::Skip));
+    assert!(preview.view().picture.is_none());
+    preview.sample_answer(old_sample, 0, GrainPolicy::Apply, point, 900);
+    assert_eq!(preview.view().viewer.sample_copy, "");
+    none(preview.picture(chroma_picture(plane_generation, GrainPolicy::Apply)));
+    assert!(preview.view().picture.is_none());
+    preview.picture(chroma_picture(
+        only(&grain_request).request_id,
+        GrainPolicy::Skip,
+    ));
+
+    let sample = preview.input(ask());
+    let exact = only(&sample).request_id;
+    preview.sample_answer(exact, 0, GrainPolicy::Skip, point, 1023);
+    assert_eq!(preview.view().viewer.sample_copy, "1023");
+    assert_eq!(
+        preview.view().viewer.sample_text,
+        "U chroma (959, 539) = 1023"
+    );
+
+    let seek = preview.input(Input::Step(1));
+    assert_eq!(preview.view().viewer.sample_copy, "");
+    assert!(matches!(
+        only(&seek).command,
+        Command::Picture {
+            options: PictureOptions {
+                surface: PictureSurface::U,
+                grain: GrainPolicy::Skip
+            },
+            ..
+        }
+    ));
+    preview.sample_answer(exact, 0, GrainPolicy::Skip, point, 1023);
+    assert_eq!(preview.view().viewer.sample_copy, "");
+}
+
+#[test]
+fn zoom_and_pan_map_the_painted_crop_in_visible_sample_coordinates() {
+    let (mut preview, opening) = shown(document_subject(7));
+    preview.picture(output_picture(only(&opening).request_id, 0, None));
+    let zoom = preview.input(Input::Zoom(4));
+    let Command::Picture {
+        view: PictureView::Zoom { x, y, factor: 4 },
+        ..
+    } = only(&zoom).command
+    else {
+        unreachable!("{zoom:?}");
+    };
+    let mut picture = output_picture(only(&zoom).request_id, 0, None);
+    picture.header.view = PictureView::Zoom { x, y, factor: 4 };
+    preview.picture(picture);
+    none(preview.input(Input::PickSample {
+        x: -1,
+        y: 0,
+        width: 8,
+        height: 8,
+    }));
+    let pick = preview.input(Input::PickSample {
+        x: 7,
+        y: 5,
+        width: 8,
+        height: 8,
+    });
+    assert!(matches!(only(&pick).command,
+        Command::PictureSample { point: SamplePoint { plane: SamplePlane::Y, x: sx, y: sy }, .. }
+        if sx == x + 1 && sy == y + 1));
+    for _ in 0..3 {
+        none(preview.input(Input::Pan { dx: 1, dy: 0 }));
+    }
+    let pan = preview.input(Input::Pan { dx: 1, dy: -8 });
+    assert!(matches!(only(&pan).command,
+        Command::Picture { view: PictureView::Zoom { x: left, y: top, factor: 4 }, .. }
+        if left == x + 1 && top == y - 2));
+}
+
+#[test]
+fn a_picture_with_invalid_plane_metadata_cannot_be_displayed_or_sampled() {
+    let cases: [fn(&mut DocumentPictureInfo); 3] = [
+        |info| info.bit_depth = 12,
+        |info| info.coded_width = 1920,
+        |info| info.u = None,
+    ];
+    for damage in cases {
+        let (mut preview, opening) = shown(document_subject(7));
+        let mut reply = output_picture(only(&opening).request_id, 0, None);
+        if let Some(info) = &mut reply.header.document_info {
+            damage(info);
+        }
+        none(preview.picture(reply));
+        let view = preview.view();
+        assert_eq!(view.state, StageState::Unavailable);
+        assert_eq!(view.viewer.geometry, "");
+        assert!(!view.viewer.can_sample);
+        assert!(view.picture.is_none());
+    }
+}
+
+#[test]
+fn returning_to_the_shown_crop_cancels_an_obsolete_pan() {
+    let (mut preview, opening) = shown(document_subject(7));
+    preview.picture(output_picture(only(&opening).request_id, 0, None));
+    let zoom = preview.input(Input::Zoom(4));
+    let Command::Picture { view, .. } = only(&zoom).command else {
+        unreachable!("{zoom:?}");
+    };
+    let mut reply = output_picture(only(&zoom).request_id, 0, None);
+    reply.header.view = view;
+    preview.picture(reply);
+
+    let pan = preview.input(Input::Pan { dx: 4, dy: 0 });
+    let Command::Picture { view: moved, .. } = only(&pan).command else {
+        unreachable!("{pan:?}");
+    };
+    let cancel = preview.input(Input::Pan { dx: -4, dy: 0 });
+    assert_eq!(only(&cancel).command, Command::StopPlayback);
+    let mut late = output_picture(only(&pan).request_id, 0, None);
+    late.header.view = moved;
+    none(preview.picture(late));
+    assert_eq!(preview.view().picture.map(|p| p.header.view), Some(view));
+}
+
+#[test]
+fn playback_continues_when_a_new_frame_requires_a_smaller_crop_origin() {
+    let (mut preview, opening) = shown(document_subject(7));
+    preview.picture(output_picture(only(&opening).request_id, 0, None));
+    let zoom = preview.input(Input::Zoom(4));
+    let Command::Picture { view, .. } = only(&zoom).command else {
+        unreachable!("{zoom:?}");
+    };
+    let mut first = output_picture(only(&zoom).request_id, 0, None);
+    first.header.view = view;
+    preview.picture(first);
+    let play = preview.input(Input::PlayPause);
+    let mut cropped = output_picture(only(&play).request_id, 1, None);
+    cropped.header.view = PictureView::Zoom {
+        x: 0,
+        y: 0,
+        factor: 4,
+    };
+    cropped.header.frame_width = 160;
+    cropped.header.frame_height = 80;
+    if let Some(info) = &mut cropped.header.document_info {
+        info.y.width = 160;
+        info.y.height = 80;
+        let chroma = Some(SampleRect {
+            x: 1,
+            y: 2,
+            width: 80,
+            height: 40,
+        });
+        info.u = chroma;
+        info.v = chroma;
+    }
+    none(preview.picture(cropped));
+    let view = preview.view();
+    assert_eq!(view.position, 1);
+    assert!(view.playing);
 }

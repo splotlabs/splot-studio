@@ -77,12 +77,20 @@ impl Preview {
             .all(|offset| offset < len);
         let frame_matches = match &self.inflight {
             Some(Sent::Picture { key, .. }) => {
-                key.frame
-                    == PictureFrame::Index {
-                        index: header.frame,
-                    }
+                key.options == header.options
+                    && super::viewer::valid_geometry(header, key.view, key.size)
+                    && key.frame
+                        == PictureFrame::Index {
+                            index: header.frame,
+                        }
             }
-            _ => true,
+            Some(Sent::Play {
+                options,
+                view,
+                size,
+                ..
+            }) => *options == header.options && super::viewer::valid_geometry(header, *view, *size),
+            None => false,
         };
         header.origin == PictureOrigin::Document
             && event.ordinal == header.frame
@@ -91,6 +99,7 @@ impl Preview {
     }
 
     pub(super) fn start_document_request(&mut self) {
+        self.viewer.clear_sample();
         self.document_progress.clear();
         self.document_notice.clear();
         self.stage_failure = None;
@@ -108,8 +117,16 @@ impl Preview {
     }
 
     pub(super) fn document_decoding(&self) -> bool {
-        self.document_request_generation().is_some()
-            && (self.shown.is_none() || !self.document_progress.is_empty())
+        self.viewer.pending_sample().is_some()
+            || self.document_request_generation().is_some()
+                && (self.shown.is_none() || !self.document_progress.is_empty())
+    }
+
+    pub(super) fn cancel_document_work(&mut self) -> Vec<Effect> {
+        if self.viewer.pending_sample().is_some() {
+            return self.cancel_sample();
+        }
+        self.cancel_document_decode()
     }
 
     pub(super) fn cancel_document_decode(&mut self) -> Vec<Effect> {
@@ -131,6 +148,7 @@ impl Preview {
     }
 
     pub(super) fn fail_document(&mut self, message: String) {
+        self.viewer.clear_sample();
         self.playing = false;
         self.replay = false;
         self.before_next = None;
@@ -152,7 +170,9 @@ impl Preview {
         completed: u64,
         total: Option<u64>,
     ) {
-        if self.document_request_generation() != Some(generation) {
+        if self.document_request_generation() != Some(generation)
+            && self.viewer.pending_sample() != Some(generation)
+        {
             return;
         }
         let count = total.map_or_else(
@@ -196,7 +216,11 @@ impl Preview {
         );
         if self.document_decoding() {
             view.decode_work = if self.document_progress.is_empty() {
-                format!("Decoding to output {}…", view.position.saturating_add(1))
+                if self.viewer.pending_sample().is_some() {
+                    "Reading sample…".into()
+                } else {
+                    format!("Decoding to output {}…", view.position.saturating_add(1))
+                }
             } else {
                 self.document_progress.clone()
             };

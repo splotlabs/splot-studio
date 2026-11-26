@@ -524,6 +524,7 @@ pub fn render_preview(window: &AppWindow, state: &AppState, preview: &Preview, d
         playback.set_can_native(view.can_native);
         playback.set_native_on(view.native_on);
         playback.set_decode_work(view.decode_work.into());
+        render_viewer(&playback, view.viewer);
         let offset = |offset: Option<u64>| {
             offset
                 .map_or_else(String::new, |offset| format!("byte 0x{offset:X}"))
@@ -559,6 +560,32 @@ pub fn render_preview(window: &AppWindow, state: &AppState, preview: &Preview, d
                 .collect(),
         ));
     }
+}
+
+fn render_viewer(playback: &Playback<'_>, viewer: crate::preview::ViewerView) {
+    playback.set_surface(viewer.surface);
+    playback.set_chroma(viewer.chroma);
+    playback.set_zoom(viewer.zoom);
+    playback.set_magnification(viewer.magnification);
+    playback.set_grain(viewer.grain);
+    playback.set_viewer_geometry(viewer.geometry.into());
+    playback.set_viewer_policy(viewer.policy.into());
+    playback.set_sample_plane(viewer.sample_plane.into());
+    playback.set_can_sample(viewer.can_sample);
+    playback.set_sample_text(viewer.sample_text.into());
+    playback.set_sample_x(
+        viewer
+            .sample_point
+            .map_or_else(String::new, |p| p.x.to_string())
+            .into(),
+    );
+    playback.set_sample_y(
+        viewer
+            .sample_point
+            .map_or_else(String::new, |p| p.y.to_string())
+            .into(),
+    );
+    playback.set_sample_copy(viewer.sample_copy.into());
 }
 
 fn image(picture: Option<&Picture>) -> Image {

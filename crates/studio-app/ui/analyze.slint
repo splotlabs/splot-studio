@@ -12,7 +12,7 @@ import { Button, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 import { Tokens } from "tokens.slint";
 import { FocusRing, KeyboardFocus } from "focus.slint";
 import { Caption, LinkButton, WorkspaceSwitch } from "controls.slint";
-import { IconButton, Playback, PlaybackPanel, StageState } from "stage.slint";
+import { IconButton, Playback, PlaybackPanel, StageState, ToggleChip } from "stage.slint";
 
 // What the shown document is doing; `empty` when none is open.
 // `attention`: a restored document whose file changed or is missing.
@@ -1038,9 +1038,116 @@ export component AnalyzeView inherits VerticalLayout {
         if Analysis.can-playback && Playback.state != StageState.none: VerticalLayout {
             spacing: Tokens.space-1;
 
+            HorizontalLayout {
+                spacing: Tokens.space-2;
+
+                ComboBox {
+                    width: 150px;
+                    model: Playback.chroma ? ["RGB", "Y luma", "U chroma", "V chroma"] : ["RGB", "Y luma"];
+                    current-index <=> Playback.surface;
+                    accessible-label: "Picture surface";
+                    selected => { Playback.choose-surface(self.current-index); }
+                }
+
+                ComboBox {
+                    width: 110px;
+                    model: ["Fit", "1:1", "2×", "4×", "8×", "16×"];
+                    current-index <=> Playback.zoom;
+                    accessible-label: "Picture zoom";
+                    accessible-description: "Fit uses interpolation. Other levels use nearest-neighbor scaling.";
+                    selected => { Playback.choose-zoom(self.current-index); }
+                }
+
+                ToggleChip {
+                    text: "Film Grain";
+                    label: "Apply film grain";
+                    description: "Apply grain when the stream signals it. Clear this option to read samples before grain.";
+                    checked: Playback.grain;
+                    toggled => { Playback.toggle-grain(!Playback.grain); }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+            }
+
             PlaybackPanel {
                 document: true;
                 picture-height: root.playback-height;
+            }
+
+            if Playback.viewer-geometry != "": Caption {
+                text: Playback.viewer-geometry;
+                wrap: word-wrap;
+            }
+
+            if Playback.viewer-policy != "": Caption {
+                text: Playback.viewer-policy;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: Tokens.space-2;
+                Caption {
+                    text: Playback.sample-plane + " sample";
+                    vertical-alignment: center;
+                }
+
+                Caption {
+                    text: "X";
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+
+                sample-x := LineEdit {
+                    width: 72px;
+                    property <string> selected-coordinate: Playback.sample-x;
+                    text: self.selected-coordinate == "" ? "0" : self.selected-coordinate;
+                    changed selected-coordinate => {
+                        self.text = self.selected-coordinate == "" ? "0" : self.selected-coordinate;
+                    }
+                    enabled: Playback.can-sample;
+                    accessible-label: Playback.sample-plane + " column X";
+                    accessible-description: "Column in the visible plane. The first column is zero.";
+                    accepted(text) => { Playback.read-sample(text, sample-y.text); }
+                }
+
+                Caption {
+                    text: "Y";
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+
+                sample-y := LineEdit {
+                    width: 72px;
+                    property <string> selected-coordinate: Playback.sample-y;
+                    text: self.selected-coordinate == "" ? "0" : self.selected-coordinate;
+                    changed selected-coordinate => {
+                        self.text = self.selected-coordinate == "" ? "0" : self.selected-coordinate;
+                    }
+                    enabled: Playback.can-sample;
+                    accessible-label: Playback.sample-plane + " row Y";
+                    accessible-description: "Row in the visible plane. The first row is zero.";
+                    accepted(text) => { Playback.read-sample(sample-x.text, text); }
+                }
+
+                LinkButton {
+                    text: "Read Sample";
+                    description: "Read the decoded sample at the entered coordinates.";
+                    enabled: Playback.can-sample;
+                    clicked => { Playback.read-sample(sample-x.text, sample-y.text); }
+                }
+
+                Caption {
+                    horizontal-stretch: 1;
+                    text: Playback.sample-text;
+                    vertical-alignment: center;
+                    accessible-live-region: polite;
+                }
+
+                if Playback.sample-copy != "": LinkButton {
+                    text: "Copy Value";
+                    description: "Copy the decoded sample value.";
+                    clicked => { root.copy(Playback.sample-copy); }
+                }
             }
 
             HorizontalLayout {

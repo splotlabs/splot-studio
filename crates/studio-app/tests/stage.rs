@@ -13,7 +13,10 @@ use std::rc::Rc;
 
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::platform::{Key, Platform, PointerEventButton, WindowAdapter, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition, LogicalSize, PlatformError, SharedString};
+use slint::{
+    ComponentHandle, Image, LogicalPosition, LogicalSize, PhysicalSize, PlatformError, Rgb8Pixel,
+    SharedPixelBuffer, SharedString,
+};
 use studio_app::{
     Analysis, AnalysisState, AppWindow, NavStep, StageState, ViewMode, WorkspaceView,
 };
@@ -162,6 +165,7 @@ fn the_picture_area_answers_hold_keys_and_tab() {
     press(&window, Key::LeftArrow);
     assert_eq!(take(), [] as [String; 0]);
 
+    sample_hits_use_the_painted_physical_rectangle(&window, &platform);
     an_output_byte_link_moves_keyboard_focus(&window);
 }
 
@@ -207,4 +211,81 @@ fn an_output_byte_link_moves_keyboard_focus(window: &AppWindow) {
     assert!(analysis.get_bytes_shown());
     press(window, Key::RightArrow);
     assert_eq!(*cursor_move.borrow(), Some(NavStep::Right));
+}
+
+fn sample_hits_use_the_painted_physical_rectangle(
+    window: &AppWindow,
+    platform: &MinimalSoftwareWindow,
+) {
+    window.set_workspace(WorkspaceView::Analyze);
+    let analysis = window.global::<Analysis>();
+    analysis.set_state(AnalysisState::Open);
+    analysis.set_can_playback(true);
+    let playback = window.global::<studio_app::Playback>();
+    playback.set_state(StageState::Picture);
+    playback.set_navigable(true);
+    let pixels = [17_u8, 85, 131].repeat(64);
+    playback.set_image(Image::from_rgb8(
+        SharedPixelBuffer::<Rgb8Pixel>::clone_from_slice(&pixels, 8, 8),
+    ));
+    playback.set_magnification(4);
+    playback.set_can_sample(true);
+    let pick = Rc::new(RefCell::new(None));
+    playback.on_pick_sample({
+        let pick = pick.clone();
+        move |x, y, width, height| *pick.borrow_mut() = Some((x, y, width, height))
+    });
+    for scale in [1_u16, 2] {
+        let width = 800 * scale;
+        let height = 680 * scale;
+        window
+            .window()
+            .dispatch_event(WindowEvent::ScaleFactorChanged {
+                scale_factor: f32::from(scale),
+            });
+        window
+            .window()
+            .set_size(PhysicalSize::new(u32::from(width), u32::from(height)));
+        let width = usize::from(width);
+        let mut pixels = vec![Rgb8Pixel::default(); width * usize::from(height)];
+        window.window().request_redraw();
+        platform.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, width);
+        });
+        let origin = pixels
+            .iter()
+            .position(|p| (p.r, p.g, p.b) == (17, 85, 131))
+            .unwrap_or_else(|| unreachable!("The zoomed picture was not drawn at {scale}x."));
+        let to_logical =
+            |at: usize| (f32::from(u16::try_from(at).unwrap_or(0)) + 0.5) / f32::from(scale);
+        let x = to_logical(origin % width + 7);
+        let y = to_logical(origin / width + 5);
+        pointer(window, x, y, true);
+        pointer(window, x, y, false);
+        assert_eq!(
+            pick.borrow_mut().take(),
+            Some((7, 5, 32, 32)),
+            "at {scale}x"
+        );
+    }
+    window
+        .window()
+        .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: 1.0 });
+    window.window().set_size(LogicalSize::new(800.0, 680.0));
+    let read = Rc::new(RefCell::new(None));
+    playback.on_read_sample({
+        let read = read.clone();
+        move |x, y| *read.borrow_mut() = Some((x, y))
+    });
+    playback.set_sample_x("7".into());
+    playback.set_sample_y("5".into());
+    for _ in 0..12 {
+        press(window, Key::Tab);
+        press(window, Key::Return);
+        if read.borrow().is_some() {
+            break;
+        }
+    }
+    assert_eq!(*read.borrow(), Some(("7".into(), "5".into())));
+    playback.set_can_sample(false);
 }
