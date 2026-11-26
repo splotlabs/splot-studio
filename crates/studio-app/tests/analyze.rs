@@ -621,6 +621,7 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
     line_offsets_are_never_cut(&rig);
     linked_validation_evidence(&mut rig, &scratch, &clipboard);
     a_large_findings_view_pages_retained_rows(&mut rig, &scratch);
+    a_byte_only_finding_keeps_both_offsets(&mut rig, &scratch);
 
     eprintln!("Tab stops: navigator after {tabs}, byte view {byte_tabs} later");
 }
@@ -761,6 +762,38 @@ fn a_large_findings_view_pages_retained_rows(rig: &mut Rig, scratch: &Scratch) {
             .get_evidence_note()
             .contains("File byte 26, bit 0")
     );
+}
+
+/// The validator identifies a header byte and layer for this rule. It
+/// supplies no exact field position.
+fn a_byte_only_finding_keeps_both_offsets(rig: &mut Rig, scratch: &Scratch) {
+    let path = scratch.0.join("delimiter layer 5.obu");
+    fs::write(&path, [0x02, 0x88, 0x05]).unwrap_or_else(|e| unreachable!("{e}"));
+    rig.session.analysis_input(Input::Close);
+    rig.session.analysis_input(Input::Open(vec![path]));
+    rig.idle("the invalid layer fixture");
+    rig.global().invoke_validate_stream();
+    rig.idle("validation of the invalid layer fixture");
+    rig.global()
+        .invoke_evidence_rule("obu-header/global-xlayer-required".into());
+    rig.global().invoke_evidence_layer(6);
+    rig.idle("the verified layer filter");
+    assert_eq!(rig.global().get_evidence_rows().row_count(), 1);
+    rig.global().invoke_evidence_pick(0);
+    rig.idle("the byte-only location");
+    assert_eq!(rig.selected(), Some((0, Position::Row(0))));
+    let location = rig.global().get_evidence_note();
+    assert!(
+        location.contains("File byte 1") && location.contains("Stream byte 1"),
+        "{location}"
+    );
+    assert!(
+        location.contains("Field-level evidence is unavailable"),
+        "{location}"
+    );
+    let bytes = rig.global().get_byte_lines();
+    let byte = bytes.row_data(0).and_then(|line| line.cells.row_data(1));
+    assert!(byte.is_some_and(|cell| cell.cursor && !cell.evidence));
 }
 
 /// An offset of 16 hex digits, the most a `u64` has, is drawn whole in the
