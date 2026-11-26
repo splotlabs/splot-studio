@@ -458,6 +458,22 @@ impl Session {
         self.send_preview(effects);
     }
 
+    fn sync_analysis_preview(&mut self) {
+        let navigation = self.analysis.take_timeline_picture();
+        if let Some((document, output)) = navigation {
+            self.playback_document = output.map(|_| document);
+        }
+        self.sync_preview();
+        if let Some((_, Some(index))) = navigation
+            && let Some(output) = index.checked_add(1)
+        {
+            let effects = self.preview.pause_document();
+            self.send_preview(effects);
+            let effects = self.preview.input(preview::Input::SeekOutput(output));
+            self.send_preview(effects);
+        }
+    }
+
     /// Selects a byte range linked to the displayed output.
     pub fn preview_show_bytes(&mut self, link: i32) -> Outcome {
         if let Some((document, offset)) = self.preview.output_byte(link) {
@@ -499,7 +515,7 @@ impl Session {
         self.read_if_shown();
         self.persist_view();
         outcome.analysis = self.analysis.take_dirty();
-        self.sync_preview();
+        self.sync_analysis_preview();
         outcome.preview = self.preview.take_dirty();
         outcome
     }
@@ -672,7 +688,7 @@ impl Session {
         self.persist_view();
         let analysis = self.analysis.take_dirty();
         if analysis {
-            self.sync_preview();
+            self.sync_analysis_preview();
         }
         Outcome {
             analysis,

@@ -41,6 +41,7 @@ use studio_domain::protocol::{
     read_frame, write_message,
 };
 use studio_domain::syntax::SYNTAX_SCHEMA;
+use studio_domain::timeline::{TimelineTarget, TimelineView};
 use studio_domain::validation::{VALIDATION_SCHEMA, ValidationEvidence, ValidationSettings};
 
 use self::document::{Document, OpeningDocument, Refusal};
@@ -143,12 +144,27 @@ enum Query {
         first: u64,
         count: u32,
     },
+    Timeline {
+        scan: u64,
+        query: TimelineQuery,
+    },
     IdentityPage {
         scan: u64,
         first: u64,
         count: u32,
         kind: IdentityKind,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TimelineQuery {
+    Range {
+        view: TimelineView,
+        first: u64,
+        limit: u64,
+        buckets: u32,
+    },
+    Locate(TimelineTarget),
 }
 
 /// A queued request: its `request_id`, its document and what it asks.
@@ -587,12 +603,41 @@ fn queued_request(command: &Command) -> Option<(u64, Request)> {
                 kind,
             }),
         ),
-        _ => return None,
+        _ => return queued_timeline_request(command),
     })
 }
 
 /// Queues an open, or refuses it: its id must be new, and the queue must
 /// take it.
+fn queued_timeline_request(command: &Command) -> Option<(u64, Request)> {
+    let (document, scan, query) = match *command {
+        Command::AnalysisTimeline {
+            document,
+            scan,
+            view,
+            first,
+            limit,
+            buckets,
+        } => (
+            document,
+            scan,
+            TimelineQuery::Range {
+                view,
+                first,
+                limit,
+                buckets,
+            },
+        ),
+        Command::AnalysisTimelineLocate {
+            document,
+            scan,
+            target,
+        } => (document, scan, TimelineQuery::Locate(target)),
+        _ => return None,
+    };
+    Some((document, Request::Inspect(Query::Timeline { scan, query })))
+}
+
 fn queue_open<W: Write>(
     shared: &Shared<W>,
     requests: &SyncSender<Queued>,
@@ -1069,6 +1114,7 @@ fn serve_document(
                 events: page.entries,
             }
         }
+        Query::Timeline { scan, query } => serve_timeline(doc, document, scan, query)?,
         Query::IdentityPage {
             scan,
             first,
@@ -1093,6 +1139,31 @@ fn serve_document(
                 findings: page.entries,
             }
         }
+    })
+}
+
+fn serve_timeline(
+    doc: &Document,
+    document: u64,
+    scan: u64,
+    query: TimelineQuery,
+) -> Result<Event, Refusal> {
+    Ok(match query {
+        TimelineQuery::Range {
+            view,
+            first,
+            limit,
+            buckets,
+        } => Event::AnalysisTimeline {
+            document,
+            scan,
+            page: Box::new(doc.timeline(scan, view, first, limit, buckets)?),
+        },
+        TimelineQuery::Locate(target) => Event::AnalysisTimelineLocated {
+            document,
+            scan,
+            selection: Box::new(doc.timeline_locate(scan, target)?),
+        },
     })
 }
 
