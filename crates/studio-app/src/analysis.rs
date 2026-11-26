@@ -661,7 +661,7 @@ impl Analysis {
 
     fn evidence_input(&mut self, at: usize, input: Input, out: &mut Vec<Effect>) {
         match input {
-            Input::EvidenceView(tab) => {
+            Input::EvidenceView(tab) if matches!(self.documents[at].phase, Phase::Open(_)) => {
                 let evidence = &mut self.documents[at].evidence;
                 evidence.tab = tab.clamp(0, 2);
                 let doc = &mut self.documents[at];
@@ -789,7 +789,7 @@ impl Analysis {
         doc.phase = Phase::Opening;
         self.documents[at] = doc;
         self.send(id, Asked::Open, out, move |document| {
-            Command::AnalysisOpen { document, source }
+            Command::AnalysisOpenProgressive { document, source }
         });
     }
 
@@ -876,19 +876,38 @@ impl Analysis {
     /// An answer from the inspect process.
     pub fn event(&mut self, request_id: u64, event: Event) -> Vec<Effect> {
         let mut out = Vec::new();
-        let Some((document, asked)) = self.pending.remove(&request_id) else {
+        let Some(&(document, asked)) = self.pending.get(&request_id) else {
             return out;
         };
         if reply_document(&event).is_some_and(|d| d != document) {
             return out;
+        }
+        if !matches!(event, Event::AnalysisOpenProgress { .. }) {
+            self.pending.remove(&request_id);
         }
         let Some(at) = self.index_of(document) else {
             return out;
         };
         self.dirty = true;
         match (asked, event) {
+            (Asked::Open, Event::AnalysisOpenProgress { summary, .. }) => {
+                let doc = &mut self.documents[at];
+                if doc.in_engine()
+                    && doc
+                        .restore
+                        .is_none_or(|view| same_file(view.fingerprint, summary.fingerprint))
+                {
+                    doc.update_partial(summary);
+                    self.fill(at, &mut out);
+                    self.fetch_bytes(at, &mut out);
+                }
+            }
             (Asked::Open, Event::AnalysisOpened { summary, .. }) => {
                 let doc = &mut self.documents[at];
+                if !doc.in_engine() {
+                    return out;
+                }
+                let partial = doc.partial.take().is_some();
                 let batch = doc.pending_batch.take();
                 if let Origin::Result(result) = &doc.origin
                     && summary.fingerprint.len != result.bytes
@@ -914,11 +933,13 @@ impl Analysis {
                     }
                     restore => {
                         doc.phase = Phase::Open(Box::new(summary));
+                        doc.refresh_total |= partial;
                         if let Some(restore) = restore {
                             self.apply(at, restore, &mut out);
                         }
                         self.fill(at, &mut out);
                         self.fetch_bytes(at, &mut out);
+                        self.ensure_syntax(at, &mut out);
                         if let Some(report) = batch {
                             self.attach_batch(at, *report);
                         }
@@ -1425,10 +1446,18 @@ impl Analysis {
                 g == generation && (f..f.saturating_add(u64::from(PAGE_ROWS))).contains(&p)
             })
         };
-        let missing = (top..end).find(|p| !doc.rows.contains_key(p) && !asked(*p));
+        let refresh = doc.refresh_total && !asked(top);
+        let missing = if refresh {
+            Some(top)
+        } else {
+            (top..end).find(|p| !doc.rows.contains_key(p) && !asked(*p))
+        };
         // Two pages in flight per document at most, of any filter; the
         // engine queues 64.
         if let Some(first) = missing.filter(|_| doc.asked.len() < 2) {
+            if refresh {
+                doc.refresh_total = false;
+            }
             doc.asked.push((generation, first));
             let (id, filter) = (doc.id, doc.filter);
             self.send(
@@ -1505,6 +1534,7 @@ fn page_fits(first: u64, total: u64, len: usize) -> bool {
 fn reply_document(event: &Event) -> Option<u64> {
     match event {
         Event::AnalysisOpened { document: d, .. }
+        | Event::AnalysisOpenProgress { document: d, .. }
         | Event::AnalysisPage { document: d, .. }
         | Event::AnalysisLocated { document: d, .. }
         | Event::AnalysisBytes { document: d, .. }

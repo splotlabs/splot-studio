@@ -268,6 +268,7 @@ fn read(doc: &Document, first_read: Option<u64>) -> Option<State> {
                 ProblemKind::Malformed | ProblemKind::Unsupported => State::Stopped,
             },
             ScanOutcome::Complete | ScanOutcome::Damaged { .. } => State::Completed,
+            ScanOutcome::Scanning => State::Running,
         },
         Phase::Failed { by, .. } => match by {
             ReadEnd::Failure => State::Failed,

@@ -292,6 +292,7 @@ impl Activity {
             | Event::PictureSample { .. }
             | Event::PlaybackEnded { .. }
             | Event::AnalysisOpened { .. }
+            | Event::AnalysisOpenProgress { .. }
             | Event::AnalysisPage { .. }
             | Event::AnalysisLocated { .. }
             | Event::AnalysisBytes { .. }

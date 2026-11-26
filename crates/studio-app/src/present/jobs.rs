@@ -250,9 +250,9 @@ fn read(doc: &crate::analysis::Document, state: State) -> String {
         (State::Queued, _) => {
             "Waits for the read before it; the engine reads one file at a time.".to_owned()
         }
-        (State::Running, _) => {
-            "Reading the OBU envelopes. This read reports no progress until it ends.".to_owned()
-        }
+        (State::Running, _) => doc
+            .summary()
+            .map_or_else(|| "Reading the OBU envelopes.".to_owned(), found),
         (State::Cancelling, _) => "Stopping; what was read is kept.".to_owned(),
         (_, Phase::Open(summary)) => found(summary),
         (_, Phase::Failed { message, .. }) => message.clone(),
@@ -271,6 +271,7 @@ fn read(doc: &crate::analysis::Document, state: State) -> String {
 fn found(summary: &DocumentSummary) -> String {
     let elements = format!("{} elements", count(summary.elements));
     match &summary.outcome {
+        ScanOutcome::Scanning => format!("{elements} found so far."),
         ScanOutcome::Complete => format!("{elements}; every byte parsed."),
         ScanOutcome::Damaged { .. } => format!(
             "{elements}; read to the end, {} unparsed.",

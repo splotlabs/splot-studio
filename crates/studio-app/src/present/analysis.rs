@@ -124,6 +124,10 @@ pub(crate) fn plural(n: u64, one: &str, many: &str) -> String {
 #[must_use]
 pub fn outcome(summary: &DocumentSummary) -> (String, bool) {
     match &summary.outcome {
+        ScanOutcome::Scanning => (
+            "The index shows only the part of the file read so far.".to_owned(),
+            false,
+        ),
         ScanOutcome::Complete => ("Every byte belongs to a parsed element.".to_owned(), false),
         ScanOutcome::Damaged { first } => (
             format!(

@@ -253,6 +253,9 @@ impl Evidence {
 impl Analysis {
     pub(super) fn ensure_syntax(&mut self, at: usize, out: &mut Vec<Effect>) {
         let doc = &mut self.documents[at];
+        if !matches!(doc.phase, super::Phase::Open(_)) {
+            return;
+        }
         let document_id = doc.id;
         let finding_has_bit = match doc.evidence.selected {
             Some(Pick::Finding { index, .. }) => {
@@ -503,7 +506,7 @@ impl Analysis {
     ) {
         let doc = &mut self.documents[at];
         let document_id = doc.id;
-        if doc.evidence.running.is_some() {
+        if !matches!(doc.phase, super::Phase::Open(_)) || doc.evidence.running.is_some() {
             return;
         }
         doc.evidence.tab = 2;

@@ -108,6 +108,8 @@ export global Analysis {
     in property <string> action-description;
     // The read was cancelled and kept only the start of the file.
     in property <bool> can-read-again;
+    in property <bool> can-cancel-read;
+    in property <bool> reading;
     in property <bool> can-playback;
 
     in property <[string]> type-labels;
@@ -958,7 +960,7 @@ export component AnalyzeView inherits VerticalLayout {
         height: 220px;
         heading: "Reading the stream…";
         text: Analysis.message;
-        action: "Cancel";
+        action: Analysis.can-cancel-read ? "Cancel" : "";
         action-description: "Stop reading this file";
         act => {
             Analysis.cancel();
@@ -1023,6 +1025,15 @@ export component AnalyzeView inherits VerticalLayout {
                 accessible-expanded: Playback.state != StageState.none;
                 clicked => {
                     Analysis.toggle-playback();
+                }
+            }
+
+            if Analysis.can-cancel-read: LinkButton {
+                min-height: 0;
+                text: "Cancel Scan";
+                description: "Stop reading this file";
+                clicked => {
+                    Analysis.cancel();
                 }
             }
 
@@ -1352,7 +1363,7 @@ export component AnalyzeView inherits VerticalLayout {
                 width: root.detail-width;
                 spacing: Tokens.space-1;
 
-                WorkspaceSwitch {
+                if !Analysis.reading: WorkspaceSwitch {
                     options: ["Properties", "Syntax", "Findings"];
                     accessible-label: "Inspector views";
                     selected: Analysis.evidence-tab;

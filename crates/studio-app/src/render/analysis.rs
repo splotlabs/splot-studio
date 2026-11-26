@@ -40,6 +40,14 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
             .and_then(Document::summary)
             .is_some_and(|summary| summary.digest.is_some()),
     );
+    global.set_can_cancel_read(matches!(
+        analysis.shown().map(Document::phase),
+        Some(Phase::Opening)
+    ));
+    global.set_reading(matches!(
+        analysis.shown().map(Document::phase),
+        Some(Phase::Opening | Phase::Cancelling)
+    ));
     let Some(doc) = analysis.shown() else {
         global.set_state(AnalysisState::Empty);
         global.set_message(
@@ -58,7 +66,11 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
     };
     global.set_summary_line(text::summary_line(summary).into());
     let (outcome, problem) = text::outcome(summary);
-    global.set_outcome_line(outcome.into());
+    global.set_outcome_line(if matches!(doc.phase(), Phase::Cancelling) {
+        "Stopping the scan. The index shows the part read so far.".into()
+    } else {
+        outcome.into()
+    });
     global.set_outcome_problem(problem);
 
     let filter = doc.filter();
@@ -120,6 +132,10 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
 /// it is open.
 fn render_phase<'a>(global: &Global<'_>, doc: &'a Document) -> Option<&'a DocumentSummary> {
     let name = file_name(doc.path());
+    if let Some(summary) = doc.summary() {
+        global.set_state(AnalysisState::Open);
+        return Some(summary);
+    }
     match doc.phase() {
         Phase::Unread => {
             global.set_state(AnalysisState::Opening);
@@ -162,10 +178,7 @@ fn render_phase<'a>(global: &Global<'_>, doc: &'a Document) -> Option<&'a Docume
             global.set_message(format!("{name}: {message}").into());
             None
         }
-        Phase::Open(summary) => {
-            global.set_state(AnalysisState::Open);
-            Some(summary)
-        }
+        Phase::Open(_) => None,
     }
 }
 
