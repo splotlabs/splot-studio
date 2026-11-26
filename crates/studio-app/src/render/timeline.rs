@@ -351,7 +351,7 @@ fn report(
         scope(page.view)
     );
     if let Some(selection) = selection {
-        let _ = writeln!(report, "Selection: {}", selection_line(selection));
+        let _ = writeln!(report, "Selection\t{}", selection_line(selection));
     }
     for bucket in &page.buckets {
         let detail = bucket.entry.map_or_else(
