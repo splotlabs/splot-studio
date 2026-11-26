@@ -109,3 +109,53 @@ pub(super) fn validate(
         findings,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Seek, Write};
+
+    use super::*;
+    use splot_core::ivf::{IvfHeader, write_ivf_frame, write_ivf_header};
+
+    #[test]
+    fn native_rule_retains_its_location_across_wrappers_and_policies() -> std::io::Result<()> {
+        // This temporal delimiter explicitly signals extended layer 5.
+        let obu = [0x02, 0x88, 0x05];
+        for (ivf, header_offset) in [(false, 1), (true, 45)] {
+            let mut file = tempfile::tempfile()?;
+            if ivf {
+                write_ivf_header(&mut file, &IvfHeader::new(*b"AV02", 16, 16, 24, 1, 1))?;
+                write_ivf_frame(&mut file, 0, &obu)?;
+            } else {
+                file.write_all(&obu)?;
+            }
+            let mut previous = None;
+            for strict in [false, true] {
+                file.rewind()?;
+                let options = ValidationSettings {
+                    strict,
+                    external_hls: None,
+                };
+                let report = validate(&mut file, &options, &|| false)
+                    .map_err(|error| std::io::Error::other(error.message))?;
+                let rule = report
+                    .findings
+                    .iter()
+                    .find(|f| f.rule_id == "obu-header/global-xlayer-required")
+                    .ok_or_else(|| std::io::Error::other("Missing layer diagnostic."))?;
+                assert_eq!(rule.file_offset, Some(header_offset));
+                assert_eq!(rule.bit_offset, None);
+                assert_eq!(rule.spec_section.as_deref(), Some("6.2.2"));
+                assert_eq!(rule.severity, Severity::Error);
+                assert!(report.summary.policy_failed());
+                assert_eq!(report.summary.checked_obus, 1);
+                assert!(report.summary.finalized);
+                if let Some(first) = previous {
+                    assert_eq!(report.findings, first);
+                }
+                previous = Some(report.findings);
+            }
+        }
+        Ok(())
+    }
+}
