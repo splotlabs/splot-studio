@@ -661,7 +661,7 @@ impl Analysis {
 
     fn evidence_input(&mut self, at: usize, input: Input, out: &mut Vec<Effect>) {
         match input {
-            Input::EvidenceView(tab) if matches!(self.documents[at].phase, Phase::Open(_)) => {
+            Input::EvidenceView(tab) => {
                 let evidence = &mut self.documents[at].evidence;
                 evidence.tab = tab.clamp(0, 2);
                 let doc = &mut self.documents[at];

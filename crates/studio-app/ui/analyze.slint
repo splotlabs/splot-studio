@@ -567,6 +567,7 @@ component EvidencePane inherits VerticalLayout {
         }
 
         if root.findings: LinkButton {
+            enabled: !Analysis.reading;
             text: Analysis.validation-running ? "Cancel" : "Validate";
             description: Analysis.validation-running ? "Stop stream validation." : "Run validation on this stream.";
             clicked => {
@@ -1363,7 +1364,7 @@ export component AnalyzeView inherits VerticalLayout {
                 width: root.detail-width;
                 spacing: Tokens.space-1;
 
-                if !Analysis.reading: WorkspaceSwitch {
+                WorkspaceSwitch {
                     options: ["Properties", "Syntax", "Findings"];
                     accessible-label: "Inspector views";
                     selected: Analysis.evidence-tab;
