@@ -74,6 +74,12 @@ pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch) {
     settle(rig, "rectangular partition outlines");
     assert!(
         view(rig)
+            .get_rows()
+            .iter()
+            .any(|row| row.label.contains("PARTITION_HORZ"))
+    );
+    assert!(
+        view(rig)
             .get_outlines()
             .iter()
             .any(|item| item.width == 64 && item.height == 32)

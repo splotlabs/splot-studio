@@ -9,7 +9,7 @@ use splot_core::stream_reader::{ReaderError, TemporalUnitReader};
 use splot_decode::block_evidence::{
     BlockEvidenceCapture, BlockEvidenceData, BlockEvidenceId, BlockEvidenceKind as NativeKind,
     BlockEvidenceRecord, BlockEvidenceRequest, BlockEvidenceStatus, BlockEvidenceTree,
-    BlockTransformId as NativeTransformId,
+    BlockPartition, BlockTransformId as NativeTransformId,
 };
 use splot_decode::{
     DataProps, DecodeError, DecodeLimits, Decoder, ObuLocation, PlaneId, PlaneRect, SendStatus,
@@ -270,7 +270,7 @@ fn native_transform(id: BlockTransformId) -> Result<NativeTransformId, Refusal> 
 fn record(record: &BlockEvidenceRecord) -> Result<BlockRecord, Refusal> {
     let data = match record.data {
         BlockEvidenceData::Partition(split) => BlockData::Partition {
-            split: format!("{split:?}"),
+            split: partition_name(split).to_owned(),
         },
         BlockEvidenceData::Block(facts) => BlockData::Coding {
             has_chroma: facts.has_chroma,
@@ -308,6 +308,21 @@ fn record(record: &BlockEvidenceRecord) -> Result<BlockRecord, Refusal> {
         visible: record.visible.map(wire_rect).transpose()?,
         data,
     })
+}
+
+const fn partition_name(split: BlockPartition) -> &'static str {
+    match split {
+        BlockPartition::None => "PARTITION_NONE",
+        BlockPartition::Horz => "PARTITION_HORZ",
+        BlockPartition::Vert => "PARTITION_VERT",
+        BlockPartition::Horz3 => "PARTITION_HORZ_3",
+        BlockPartition::Vert3 => "PARTITION_VERT_3",
+        BlockPartition::Horz4A => "PARTITION_HORZ_4A",
+        BlockPartition::Horz4B => "PARTITION_HORZ_4B",
+        BlockPartition::Vert4A => "PARTITION_VERT_4A",
+        BlockPartition::Vert4B => "PARTITION_VERT_4B",
+        BlockPartition::Split => "PARTITION_SPLIT",
+    }
 }
 
 fn absolute(location: ObuLocation) -> Option<u64> {
