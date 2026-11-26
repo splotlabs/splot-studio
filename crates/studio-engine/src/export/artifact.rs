@@ -4,6 +4,7 @@
 //! Writes and verifies one temporary artifact before it can be published.
 
 use std::cell::Cell;
+use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -11,7 +12,7 @@ use std::rc::Rc;
 use sha2::{Digest, Sha256};
 use studio_domain::analysis::SourceDigest;
 use studio_domain::export::ExportArtifactKind;
-use studio_domain::job::{FailureCode, WirePath};
+use studio_domain::job::{FailureCode, SourceFingerprint, WirePath};
 use tempfile::NamedTempFile;
 
 use super::check_cancelled;
@@ -65,14 +66,17 @@ impl<'a> Artifact<'a> {
             .sync_all()
             .map_err(|e| failed(self.control, e))?;
         let file = temp.as_file_mut();
+        let fingerprint = fingerprint_of(file)?;
         file.seek(SeekFrom::Start(0))
             .map_err(|e| failed(self.control, e))?;
-        verify_bytes(BufReader::new(file), &expected, self.control)?;
+        verify_bytes(BufReader::new(&mut *file), &expected, self.control)?;
+        check_fingerprint(file, fingerprint)?;
         Ok(Verified {
             kind: self.kind,
             destination: self.destination,
             temp,
             bytes: expected.bytes,
+            fingerprint,
         })
     }
 }
@@ -94,11 +98,37 @@ pub(super) struct Verified {
     destination: PathBuf,
     temp: NamedTempFile,
     pub bytes: u64,
+    fingerprint: SourceFingerprint,
 }
 
 impl Verified {
+    pub fn check(&self) -> Result<(), Stop> {
+        check_fingerprint(self.temp.as_file(), self.fingerprint)
+    }
+
     pub fn publish(self, control: &dyn ExportControl) -> Result<(), Stop> {
         control.publish(self.kind, self.temp, &self.destination)
+    }
+}
+
+fn fingerprint_of(file: &File) -> Result<SourceFingerprint, Stop> {
+    let metadata = file.metadata().map_err(|e| {
+        Stop::failed(
+            FailureCode::VerificationFailed,
+            format!("Cannot inspect the staged export. {e}"),
+        )
+    })?;
+    Ok(SourceFingerprint::of(&metadata))
+}
+
+fn check_fingerprint(file: &File, fingerprint: SourceFingerprint) -> Result<(), Stop> {
+    if fingerprint_of(file)? == fingerprint {
+        Ok(())
+    } else {
+        Err(Stop::failed(
+            FailureCode::VerificationFailed,
+            "The staged export changed after writing.",
+        ))
     }
 }
 
@@ -294,6 +324,36 @@ mod tests {
             matches!(failed(&Control, error), Stop::Failed(problem) if problem.code == FailureCode::Output)
         );
         assert_eq!(writer.finish().1.bytes, 7);
+        Ok(())
+    }
+
+    #[test]
+    fn a_verified_open_file_rejects_an_in_place_edit() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("source.ivf");
+        std::fs::write(&source, b"source")?;
+        let source = FileId::of_path(&source)?;
+        let path = dir.path().join("samples.raw");
+        let mut artifact = Artifact::create(
+            &Control,
+            ExportArtifactKind::Samples,
+            &WirePath::from_path(&path),
+            &source,
+        )
+        .map_err(|e| format!("{e:?}"))?;
+        artifact.write_all(b"samples")?;
+        let verified = artifact.verify().map_err(|e| format!("{e:?}"))?;
+        assert!(verified.check().is_ok());
+
+        let edited = std::fs::OpenOptions::new()
+            .write(true)
+            .open(verified.temp.path())?;
+        edited.set_len(3)?;
+        assert!(matches!(
+            verified.check(),
+            Err(Stop::Failed(problem)) if problem.code == FailureCode::VerificationFailed
+        ));
+        assert!(!path.exists());
         Ok(())
     }
 

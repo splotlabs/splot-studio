@@ -91,6 +91,9 @@ pub(crate) fn run(request: &ExportRequest, control: &dyn ExportControl) -> Resul
     control.claim_publish(progress.exported)?;
     // Publication permission can wait on the application journal.
     source.check()?;
+    for artifact in &verified {
+        artifact.check()?;
+    }
     for artifact in verified {
         artifact.publish(control)?;
     }
