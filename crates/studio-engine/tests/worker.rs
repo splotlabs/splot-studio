@@ -11,8 +11,11 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command as Process, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{Clip, TestResult, leftovers, spec};
+use common::{Clip, TestResult, leftovers, settings, spec};
 use studio_domain::job::{FailureCode, Stage, WirePath};
+use studio_domain::options::{
+    MAX_OPTIONS_PAGE_ITEMS, OPTIONS_SCHEMA_VERSION, OptionRequest, OptionValue,
+};
 use studio_domain::protocol::{
     BuildIdentity, Command, Envelope, ErrorCode, Event, MAX_MESSAGE_BYTES, PROTOCOL_VERSION,
     read_message, write_message,
@@ -163,6 +166,173 @@ fn hello_round_trip() -> TestResult {
     assert_eq!(engine.name, "splot-studio-engine");
     assert_eq!(engine.version, env!("CARGO_PKG_VERSION"));
     assert_eq!(capabilities.encode_outputs, OutputKind::ALL);
+    let identity = capabilities
+        .options
+        .ok_or("missing encoder option identity")?;
+    assert_eq!(identity.schema, OPTIONS_SCHEMA_VERSION);
+    assert_eq!(identity.codec_revision, env!("SPLOT_CODEC_REVISION"));
+    assert!(include_str!("../../../Cargo.lock").contains(&format!(
+        "git+https://github.com/splotlabs/splot?branch=main#{}",
+        identity.codec_revision
+    )));
+    Ok(())
+}
+
+#[test]
+fn describe_options_pages_fit_the_control_budget() -> TestResult {
+    let mut live = Live::spawn()?;
+    let mut first = 0;
+    loop {
+        let request_id = u64::from(first) + 1;
+        live.send(
+            request_id,
+            Command::DescribeOptions {
+                schema: OPTIONS_SCHEMA_VERSION,
+                first,
+                count: MAX_OPTIONS_PAGE_ITEMS,
+            },
+        )?;
+        // `next` checks the frame length before it reads the body.
+        let reply = live.next()?;
+        assert_eq!(reply.request_id, request_id);
+        let Event::OptionsDescribed {
+            first: start,
+            total,
+            options,
+        } = reply.body
+        else {
+            return Err(format!("expected an option descriptor page, got {:?}", reply.body).into());
+        };
+        assert_eq!(start, first);
+        assert!(total > MAX_OPTIONS_PAGE_ITEMS);
+        assert_eq!(
+            u32::try_from(options.len())?,
+            MAX_OPTIONS_PAGE_ITEMS.min(total - first)
+        );
+        first += u32::try_from(options.len())?;
+        if first == total {
+            break;
+        }
+    }
+    drop(live.stdin.take());
+    assert_eq!(live.child.wait()?.code(), Some(0));
+    Ok(())
+}
+
+#[test]
+fn option_queries_reject_schema_and_page_errors_and_keep_serving() -> TestResult {
+    let mut input = frame(
+        1,
+        Command::DescribeOptions {
+            schema: OPTIONS_SCHEMA_VERSION + 1,
+            first: 0,
+            count: 1,
+        },
+    )?;
+    input.extend(frame(
+        2,
+        Command::DescribeOptions {
+            schema: OPTIONS_SCHEMA_VERSION,
+            first: 0,
+            count: MAX_OPTIONS_PAGE_ITEMS + 1,
+        },
+    )?);
+    input.extend(hello_frame(3)?);
+    let output = worker(&input)?;
+    let replies = events(&output)?;
+    assert_eq!(output.status.code(), Some(0));
+    assert!(matches!(
+        replies.as_slice(),
+        [
+            Envelope {
+                request_id: 1,
+                body: Event::OptionsFailed { .. },
+                ..
+            },
+            Envelope {
+                request_id: 2,
+                body: Event::OptionsFailed { .. },
+                ..
+            },
+            Envelope {
+                request_id: 3,
+                body: Event::Hello { .. },
+                ..
+            },
+        ]
+    ));
+    Ok(())
+}
+
+#[test]
+fn resolve_options_pages_fit_the_control_budget() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    for color in ["420", "420p10"] {
+        let path = dir.path().join(format!("source-{color}.y4m"));
+        Clip::new(64, 64, color, 1).write(&path)?;
+        let mut live = Live::spawn()?;
+        live.send(
+            1,
+            Command::Probe {
+                source: WirePath::from_path(&path),
+                video_stream: None,
+            },
+        )?;
+        let Event::Probed { facts } = live.next()?.body else {
+            return Err("expected source facts".into());
+        };
+        let request = OptionRequest {
+            base: settings(OutputKind::Ivf),
+            values: [("preset.rdoq".into(), OptionValue::Bool(false))].into(),
+        };
+        let mut first = 0;
+        let mut saw_requested_value = false;
+        loop {
+            let request_id = u64::from(first) + 2;
+            live.send(
+                request_id,
+                Command::ResolveOptions {
+                    schema: OPTIONS_SCHEMA_VERSION,
+                    source: Box::new(facts.clone()),
+                    settings: request.clone(),
+                    first,
+                    count: MAX_OPTIONS_PAGE_ITEMS,
+                },
+            )?;
+            let reply = live.next()?;
+            assert_eq!(reply.request_id, request_id);
+            let Event::OptionsResolved {
+                first: start,
+                total,
+                values,
+            } = reply.body
+            else {
+                return Err(
+                    format!("expected an effective option page, got {:?}", reply.body).into(),
+                );
+            };
+            assert_eq!(start, first);
+            assert!(total > MAX_OPTIONS_PAGE_ITEMS);
+            assert_eq!(
+                u32::try_from(values.len())?,
+                MAX_OPTIONS_PAGE_ITEMS.min(total - first)
+            );
+            for value in &values {
+                if value.key == "preset.rdoq" {
+                    assert_eq!(value.requested, Some(OptionValue::Bool(false)));
+                    assert_eq!(value.value, OptionValue::Bool(false));
+                    saw_requested_value = true;
+                }
+            }
+            first += u32::try_from(values.len())?;
+            if first == total {
+                break;
+            }
+        }
+        assert!(saw_requested_value);
+        drop(live.stdin.take());
+        assert_eq!(live.child.wait()?.code(), Some(0));
+    }
     Ok(())
 }
 

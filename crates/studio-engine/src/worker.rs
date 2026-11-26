@@ -41,17 +41,18 @@ use std::time::{Duration, Instant};
 
 use splot_encode::CancelToken;
 use studio_domain::job::{Failure, FailureCode, JobSpec};
+use studio_domain::options::OPTIONS_SCHEMA_VERSION;
 use studio_domain::preview::{
     MAX_PICTURE_HEIGHT, MAX_PICTURE_WIDTH, PictureBox, PictureFailure, PictureHeader,
 };
 use studio_domain::protocol::{
-    Command, Envelope, ErrorCode, Event, ProtocolError, decode, read_frame, write_message,
-    write_picture,
+    Command, Envelope, ErrorCode, Event, OptionsIdentity, ProtocolError, decode, read_frame,
+    write_message, write_picture,
 };
 use thiserror::Error;
 
 use crate::job::{self, Control, JOB_STACK_BYTES, Stop};
-use crate::{build_identity, capabilities, live, source};
+use crate::{build_identity, capabilities, live, options, source};
 
 /// The shortest gap between two progress events.
 pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -161,9 +162,47 @@ fn serve<'scope>(
                 id,
                 Event::Hello {
                     engine: build_identity(),
-                    capabilities: capabilities(),
+                    capabilities: studio_domain::protocol::Capabilities {
+                        options: Some(OptionsIdentity {
+                            schema: OPTIONS_SCHEMA_VERSION,
+                            codec_revision: env!("SPLOT_CODEC_REVISION").to_owned(),
+                        }),
+                        ..capabilities()
+                    },
                 },
             ),
+            Command::DescribeOptions {
+                schema,
+                first,
+                count,
+            } => {
+                let event = match options::describe(schema, first, count) {
+                    Ok((total, options)) => Event::OptionsDescribed {
+                        first,
+                        total,
+                        options,
+                    },
+                    Err(error) => Event::OptionsFailed { error },
+                };
+                outbox.reply_options(id, event);
+            }
+            Command::ResolveOptions {
+                schema,
+                source,
+                settings,
+                first,
+                count,
+            } => {
+                let event = match options::resolve(schema, &source, &settings, first, count) {
+                    Ok((total, values)) => Event::OptionsResolved {
+                        first,
+                        total,
+                        values,
+                    },
+                    Err(error) => Event::OptionsFailed { error },
+                };
+                outbox.reply_options(id, event);
+            }
             // A probe runs here, in order with the other replies, bounded by
             // the media tools' timeout; the end of input is seen after it.
             Command::Probe {
@@ -403,6 +442,20 @@ impl Outbox {
         state.push(Envelope::new(request_id, event));
         drop(state);
         self.changed.notify_all();
+    }
+
+    /// Checks the full frame size before it reaches the writer.
+    fn reply_options(&self, request_id: u64, event: Event) {
+        let envelope = Envelope::new(request_id, event);
+        let event = match write_message(&mut std::io::sink(), &envelope) {
+            Ok(()) => envelope.body,
+            Err(ProtocolError::InvalidLength { .. }) => refusal(
+                ErrorCode::PayloadLimit,
+                "The option reply exceeds 64 KiB. Request fewer options.",
+            ),
+            Err(_) => refusal(ErrorCode::Malformed, "Cannot encode the option reply."),
+        };
+        self.reply(request_id, event);
     }
 
     fn feed(&self) -> MutexGuard<'_, Option<live::Feed>> {

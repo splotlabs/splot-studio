@@ -140,6 +140,7 @@ fn capabilities(tool: bool) -> Capabilities {
             origin: MediaToolOrigin::System,
         }),
         analysis_framings: Vec::new(),
+        options: None,
     }
 }
 

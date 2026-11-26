@@ -61,5 +61,6 @@ pub fn capabilities() -> Capabilities {
         encode_outputs: OutputKind::ALL.to_vec(),
         media_tool: media::identity(),
         analysis_framings: vec![Framing::Ivf, Framing::AnnexB],
+        options: None,
     }
 }
