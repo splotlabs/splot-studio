@@ -3,6 +3,7 @@
 
 //! The current crop and its matching rows, as shown by Slint.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
 use slint::Color;
@@ -78,6 +79,13 @@ pub(super) fn render(view: &BlockOverlay<'_>, overlay: &Overlay) {
                 std::cmp::Reverse(i64::from(item.width) * i64::from(item.height)),
             )
         });
+        // The top outline also owns the label when nodes share one origin.
+        let mut labelled = HashSet::with_capacity(outlines.len());
+        for outline in outlines.iter_mut().rev() {
+            if !labelled.insert((outline.x, outline.y)) {
+                outline.label.clear();
+            }
+        }
     }
     if let Some(outlines) = refill(&view.get_outlines(), outlines) {
         view.set_outlines(outlines);
