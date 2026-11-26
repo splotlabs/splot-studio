@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::num::{NonZeroU32, NonZeroUsize};
 
+use splot_encode::config::options::{OPTIONS, OptionClass, OptionDescription, ValueShape};
 use splot_encode::y4m::Y4mHeader;
 use splot_encode::{
     BitDepth, Config, ContentDescription, CroppingWindow, Error, KeyFrameMetadata, PixelFormat,
@@ -68,7 +69,7 @@ fn base_config(
     config.rate_control = RateControlMode::Crf {
         crf: base.crf.get(),
     };
-    config.preset = Preset::new(base.preset.get()).map_err(error)?;
+    config.preset = Preset::new(base.preset.get()).map_err(|cause| error(&config, cause))?;
     Ok(config)
 }
 
@@ -93,7 +94,7 @@ pub(super) fn apply(config: &mut Config, key: &str, value: &OptionValue) -> Resu
         "threads" => config.threads = threads(&Record::new(key, value)?)?,
         "content" => {
             let record = Record::new(key, value)?;
-            record.check_fields(&["timing_info"])?;
+            record.check_record()?;
             if let Some(value) = record.values.get("timing_info") {
                 config.content.timing_info = boolean("content.timing_info", value)?;
             }
@@ -176,20 +177,57 @@ impl<'a> Record<'a> {
         values.iter().map(|value| integer(&path, value)).collect()
     }
 
-    fn mode(&self) -> Result<&'a str, FieldError> {
-        match self.get("mode")? {
-            OptionValue::Choice(mode) => Ok(mode),
-            _ => Err(FieldError::new(self.path("mode"), "Select a mode.")),
-        }
+    fn shape(&self) -> Result<ValueShape, FieldError> {
+        OPTIONS
+            .iter()
+            .find(|description| description.key == self.key)
+            .map(|description| match description.shape {
+                ValueShape::Optional(shape) => *shape,
+                shape => shape,
+            })
+            .ok_or_else(|| self.unsupported_shape())
     }
 
-    fn check_fields(&self, fields: &[&str]) -> Result<(), FieldError> {
-        if let Some(field) = self
-            .values
-            .keys()
-            .find(|key| !fields.contains(&key.as_str()))
-        {
-            return Err(FieldError::new(self.path(field), "Remove this field."));
+    fn unsupported_shape(&self) -> FieldError {
+        FieldError::new(self.key, "Studio cannot edit this option shape.")
+    }
+
+    fn unsupported_mode(&self) -> FieldError {
+        FieldError::new(self.path("mode"), "Select a supported mode.")
+    }
+
+    fn mode(&self) -> Result<&'a str, FieldError> {
+        let OptionValue::Choice(mode) = self.get("mode")? else {
+            return Err(FieldError::new(self.path("mode"), "Select a mode."));
+        };
+        let ValueShape::Choice(variants) = self.shape()? else {
+            return Err(self.unsupported_shape());
+        };
+        let variant = variants
+            .iter()
+            .find(|variant| variant.key == mode)
+            .ok_or_else(|| self.unsupported_mode())?;
+        self.check_fields(variant.fields, true)?;
+        Ok(mode)
+    }
+
+    fn check_record(&self) -> Result<(), FieldError> {
+        let ValueShape::Record(fields) = self.shape()? else {
+            return Err(self.unsupported_shape());
+        };
+        self.check_fields(fields, false)
+    }
+
+    fn check_fields(&self, fields: &[OptionDescription], tagged: bool) -> Result<(), FieldError> {
+        for key in self.values.keys() {
+            if tagged && key == "mode" {
+                continue;
+            }
+            match fields.iter().find(|field| field.key == key) {
+                Some(field) if field.class == OptionClass::Setting => {}
+                Some(_) => return Err(FieldError::new(self.path(key), "This field is read-only.")),
+                None => return Err(FieldError::new(self.path(key), "Remove this field.")),
+            }
         }
         Ok(())
     }
@@ -197,20 +235,6 @@ impl<'a> Record<'a> {
 
 fn rate_control(record: &Record<'_>) -> Result<RateControlMode, FieldError> {
     let mode = record.mode()?;
-    let fields: &[&str] = match mode {
-        "constant_qp" => &["mode", "qp"],
-        "crf" => &["mode", "crf"],
-        "capped_crf" => &["mode", "crf", "max_bitrate_kbps", "buffer_ms", "initial_ms"],
-        "vbr" => &["mode", "bitrate_kbps"],
-        "cbr" => &["mode", "bitrate_kbps", "buffer_ms", "initial_ms"],
-        _ => {
-            return Err(FieldError::new(
-                record.path("mode"),
-                "Select a supported mode.",
-            ));
-        }
-    };
-    record.check_fields(fields)?;
     Ok(match mode {
         "constant_qp" => RateControlMode::ConstantQp {
             qp: record.integer("qp")?,
@@ -227,57 +251,42 @@ fn rate_control(record: &Record<'_>) -> Result<RateControlMode, FieldError> {
         "vbr" => RateControlMode::Vbr {
             bitrate_kbps: record.integer("bitrate_kbps")?,
         },
-        _ => RateControlMode::Cbr {
+        "cbr" => RateControlMode::Cbr {
             bitrate_kbps: record.integer("bitrate_kbps")?,
             buffer_ms: record.integer("buffer_ms")?,
             initial_ms: record.integer("initial_ms")?,
         },
+        _ => return Err(record.unsupported_mode()),
     })
 }
 
 fn tiles(record: &Record<'_>) -> Result<TileLayout, FieldError> {
     match record.mode()? {
-        "uniform" => {
-            record.check_fields(&["mode", "cols_log2", "rows_log2"])?;
-            Ok(TileLayout::Uniform {
-                cols_log2: record.integer("cols_log2")?,
-                rows_log2: record.integer("rows_log2")?,
-            })
-        }
-        "explicit" => {
-            record.check_fields(&["mode", "widths", "heights"])?;
-            Ok(TileLayout::Explicit {
-                widths: record.uints("widths")?,
-                heights: record.uints("heights")?,
-            })
-        }
-        _ => Err(FieldError::new(
-            record.path("mode"),
-            "Select uniform or explicit.",
-        )),
+        "uniform" => Ok(TileLayout::Uniform {
+            cols_log2: record.integer("cols_log2")?,
+            rows_log2: record.integer("rows_log2")?,
+        }),
+        "explicit" => Ok(TileLayout::Explicit {
+            widths: record.uints("widths")?,
+            heights: record.uints("heights")?,
+        }),
+        _ => Err(record.unsupported_mode()),
     }
 }
 
 fn threads(record: &Record<'_>) -> Result<ThreadCount, FieldError> {
     match record.mode()? {
-        "auto" => {
-            record.check_fields(&["mode"])?;
-            Ok(ThreadCount::Auto)
-        }
+        "auto" => Ok(ThreadCount::Auto),
         "fixed" => {
-            record.check_fields(&["mode", "count"])?;
             let count = nonzero("threads.count", NonZeroUsize::new(record.integer("count")?))?;
             Ok(ThreadCount::Fixed(count))
         }
-        _ => Err(FieldError::new(
-            record.path("mode"),
-            "Select auto or fixed.",
-        )),
+        _ => Err(record.unsupported_mode()),
     }
 }
 
 fn metadata(record: &Record<'_>) -> Result<KeyFrameMetadata, FieldError> {
-    record.check_fields(&["icc_profile", "itut_t35", "user_data_unregistered"])?;
+    record.check_record()?;
     let mut remaining = MAX_METADATA_BYTES as usize;
     let mut bytes = |field| {
         let path = record.path(field);
@@ -306,7 +315,7 @@ fn metadata(record: &Record<'_>) -> Result<KeyFrameMetadata, FieldError> {
 }
 
 fn crop(record: &Record<'_>) -> Result<CroppingWindow, FieldError> {
-    record.check_fields(&["left", "right", "top", "bottom"])?;
+    record.check_record()?;
     Ok(CroppingWindow {
         left: record.integer("left")?,
         right: record.integer("right")?,
@@ -464,7 +473,7 @@ fn choice(value: &str) -> OptionValue {
     OptionValue::Choice(value.into())
 }
 
-pub(super) fn error(error: Error) -> FieldError {
+pub(super) fn error(config: &Config, error: Error) -> FieldError {
     let field = match &error {
         Error::InvalidDimensions { .. } => "width".into(),
         Error::UnsupportedChroma { .. } => "chroma".into(),
@@ -476,7 +485,9 @@ pub(super) fn error(error: Error) -> FieldError {
         Error::InvalidBitrate {
             what: "bitrate_kbps",
             ..
-        } => "rate_control".into(),
+        } if matches!(config.rate_control, RateControlMode::CappedCrf { .. }) => {
+            "rate_control.max_bitrate_kbps".into()
+        }
         Error::InvalidBitrate { what, .. } => format!("rate_control.{what}"),
         Error::InvalidInitialBuffer { .. } => "rate_control.initial_ms".into(),
         Error::LosslessWith { what } if what == "film grain" => "film_grain".into(),
@@ -558,6 +569,27 @@ mod tests {
     }
 
     #[test]
+    fn capped_rate_errors_identify_the_maximum_bitrate_field() -> Result<(), FieldError> {
+        let mut config = Config::new(64, 64);
+        apply(
+            &mut config,
+            "rate_control",
+            &record([
+                ("mode", choice("capped_crf")),
+                ("crf", number(20)),
+                ("max_bitrate_kbps", number(0)),
+                ("buffer_ms", number(500)),
+                ("initial_ms", number(0)),
+            ]),
+        )?;
+        assert!(matches!(
+            config.validate(),
+            Err(cause) if error(&config, cause).field == "rate_control.max_bitrate_kbps"
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn reject_invalid_record_fields_and_preserve_config() {
         let mut config = Config::new(64, 64);
         let original = config.clone();
@@ -570,6 +602,11 @@ mod tests {
                     ("qp", number(80)),
                 ]),
                 "rate_control.qp",
+            ),
+            (
+                "content",
+                record([("full_range", OptionValue::Bool(true))]),
+                "content.full_range",
             ),
             ("keyint", number(0), "keyint"),
             ("bit_depth", number(10), "bit_depth"),
