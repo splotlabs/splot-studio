@@ -22,6 +22,8 @@ use studio_domain::protocol::{
     BuildIdentity, Command, Envelope, ErrorCode, Event, read_message, write_message,
 };
 use studio_domain::settings::OutputKind;
+use studio_domain::syntax::{SYNTAX_SCHEMA, SyntaxEvent, SyntaxValue};
+use studio_domain::validation::{VALIDATION_SCHEMA, ValidationCompletion, ValidationSettings};
 
 const BIN: &str = env!("CARGO_BIN_EXE_splot-studio-engine");
 
@@ -270,8 +272,152 @@ fn real_outputs_in_both_framings_and_depths() -> TestResult {
             file[start..start + usize::try_from(span.len)?]
         );
 
+        for (document, elements) in [(ivf_doc, &ivf_elements), (obu_doc, &obu_elements)] {
+            check_sequence_syntax(&mut inspect, document, elements)?;
+            check_validation_pages(&mut inspect, document)?;
+        }
+
         locate_and_filter(&mut inspect, ivf_doc, &ivf_summary, &ivf_elements, frames)?;
     }
+    Ok(())
+}
+
+fn check_sequence_syntax(inspect: &mut Inspect, document: u64, elements: &[Element]) -> TestResult {
+    let (element, obu) = elements
+        .iter()
+        .enumerate()
+        .find_map(|(index, element)| match element {
+            Element::Obu { obu } if obu.type_name == "OBU_SEQUENCE_HEADER" => {
+                Some((index as u64, obu))
+            }
+            _ => None,
+        })
+        .ok_or("no sequence header")?;
+    let trace = inspect.next_id;
+    let Event::AnalysisSyntaxReady {
+        document: generation,
+        element: selected,
+        summary,
+        total,
+    } = inspect.ask(Command::AnalysisSyntax { document, element })?
+    else {
+        return Err("expected syntax evidence".into());
+    };
+    assert_eq!(
+        (generation, selected, total),
+        (document, element, summary.retained_events)
+    );
+    assert_eq!(summary.schema_version, SYNTAX_SCHEMA);
+    assert!(total > 3);
+    let mut retained = Vec::new();
+    while (retained.len() as u64) < total {
+        let first = retained.len() as u64;
+        let Event::AnalysisSyntaxPage {
+            document: generation,
+            trace: identity,
+            element: selected,
+            first: at,
+            total: available,
+            events,
+        } = inspect.ask(Command::AnalysisSyntaxPage {
+            document,
+            trace,
+            first,
+            count: 7,
+        })?
+        else {
+            return Err("expected syntax page".into());
+        };
+        assert_eq!(
+            (generation, identity, selected, at, available),
+            (document, trace, element, first, total)
+        );
+        assert!(!events.is_empty() && events.len() <= 7);
+        retained.extend(events);
+    }
+    assert_eq!(retained.len() as u64, total);
+    assert!(retained.iter().any(|event| matches!(
+        event,
+        SyntaxEvent::Signaled { name, value: SyntaxValue::Unsigned(value), span: Some(span), .. }
+        if name == "obu_type" && *value == u64::from(obu.obu_type)
+            && span.bit_len == 5
+            && span.start.file_bit == obu.header.offset * 8 + 1
+            && span.start.stream_bit == (obu.stream.offset + obu.length_prefix.len) * 8 + 1
+    )));
+    assert!(
+        retained
+            .iter()
+            .any(|event| matches!(event, SyntaxEvent::Absent { .. }))
+    );
+
+    assert!(matches!(
+        inspect.ask(Command::AnalysisSyntax { document, element })?,
+        Event::AnalysisSyntaxReady { .. }
+    ));
+    assert_eq!(
+        failure(&inspect.ask(Command::AnalysisSyntaxPage {
+            document,
+            trace,
+            first: 0,
+            count: 1
+        })?),
+        Some(AnalysisFailure::InvalidRequest),
+    );
+    Ok(())
+}
+
+fn check_validation_pages(inspect: &mut Inspect, document: u64) -> TestResult {
+    let start = || Command::AnalysisValidate {
+        document,
+        settings: ValidationSettings::default(),
+    };
+    let validation = inspect.next_id;
+    let Event::AnalysisValidated {
+        document: generation,
+        total,
+        ..
+    } = inspect.ask(start())?
+    else {
+        return Err("expected a validation report".into());
+    };
+    assert_eq!(generation, document);
+    let findings = |validation, first, count| Command::AnalysisFindings {
+        document,
+        validation,
+        first,
+        count,
+    };
+    let mut first = 0;
+    loop {
+        let Event::AnalysisFindings {
+            document: generation,
+            validation: identity,
+            first: at,
+            total: available,
+            findings: entries,
+        } = inspect.ask(findings(validation, first, 2))?
+        else {
+            return Err("expected validation findings".into());
+        };
+        assert_eq!(
+            (generation, identity, at, available),
+            (document, validation, first, total)
+        );
+        assert!(entries.len() <= 2);
+        assert_eq!(entries.is_empty(), total == 0);
+        first += entries.len() as u64;
+        if first >= total {
+            assert_eq!(first, total);
+            break;
+        }
+    }
+    assert!(
+        matches!(inspect.ask(start())?, Event::AnalysisValidated { total: next, .. } if next == total)
+    );
+    assert_eq!(
+        failure(&inspect.ask(findings(validation, 0, 1))?),
+        Some(AnalysisFailure::InvalidRequest),
+    );
     Ok(())
 }
 
@@ -497,6 +643,15 @@ fn versions_foreign_commands_and_the_document_limit() -> TestResult {
         matches!(hello, Event::Hello { ref capabilities, .. } if capabilities.analysis_framings == [Framing::Ivf, Framing::AnnexB]),
         "{hello:?}"
     );
+    let Event::Hello { capabilities, .. } = hello else {
+        return Err("expected inspect capabilities".into());
+    };
+    let identity = capabilities
+        .analysis_evidence
+        .ok_or("expected evidence schema")?;
+    assert_eq!(identity.syntax_schema, SYNTAX_SCHEMA);
+    assert_eq!(identity.validation_schema, VALIDATION_SCHEMA);
+    assert_eq!(identity.codec_revision, env!("SPLOT_CODEC_REVISION"));
     let body = br#"{"protocol_version":999,"request_id":77,"body":{"type":"analysis_close","document":1}}"#;
     let mut frame = u32::try_from(body.len())?.to_le_bytes().to_vec();
     frame.extend_from_slice(body);
@@ -612,6 +767,14 @@ fn a_changed_source_closes_its_document() -> TestResult {
     fs::write(&path, [0x01, 0x08])?;
     let mut inspect = Inspect::spawn()?;
     inspect.open(1, &path)?;
+    let validation = inspect.next_id;
+    assert!(matches!(
+        inspect.ask(Command::AnalysisValidate {
+            document: 1,
+            settings: ValidationSettings::default()
+        })?,
+        Event::AnalysisValidated { .. },
+    ));
     fs::OpenOptions::new()
         .append(true)
         .open(&path)?
@@ -623,7 +786,12 @@ fn a_changed_source_closes_its_document() -> TestResult {
         count: 1,
     };
     assert_eq!(
-        failure(&inspect.ask(page())?),
+        failure(&inspect.ask(Command::AnalysisFindings {
+            document: 1,
+            validation,
+            first: 0,
+            count: 1
+        })?),
         Some(AnalysisFailure::SourceChanged)
     );
     assert_eq!(
@@ -740,5 +908,82 @@ fn a_document_closed_while_read_frees_its_slot() -> TestResult {
         ),
         "{answers:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn cancellation_targets_one_validation_request() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("long.obu");
+    long_stream(&path)?;
+    let mut inspect = Inspect::spawn()?;
+    inspect.open(1, &path)?;
+    let validate = |document| Command::AnalysisValidate {
+        document,
+        settings: ValidationSettings::default(),
+    };
+    let validation = inspect.next_id;
+    let [request, wrong_generation, cancel, other] = inspect.send(vec![
+        validate(1),
+        Command::AnalysisCancelValidation {
+            document: 2,
+            validation,
+        },
+        Command::AnalysisCancelValidation {
+            document: 1,
+            validation,
+        },
+        validate(1),
+    ])?[..] else {
+        return Err("expected four request IDs".into());
+    };
+    let mut answers = Vec::new();
+    for _ in 0..4 {
+        answers.push(inspect.next()?);
+    }
+    let event = |id| {
+        answers
+            .iter()
+            .find(|answer| answer.request_id == id)
+            .map(|answer| &answer.body)
+    };
+    assert!(matches!(
+        event(wrong_generation),
+        Some(Event::Error {
+            code: ErrorCode::WrongState,
+            ..
+        })
+    ));
+    let Some(Event::AnalysisValidated { summary, .. }) = event(request) else {
+        return Err(format!("expected first validation report: {answers:?}").into());
+    };
+    match event(cancel) {
+        Some(Event::CancelRequested) => {
+            // If collection ended before the cancellation reached it, the completed
+            // result can follow the acknowledgement.
+            let response = answers
+                .iter()
+                .position(|answer| answer.request_id == request);
+            let ack = answers
+                .iter()
+                .position(|answer| answer.request_id == cancel);
+            assert!(ack < response);
+        }
+        Some(Event::Error {
+            code: ErrorCode::WrongState,
+            ..
+        }) => {
+            assert!(!matches!(
+                summary.completion,
+                ValidationCompletion::Cancelled
+            ));
+        }
+        _ => return Err(format!("unexpected cancellation response: {answers:?}").into()),
+    }
+    assert!(matches!(
+        event(other),
+        Some(Event::AnalysisValidated { summary, .. })
+          if !matches!(summary.completion, ValidationCompletion::Cancelled),
+    ));
     Ok(())
 }

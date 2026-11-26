@@ -293,6 +293,10 @@ impl Activity {
             | Event::AnalysisPage { .. }
             | Event::AnalysisLocated { .. }
             | Event::AnalysisBytes { .. }
+            | Event::AnalysisSyntaxReady { .. }
+            | Event::AnalysisSyntaxPage { .. }
+            | Event::AnalysisValidated { .. }
+            | Event::AnalysisFindings { .. }
             | Event::AnalysisClosed { .. }
             | Event::AnalysisFailed { .. } => Step::IGNORED,
         }

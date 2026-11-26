@@ -6,24 +6,26 @@
 //!
 //! Two threads. The caller's thread reads commands and never touches a
 //! file: it answers `Hello`, refuses what this process does not serve,
-//! decides `AnalysisCancel`, and queues analysis requests for the work
+//! handles cancellation, and queues analysis requests for the work
 //! thread (at most [`REQUEST_BACKLOG`]; a request beyond that is refused, so
 //! a cancel is always read). The work thread serves the requests in order,
 //! with at most [`MAX_DOCUMENTS`] documents open. Both write their replies
 //! under one lock, each frame whole. The process ends at the end of its
 //! input, which cancels every open not yet answered.
 //!
-//! The [`Ledger`] holds the opens that are queued or running and not yet
-//! answered, and which of them are cancelled. A cancel is accepted only for
-//! such an open, and a cancel that comes after the open's answer is refused:
-//! both are decided under the same lock. A cancelled open stops reading at
+//! The [`Ledger`] records open and validation requests until the work thread
+//! answers them. The ledger serializes cancellation and completion. A request
+//! that already has an answer cannot be cancelled. A cancelled open stops reading at
 //! the next unit and is answered with what it read before, as a document
 //! whose outcome is stopped by [`ProblemKind::Cancelled`] (or, when the read
 //! finished first, with the whole document). Only an open cancelled before
 //! its framing was known is answered [`AnalysisFailure::Cancelled`].
-//! Cancelling one document never touches another.
+//! Validation also keeps completed evidence when cancelled. A cancel targets
+//! the document generation and the request ID of the pending validation.
 
 pub mod document;
+mod syntax;
+mod validation;
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,8 +38,11 @@ use studio_domain::analysis::ProblemKind;
 use studio_domain::analysis::{AnalysisFailure, LocateTarget, RowFilter};
 use studio_domain::job::WirePath;
 use studio_domain::protocol::{
-    Command, Envelope, ErrorCode, Event, ProtocolError, decode, read_frame, write_message,
+    AnalysisEvidenceIdentity, Command, Envelope, ErrorCode, Event, ProtocolError, decode,
+    read_frame, write_message,
 };
+use studio_domain::syntax::SYNTAX_SCHEMA;
+use studio_domain::validation::{VALIDATION_SCHEMA, ValidationSettings};
 
 use self::document::{Document, Refusal};
 use crate::job::JOB_STACK_BYTES;
@@ -97,9 +102,15 @@ pub fn run(input: &mut impl Read, output: impl Write + Send) -> Result<(), Sessi
 /// One request for the work thread.
 #[derive(Debug)]
 enum Request {
-    Open {
-        source: WirePath,
-    },
+    Open { source: WirePath },
+    Validate { settings: ValidationSettings },
+    Inspect(Query),
+    Close,
+}
+
+/// Reads the selected document on the work thread.
+#[derive(Debug)]
+enum Query {
     Page {
         filter: RowFilter,
         first: u64,
@@ -113,7 +124,19 @@ enum Request {
         offset: u64,
         len: u32,
     },
-    Close,
+    Syntax {
+        element: u64,
+    },
+    SyntaxPage {
+        trace: u64,
+        first: u64,
+        count: u32,
+    },
+    Findings {
+        validation: u64,
+        first: u64,
+        count: u32,
+    },
 }
 
 /// A queued request: its `request_id`, its document and what it asks.
@@ -122,7 +145,7 @@ type Queued = (u64, u64, Request);
 struct Shared<W> {
     out: Mutex<Out<W>>,
     ledger: Mutex<Ledger>,
-    /// The input ended or the output failed: every open is cancelled.
+    /// The input ended or the output failed. Cancel all pending operations.
     stopped: AtomicBool,
 }
 
@@ -132,50 +155,51 @@ struct Out<W> {
     error: Option<ProtocolError>,
 }
 
-/// The opens not yet answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    Open(u64),
+    Validation { document: u64, validation: u64 },
+}
+
+/// Long operations that the reader can cancel.
 #[derive(Debug, Default)]
 struct Ledger {
     /// The newest document id an open was queued for.
     newest: u64,
-    /// Opens queued or running and not yet answered: at most the queue's
-    /// capacity and the one running.
-    pending: Vec<u64>,
-    /// Those of them that were cancelled.
-    cancelled: Vec<u64>,
+    /// At most the queue capacity and the one request running.
+    pending: Vec<(Pending, bool)>,
 }
 
 impl Ledger {
-    /// Whether `document` is newer than every open queued before.
     fn admits(&self, document: u64) -> bool {
         document > self.newest
     }
 
-    /// Records an open that [`Self::admits`] and the queue took. An open the
-    /// queue refused is not recorded, so its id stays free for a retry.
-    fn queue(&mut self, document: u64) {
+    fn queue_open(&mut self, document: u64) {
         self.newest = document;
-        self.pending.push(document);
+        self.pending.push((Pending::Open(document), false));
     }
 
-    /// Cancels `document`'s open; `false` when it is not pending.
-    fn cancel(&mut self, document: u64) -> bool {
-        if !self.pending.contains(&document) {
+    fn contains(&self, request: Pending) -> bool {
+        self.pending.iter().any(|(pending, _)| *pending == request)
+    }
+
+    fn cancel(&mut self, request: Pending) -> bool {
+        let Some((_, cancelled)) = self.pending.iter_mut().find(|(id, _)| *id == request) else {
             return false;
-        }
-        if !self.cancelled.contains(&document) {
-            self.cancelled.push(document);
-        }
+        };
+        *cancelled = true;
         true
     }
 
-    fn is_cancelled(&self, document: u64) -> bool {
-        self.cancelled.contains(&document)
+    fn is_cancelled(&self, request: Pending) -> bool {
+        self.pending
+            .iter()
+            .any(|(id, cancelled)| *id == request && *cancelled)
     }
 
-    /// Marks `document`'s open answered.
-    fn settle(&mut self, document: u64) {
-        self.pending.retain(|d| *d != document);
-        self.cancelled.retain(|d| *d != document);
+    fn settle(&mut self, request: Pending) {
+        self.pending.retain(|(id, _)| *id != request);
     }
 }
 
@@ -193,7 +217,16 @@ impl<W: Write> Shared<W> {
         if out.error.is_some() {
             return;
         }
-        if let Err(error) = write_message(&mut out.writer, &Envelope::new(request_id, event)) {
+        let mut written = write_message(&mut out.writer, &Envelope::new(request_id, event));
+        if matches!(written, Err(ProtocolError::InvalidLength { .. })) {
+            // An oversized reply has written no bytes. Keep the stream usable.
+            let reply = refusal(
+                ErrorCode::PayloadLimit,
+                "The reply exceeds the message limit.",
+            );
+            written = write_message(&mut out.writer, &Envelope::new(request_id, reply));
+        }
+        if let Err(error) = written {
             out.error = Some(error);
             // Nobody can hear an open finish any more.
             self.stopped.store(true, Ordering::SeqCst);
@@ -204,8 +237,20 @@ impl<W: Write> Shared<W> {
         self.stopped.load(Ordering::SeqCst)
     }
 
-    fn cancelled(&self, document: u64) -> bool {
-        self.stopped() || self.ledger().is_cancelled(document)
+    fn cancelled(&self, request: Pending) -> bool {
+        self.stopped() || self.ledger().is_cancelled(request)
+    }
+
+    fn cancel(&self, id: u64, request: Pending) {
+        let mut ledger = self.ledger();
+        let reply = if ledger.cancel(request) {
+            Event::CancelRequested
+        } else {
+            refusal(ErrorCode::WrongState, "The operation is no longer pending.")
+        };
+        // Serialize the acknowledgement with the terminal response.
+        self.send(id, reply);
+        drop(ledger);
     }
 }
 
@@ -251,24 +296,33 @@ fn serve<W: Write>(
                     id,
                     Event::Hello {
                         engine: build_identity(),
-                        capabilities: capabilities(),
+                        capabilities: studio_domain::protocol::Capabilities {
+                            analysis_evidence: Some(AnalysisEvidenceIdentity {
+                                syntax_schema: SYNTAX_SCHEMA,
+                                validation_schema: VALIDATION_SCHEMA,
+                                codec_revision: env!("SPLOT_CODEC_REVISION").into(),
+                            }),
+                            ..capabilities()
+                        },
                     },
                 );
                 continue;
             }
             Command::AnalysisCancel { document } => {
-                let mut ledger = shared.ledger();
-                let reply = if ledger.cancel(document) {
-                    Event::CancelRequested
-                } else {
-                    refusal(
-                        ErrorCode::WrongState,
-                        format!("document {document} is not being opened"),
-                    )
-                };
-                // Under the ledger, so the open's answer cannot overtake it.
-                shared.send(id, reply);
-                drop(ledger);
+                shared.cancel(id, Pending::Open(document));
+                continue;
+            }
+            Command::AnalysisCancelValidation {
+                document,
+                validation,
+            } => {
+                shared.cancel(
+                    id,
+                    Pending::Validation {
+                        document,
+                        validation,
+                    },
+                );
                 continue;
             }
             Command::DescribeOptions { .. }
@@ -302,22 +356,55 @@ fn serve<W: Write>(
                 count,
             } => (
                 document,
-                Request::Page {
+                Request::Inspect(Query::Page {
                     filter,
                     first,
                     count,
-                },
+                }),
             ),
             Command::AnalysisLocate {
                 document,
                 filter,
                 target,
-            } => (document, Request::Locate { filter, target }),
+            } => (document, Request::Inspect(Query::Locate { filter, target })),
             Command::AnalysisBytes {
                 document,
                 offset,
                 len,
-            } => (document, Request::Bytes { offset, len }),
+            } => (document, Request::Inspect(Query::Bytes { offset, len })),
+            Command::AnalysisSyntax { document, element } => {
+                (document, Request::Inspect(Query::Syntax { element }))
+            }
+            Command::AnalysisSyntaxPage {
+                document,
+                trace,
+                first,
+                count,
+            } => (
+                document,
+                Request::Inspect(Query::SyntaxPage {
+                    trace,
+                    first,
+                    count,
+                }),
+            ),
+            Command::AnalysisValidate { document, settings } => {
+                queue_validation(shared, requests, id, document, settings);
+                continue;
+            }
+            Command::AnalysisFindings {
+                document,
+                validation,
+                first,
+                count,
+            } => (
+                document,
+                Request::Inspect(Query::Findings {
+                    validation,
+                    first,
+                    count,
+                }),
+            ),
             Command::AnalysisClose { document } => (document, Request::Close),
         };
         if requests.try_send((id, document, request)).is_err() {
@@ -357,7 +444,42 @@ fn queue_open<W: Write>(
         .try_send((id, document, Request::Open { source }))
         .is_ok()
     {
-        ledger.queue(document);
+        ledger.queue_open(document);
+    } else {
+        drop(ledger);
+        busy(shared, id, document);
+    }
+}
+
+fn queue_validation<W: Write>(
+    shared: &Shared<W>,
+    requests: &SyncSender<Queued>,
+    id: u64,
+    document: u64,
+    settings: ValidationSettings,
+) {
+    let operation = Pending::Validation {
+        document,
+        validation: id,
+    };
+    let mut ledger = shared.ledger();
+    if ledger.contains(operation) {
+        drop(ledger);
+        shared.send(
+            id,
+            failed(
+                document,
+                Refusal::new(
+                    AnalysisFailure::InvalidRequest,
+                    "This validation request ID is already pending.",
+                ),
+            ),
+        );
+    } else if requests
+        .try_send((id, document, Request::Validate { settings }))
+        .is_ok()
+    {
+        ledger.pending.push((operation, false));
     } else {
         drop(ledger);
         busy(shared, id, document);
@@ -386,55 +508,130 @@ fn work<W: Write>(queue: &Receiver<Queued>, shared: &Shared<W>) {
                 format!("document {document} is not open"),
             )
         };
-        let answer = match (request, open) {
-            (Request::Open { source }, _) => {
+        let answer = match request {
+            Request::Open { source } => {
                 open_document(shared, &mut documents, id, document, &source);
                 continue;
             }
-            (_, None) => failed(document, unknown()),
-            (
-                Request::Page {
-                    filter,
-                    first,
-                    count,
-                },
-                Some(at),
-            ) => match documents[at].1.page(filter, first, count) {
-                Ok((total, rows)) => Event::AnalysisPage {
+            Request::Validate { settings } => {
+                let operation = Pending::Validation {
                     document,
-                    first,
-                    total,
-                    rows,
-                },
-                Err(refusal) => dropped(&mut documents, at, document, refusal),
+                    validation: id,
+                };
+                let answer = match open {
+                    Some(at) => match documents[at]
+                        .1
+                        .validate(id, &settings, &|| shared.cancelled(operation))
+                    {
+                        Ok((summary, total)) => Event::AnalysisValidated {
+                            document,
+                            summary: Box::new(summary),
+                            total,
+                        },
+                        Err(refusal) => dropped(&mut documents, at, document, refusal),
+                    },
+                    None => failed(document, unknown()),
+                };
+                let mut ledger = shared.ledger();
+                ledger.settle(operation);
+                shared.send(id, answer);
+                drop(ledger);
+                continue;
+            }
+            Request::Close => match open {
+                Some(at) => {
+                    documents.remove(at);
+                    Event::AnalysisClosed { document }
+                }
+                None => failed(document, unknown()),
             },
-            (Request::Locate { filter, target }, Some(at)) => {
-                match documents[at].1.locate(filter, target) {
-                    Ok((row, found)) => Event::AnalysisLocated {
-                        document,
-                        row,
-                        found: Box::new(found),
-                    },
+            Request::Inspect(query) => match open {
+                Some(at) => match serve_document(&mut documents[at].1, document, id, query) {
+                    Ok(answer) => answer,
                     Err(refusal) => dropped(&mut documents, at, document, refusal),
-                }
-            }
-            (Request::Bytes { offset, len }, Some(at)) => {
-                match documents[at].1.bytes(offset, len) {
-                    Ok(bytes) => Event::AnalysisBytes {
-                        document,
-                        offset,
-                        bytes,
-                    },
-                    Err(refusal) => dropped(&mut documents, at, document, refusal),
-                }
-            }
-            (Request::Close, Some(at)) => {
-                documents.remove(at);
-                Event::AnalysisClosed { document }
-            }
+                },
+                None => failed(document, unknown()),
+            },
         };
         shared.send(id, answer);
     }
+}
+
+fn serve_document(
+    doc: &mut Document,
+    document: u64,
+    id: u64,
+    query: Query,
+) -> Result<Event, Refusal> {
+    Ok(match query {
+        Query::Page {
+            filter,
+            first,
+            count,
+        } => {
+            let (total, rows) = doc.page(filter, first, count)?;
+            Event::AnalysisPage {
+                document,
+                first,
+                total,
+                rows,
+            }
+        }
+        Query::Locate { filter, target } => {
+            let (row, found) = doc.locate(filter, target)?;
+            Event::AnalysisLocated {
+                document,
+                row,
+                found: Box::new(found),
+            }
+        }
+        Query::Bytes { offset, len } => {
+            let bytes = doc.bytes(offset, len)?;
+            Event::AnalysisBytes {
+                document,
+                offset,
+                bytes,
+            }
+        }
+        Query::Syntax { element } => {
+            let (summary, total) = doc.syntax(id, element)?;
+            Event::AnalysisSyntaxReady {
+                document,
+                element,
+                summary: Box::new(summary),
+                total,
+            }
+        }
+        Query::SyntaxPage {
+            trace,
+            first,
+            count,
+        } => {
+            let (element, page) = doc.syntax_page(trace, first, count)?;
+            Event::AnalysisSyntaxPage {
+                document,
+                trace,
+                element,
+                first,
+                total: page.total,
+                events: page.entries,
+            }
+        }
+        Query::Findings {
+            validation,
+            first,
+            count,
+        } => {
+            let page = doc.findings(validation, first, count)?;
+            Event::AnalysisFindings {
+                document,
+                validation,
+                first,
+                total: page.total,
+                findings: page.entries,
+            }
+        }
+    })
 }
 
 /// The failure of a request on an open document; a changed source closes it.
@@ -457,7 +654,8 @@ fn open_document<W: Write>(
     document: u64,
     source: &WirePath,
 ) {
-    let opened = if shared.cancelled(document) {
+    let operation = Pending::Open(document);
+    let opened = if shared.cancelled(operation) {
         // Not started: its answer is decided below.
         None
     } else if documents.len() >= MAX_DOCUMENTS {
@@ -466,10 +664,10 @@ fn open_document<W: Write>(
             format!("{MAX_DOCUMENTS} documents are open; close one first"),
         )))
     } else {
-        Some(Document::open(source, &|| shared.cancelled(document)))
+        Some(Document::open(source, &|| shared.cancelled(operation)))
     };
     let mut ledger = shared.ledger();
-    ledger.settle(document);
+    ledger.settle(operation);
     let answer = match opened {
         // A cancelled read keeps what it read: the outcome says it stopped.
         Some(Ok(opened)) => {
@@ -491,13 +689,13 @@ fn open_document<W: Write>(
 
 #[cfg(test)]
 mod tests {
-    use super::Ledger;
+    use super::{Ledger, Pending};
 
     /// Queues `document` as the reader does when the queue takes it.
     fn queued(ledger: &mut Ledger, document: u64) -> bool {
         let admitted = ledger.admits(document);
         if admitted {
-            ledger.queue(document);
+            ledger.queue_open(document);
         }
         admitted
     }
@@ -507,23 +705,23 @@ mod tests {
         let mut ledger = Ledger::default();
         // Cancelled before it starts, then answered.
         assert!(queued(&mut ledger, 1));
-        assert!(ledger.cancel(1));
-        assert!(ledger.is_cancelled(1));
-        ledger.settle(1);
+        assert!(ledger.cancel(Pending::Open(1)));
+        assert!(ledger.is_cancelled(Pending::Open(1)));
+        ledger.settle(Pending::Open(1));
         // After the answer, a cancel is refused.
-        assert!(!ledger.cancel(1) && !ledger.is_cancelled(1));
+        assert!(!ledger.cancel(Pending::Open(1)) && !ledger.is_cancelled(Pending::Open(1)));
         // Answered first: not cancelled, and a later cancel is refused.
         assert!(queued(&mut ledger, 2));
-        assert!(!ledger.is_cancelled(2));
-        ledger.settle(2);
-        assert!(!ledger.cancel(2));
+        assert!(!ledger.is_cancelled(Pending::Open(2)));
+        ledger.settle(Pending::Open(2));
+        assert!(!ledger.cancel(Pending::Open(2)));
         // Cancelling one pending open leaves the other alone.
         assert!(queued(&mut ledger, 3) && queued(&mut ledger, 4));
-        assert!(ledger.cancel(4));
-        assert!(!ledger.is_cancelled(3) && ledger.is_cancelled(4));
+        assert!(ledger.cancel(Pending::Open(4)));
+        assert!(!ledger.is_cancelled(Pending::Open(3)) && ledger.is_cancelled(Pending::Open(4)));
         // Ids only increase; an id never sent is not pending.
         assert!(!ledger.admits(4) && !ledger.admits(2));
-        assert!(!ledger.cancel(9));
+        assert!(!ledger.cancel(Pending::Open(9)));
     }
 
     /// An open the full queue refused is not recorded: its id can be sent
@@ -534,8 +732,8 @@ mod tests {
         assert!(queued(&mut ledger, 1));
         // The queue refuses document 5: the reader checks and records nothing.
         assert!(ledger.admits(5));
-        assert!(!ledger.cancel(5));
+        assert!(!ledger.cancel(Pending::Open(5)));
         assert!(queued(&mut ledger, 5));
-        assert!(ledger.cancel(5));
+        assert!(ledger.cancel(Pending::Open(5)));
     }
 }

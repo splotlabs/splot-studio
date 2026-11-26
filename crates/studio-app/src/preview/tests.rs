@@ -705,6 +705,7 @@ fn the_scene_follows_the_file_from_source_to_live_to_result() {
             encode_outputs: studio_domain::settings::OutputKind::ALL.to_vec(),
             media_tool: None,
             analysis_framings: Vec::new(),
+            analysis_evidence: None,
             options: None,
         })),
     );

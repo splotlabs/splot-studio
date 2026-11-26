@@ -50,6 +50,10 @@ use studio_domain::protocol::MAX_MESSAGE_BYTES;
 use crate::output::FileId;
 use crate::source;
 
+mod evidence;
+
+use evidence::Evidence;
+
 /// The largest unit read: one Annex B OBU, or one IVF frame payload. The
 /// same cap as the preview's result reader; a larger declared unit stops
 /// reading as [`ProblemKind::LimitReached`].
@@ -117,6 +121,7 @@ pub struct Document {
     id: FileId,
     summary: DocumentSummary,
     items: Vec<Item>,
+    evidence: Evidence,
 }
 
 impl Document {
@@ -165,6 +170,7 @@ impl Document {
             file,
             id,
             items: scanned.items,
+            evidence: Evidence::default(),
         };
         document.check()?;
         Ok(document)
@@ -984,6 +990,16 @@ fn read_range(
             format!("a byte range is 1 to {MAX_BYTE_RANGE} bytes, not {len}"),
         ));
     }
+    read_file_range(file, file_len, offset, len)
+}
+
+/// Reads a range after the caller applies the applicable allocation limit.
+fn read_file_range(
+    file: &mut (impl Read + Seek),
+    file_len: u64,
+    offset: u64,
+    len: u32,
+) -> Result<Vec<u8>, Refusal> {
     if offset
         .checked_add(u64::from(len))
         .is_none_or(|end| end > file_len)
@@ -993,7 +1009,7 @@ fn read_range(
             format!("bytes {offset} + {len} are not inside the file of {file_len} bytes"),
         ));
     }
-    // `len` is at most MAX_BYTE_RANGE, so this allocation is bounded.
+    // The caller bounds the allocation.
     let mut bytes = vec![0; len as usize];
     file.seek(SeekFrom::Start(offset))
         .and_then(|_| file.read_exact(&mut bytes))

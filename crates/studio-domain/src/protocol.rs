@@ -30,9 +30,11 @@ use crate::preview::{
     PictureView,
 };
 use crate::settings::OutputKind;
+use crate::syntax::{SyntaxEvent, SyntaxSummary};
+use crate::validation::{Finding, ValidationSettings, ValidationSummary};
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -92,8 +94,21 @@ pub struct Capabilities {
     pub media_tool: Option<MediaTool>,
     /// The framings the inspect process reads.
     pub analysis_framings: Vec<Framing>,
+    /// Syntax and validation schemas available from the inspect process.
+    pub analysis_evidence: Option<AnalysisEvidenceIdentity>,
     /// The encoder option schema available from the job worker.
     pub options: Option<OptionsIdentity>,
+}
+
+/// Identifies the inspect process's syntax and validation evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalysisEvidenceIdentity {
+    /// The syntax schema.
+    pub syntax_schema: u16,
+    /// The validation schema.
+    pub validation_schema: u16,
+    /// The full Git revision of Splot in this engine.
+    pub codec_revision: String,
 }
 
 /// Identifies the job worker's encoder option metadata.
@@ -293,6 +308,49 @@ pub enum Command {
         /// At most [`crate::analysis::MAX_BYTE_RANGE`], at least one.
         len: u32,
     },
+    /// Inspect process only. Collects syntax for one indexed OBU.
+    AnalysisSyntax {
+        /// The document generation.
+        document: u64,
+        /// The unfiltered index of the OBU element.
+        element: u64,
+    },
+    /// Inspect process only. Reads retained events from a syntax trace.
+    AnalysisSyntaxPage {
+        /// The document generation.
+        document: u64,
+        /// The request ID of the latest successful syntax request.
+        trace: u64,
+        /// The first event, or zero for an empty trace.
+        first: u64,
+        /// The maximum number of events, in `1..=MAX_PAGE_ELEMENTS`.
+        count: u32,
+    },
+    /// Inspect process only. Validates the source with the requested settings.
+    AnalysisValidate {
+        /// The document generation.
+        document: u64,
+        /// The requested checks and context.
+        settings: ValidationSettings,
+    },
+    /// Inspect process only. Requests cancellation of a pending validation.
+    AnalysisCancelValidation {
+        /// The document generation.
+        document: u64,
+        /// The request ID of the validation to stop.
+        validation: u64,
+    },
+    /// Inspect process only. Reads retained findings from a validation.
+    AnalysisFindings {
+        /// The document generation.
+        document: u64,
+        /// The request ID of the latest successful validation request.
+        validation: u64,
+        /// The first finding, or zero for an empty report.
+        first: u64,
+        /// The maximum number of findings, in `1..=MAX_PAGE_ELEMENTS`.
+        count: u32,
+    },
     /// Inspect process only. Closes a document. Answered by
     /// [`Event::AnalysisClosed`] or [`Event::AnalysisFailed`].
     AnalysisClose {
@@ -468,6 +526,54 @@ pub enum Event {
         offset: u64,
         /// Exactly the bytes asked for.
         bytes: Vec<u8>,
+    },
+    /// Answers [`Command::AnalysisSyntax`]. The envelope request ID identifies the trace.
+    AnalysisSyntaxReady {
+        /// The document generation.
+        document: u64,
+        /// The unfiltered index of the OBU element.
+        element: u64,
+        /// The scope and outcome of observation.
+        summary: Box<SyntaxSummary>,
+        /// The number of retained events.
+        total: u64,
+    },
+    /// Answers [`Command::AnalysisSyntaxPage`].
+    AnalysisSyntaxPage {
+        /// The document generation.
+        document: u64,
+        /// The request ID that identifies the trace.
+        trace: u64,
+        /// The unfiltered index of the OBU element.
+        element: u64,
+        /// The first event.
+        first: u64,
+        /// The total number of retained events.
+        total: u64,
+        /// The events from `first`. A page can start or end inside a scope.
+        events: Vec<SyntaxEvent>,
+    },
+    /// Answers [`Command::AnalysisValidate`]. The envelope request ID identifies the report.
+    AnalysisValidated {
+        /// The document generation.
+        document: u64,
+        /// Requested checks, scope and completion.
+        summary: Box<ValidationSummary>,
+        /// The number of retained findings.
+        total: u64,
+    },
+    /// Answers [`Command::AnalysisFindings`].
+    AnalysisFindings {
+        /// The document generation.
+        document: u64,
+        /// The request ID that identifies the report.
+        validation: u64,
+        /// The first finding.
+        first: u64,
+        /// The total number of retained findings.
+        total: u64,
+        /// The findings from `first`.
+        findings: Vec<Finding>,
     },
     /// Answers [`Command::AnalysisClose`].
     AnalysisClosed {
