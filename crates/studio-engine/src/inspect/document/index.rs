@@ -129,6 +129,10 @@ struct Page {
 }
 
 impl Page {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "validated filter keys fit their bit fields"
+    )]
     fn count(&self, filter: RowFilter) -> usize {
         if filter.is_all() {
             return PAGE_ROWS;
@@ -455,7 +459,7 @@ impl Index {
                 "Row {first} is outside the index of {total} rows."
             )));
         }
-        let mut skip = first as usize;
+        let mut skip = usize::try_from(first).unwrap_or(total);
         let mut rows = Vec::new();
         let mut remaining = super::PAGE_BUDGET;
         for number in 0..=self.pages.len() {
@@ -562,7 +566,8 @@ impl IndexExport {
         let mut offset = 0_u64;
         let mut buffer = vec![0; 64 << 10];
         while offset < self.bytes {
-            let count = (self.bytes - offset).min(buffer.len() as u64) as usize;
+            let remaining = usize::try_from(self.bytes - offset).unwrap_or(usize::MAX);
+            let count = remaining.min(buffer.len());
             let chunk = &mut buffer[..count];
             {
                 let mut file = self

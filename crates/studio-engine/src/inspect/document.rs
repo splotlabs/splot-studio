@@ -170,33 +170,13 @@ impl Document {
                 "The open was cancelled.",
             ));
         }
-        let mut prefix = [0; 4];
-        let ivf = match reader.read_exact(&mut prefix) {
-            Ok(()) => prefix == IVF_SIGNATURE,
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => false,
-            Err(error) => return Err(io("Cannot inspect the file", error)),
-        };
-        reader
-            .seek(SeekFrom::Start(0))
-            .map_err(|e| io("Cannot read the file", e))?;
+        let header =
+            probe_ivf_header(&mut reader).map_err(|e| io("Cannot inspect the file header", e))?;
         let mut index = Index::new()?;
-        let mut header = None;
-        if ivf {
-            // Insert the file header before the first record fills an index page.
-            let mut wire = Vec::new();
-            (&mut reader)
-                .take(u64::from(u16::MAX))
-                .read_to_end(&mut wire)
-                .map_err(|e| io("Cannot inspect the IVF header", e))?;
-            reader
-                .seek(SeekFrom::Start(0))
-                .map_err(|e| io("Cannot read the file", e))?;
-            header = parse_ivf_header(&wire).ok();
-            if let Some(header) = &header {
-                index.push(Item::IvfHeader {
-                    len: u64::from(header.header_len),
-                })?;
-            }
+        if let Some(header) = &header {
+            index.push(Item::IvfHeader {
+                len: u64::from(header.header_len),
+            })?;
         }
         let buffer_bytes = header.map_or(8192, |header| usize::from(header.header_len).max(8192));
         let mut input = BufReader::with_capacity(buffer_bytes, HashReader::new(reader));
@@ -369,6 +349,26 @@ impl Document {
             )
         })
     }
+}
+
+fn probe_ivf_header(reader: &mut File) -> io::Result<Option<IvfHeader>> {
+    let mut prefix = [0; 4];
+    let ivf = match reader.read_exact(&mut prefix) {
+        Ok(()) => prefix == IVF_SIGNATURE,
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => false,
+        Err(error) => return Err(error),
+    };
+    reader.seek(SeekFrom::Start(0))?;
+    if !ivf {
+        return Ok(None);
+    }
+    // Insert the file header before the first record fills an index page.
+    let mut wire = Vec::new();
+    (&mut *reader)
+        .take(u64::from(u16::MAX))
+        .read_to_end(&mut wire)?;
+    reader.seek(SeekFrom::Start(0))?;
+    Ok(parse_ivf_header(&wire).ok())
 }
 
 /// Fails reads once `cancelled` says so.
@@ -720,7 +720,13 @@ impl Builder {
                         return stop;
                     }
                     at = obu.offset.get().saturating_add(u64::from(obu.size));
-                    record.consumed = (at - record.start) as usize;
+                    let Ok(consumed) = usize::try_from(at - record.start) else {
+                        return problem(
+                            ProblemKind::Io,
+                            "The OBU position is outside the IVF payload.",
+                        );
+                    };
+                    record.consumed = consumed;
                 }
                 Ok(None) => return Step::RecordDone,
                 Err(e) => {

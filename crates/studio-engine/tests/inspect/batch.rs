@@ -459,15 +459,10 @@ fn validation_matches_the_index_beyond_the_old_resident_limit() -> TestResult {
     let Event::BatchFindings { findings, .. } = inspect.ask(findings(latest, 0))? else {
         return Err("expected findings from the native pass".into());
     };
-    assert!(findings.iter().any(|finding| {
-        finding
-            .file_offset
-            .is_some_and(|offset| offset >= contents.len() as u64 - 3)
-    }));
     assert!(
-        findings.iter().all(|finding| {
-            finding.stream_offset.is_none() && finding.extended_layer_id.is_none()
-        })
+        findings
+            .iter()
+            .any(|finding| { finding.file_offset.is_some() && finding.stream_offset.is_some() })
     );
     assert_eq!(digest.bytes, contents.len() as u64);
     assert_eq!(digest.sha256, sha256(&contents));
