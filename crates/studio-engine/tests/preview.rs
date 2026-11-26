@@ -8,10 +8,13 @@
 //! media) or with the frames the job's reader hands to the encoder (lossy
 //! media). Result pictures are compared with a full sequential Splot
 //! decode of the same file, so random access must land on the same frame.
-//! Every comparison renders the reference through the same display
-//! transform, which has its own tests against published values.
+//! Document pictures are compared with the reference decoder's samples.
+//! The comparisons use the display transform, which has its own tests
+//! against published values.
 
 mod common;
+#[path = "preview/document.rs"]
+mod document;
 
 use std::error::Error;
 use std::fs;
@@ -117,7 +120,7 @@ impl Preview {
                 size,
             },
         )?;
-        let (envelope, pixels) = self.next()?;
+        let (envelope, pixels) = self.picture_answer(generation)?;
         assert_eq!(envelope.request_id, generation);
         match envelope.body {
             Event::Picture { picture } => {
@@ -133,6 +136,19 @@ impl Preview {
                 Ok(Err(code))
             }
             other => Err(format!("unexpected answer {other:?}").into()),
+        }
+    }
+
+    fn picture_answer(&mut self, generation: u64) -> Fallible<Answer> {
+        loop {
+            let (envelope, pixels) = self.next()?;
+            if let Event::PictureProgress { generation: g, .. } = envelope.body {
+                assert_eq!(g, generation);
+                assert_eq!(envelope.request_id, generation);
+                assert!(pixels.is_none());
+            } else {
+                return Ok((envelope, pixels));
+            }
         }
     }
 
