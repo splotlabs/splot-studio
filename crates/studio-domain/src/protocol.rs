@@ -217,7 +217,8 @@ pub enum Command {
     /// Worker only. Call after saving the paths from [`Event::ExportPrepared`].
     /// Use the request ID of [`Self::ExportPrepare`].
     ExportProceed,
-    /// Asks the running job to stop. [`Event::CancelRequested`] acknowledges
+    /// Asks the running job to stop. Use the export request ID to cancel an export.
+    /// [`Event::CancelRequested`] acknowledges
     /// the request; only [`Event::Cancelled`] means the job has stopped.
     /// Closing the worker's input has the same effect.
     /// The inspect process refuses it: [`Command::AnalysisCancel`] names the

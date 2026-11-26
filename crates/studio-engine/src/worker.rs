@@ -214,6 +214,13 @@ fn serve<'scope>(
                 Cancel::Inactive => {
                     outbox.reply(id, refusal(ErrorCode::WrongState, "no job is running"))
                 }
+                Cancel::WrongExport => outbox.reply(
+                    id,
+                    refusal(
+                        ErrorCode::WrongState,
+                        "Use the request ID of the running export.",
+                    ),
+                ),
                 Cancel::Publishing => outbox.reply(
                     id,
                     refusal(ErrorCode::WrongState, "The export is publishing."),
@@ -578,6 +585,7 @@ enum JobState {
 
 enum Cancel {
     Inactive,
+    WrongExport,
     Publishing,
     Accepted,
 }
@@ -768,8 +776,13 @@ impl Outbox {
         if state.job != JobState::Running {
             return Cancel::Inactive;
         }
-        if state.publishing && state.export.is_some() {
-            return Cancel::Publishing;
+        if state.export.is_some() {
+            if state.job_id != request_id {
+                return Cancel::WrongExport;
+            }
+            if state.publishing {
+                return Cancel::Publishing;
+            }
         }
         self.stop(&state);
         state.flush_progress();

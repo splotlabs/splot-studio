@@ -733,6 +733,8 @@ mod tests {
         let control = fixture.control(&outbox);
         let layout = fixture.stage(&control, ExportArtifactKind::Layout, "layout.json");
         let partial = layout.path().to_path_buf();
+        assert!(matches!(outbox.cancel(ID + 1), Cancel::WrongExport));
+        assert!(!control.cancelled());
         assert!(matches!(outbox.cancel(ID), Cancel::Accepted));
         assert!(matches!(control.await_prepared(), Err(Stop::Cancelled)));
         assert!(outbox.settle(Duration::ZERO));

@@ -460,7 +460,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod tests {
+mod publication_tests {
     use super::*;
 
     #[test]
