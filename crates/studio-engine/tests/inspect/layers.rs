@@ -350,10 +350,74 @@ fn inherited_content_interpretation_expires_at_the_next_sequence() -> TestResult
                 &row.fact,
                 LayerFact::ContentInterpretation {
                     embedded: 1,
-                    value: ContentState::Unspecified { reset: 572 },
+                    value: ContentState::Unspecified { reset: 572, .. },
                 }
             )
     }));
+    Ok(())
+}
+
+#[test]
+fn nearest_unspecified_layer_takes_priority_over_signaled_ci() -> TestResult {
+    let mut inspect = Inspect::spawn()?;
+    let dir = tempfile::tempdir()?;
+    let source = dir.path().join("ci-default-priority.obu");
+    fs::write(
+        &source,
+        include_bytes!("fixtures/syn-ci-default-priority.obu"),
+    )?;
+    let opened = inspect.open(1, &source)?;
+    let elements = inspect.all(1, opened.elements)?;
+    let anchor = elements
+        .iter()
+        .rposition(|row| matches!(row, Element::Obu { obu } if obu.embedded_layer_id.value == 2))
+        .ok_or("Missing embedded layer 2 OBU")? as u64;
+
+    let (_, summary, rows) = report(&mut inspect, anchor, LayerDecodeSelection::Default)?;
+    assert!(summary.metadata_complete);
+    assert!(rows.iter().any(|row| {
+        row.scope == (LayerScope::Extended { id: 0 })
+            && row.origin == Some(35)
+            && matches!(
+                row.fact,
+                LayerFact::ContentInterpretation {
+                    embedded: 0,
+                    value: ContentState::Signaled {
+                        color_codes: Some([1, 1, 1]),
+                        ..
+                    },
+                }
+            )
+    }));
+    for (layer, inheritance) in [(1, [].as_slice()), (2, [1].as_slice())] {
+        assert!(
+            rows.iter().any(|row| {
+                row.scope == (LayerScope::Extended { id: 0 })
+                    && row.origin.is_none()
+                    && matches!(
+                        &row.fact,
+                        LayerFact::ContentInterpretation {
+                            embedded,
+                            value: ContentState::Unspecified { reset: 504, inherited_from },
+                        } if *embedded == layer && inherited_from == inheritance
+                    )
+            }),
+            "Missing unspecified state and reset for embedded layer {layer}"
+        );
+    }
+    let reset = inspect.ask(Command::AnalysisLocate {
+        document: 1,
+        filter: RowFilter::default(),
+        target: LocateTarget::Offset { offset: 504 },
+    })?;
+    assert!(matches!(
+        reset,
+        Event::AnalysisLocated { found, .. } if matches!(
+            &found.element,
+            Element::Obu { obu } if obu.header.offset == 504
+                && obu.type_name == "OBU_CLOSED_LOOP_KEY" && obu.embedded_layer_id.value == 1
+        )
+    ));
     Ok(())
 }
 

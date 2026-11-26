@@ -248,12 +248,17 @@ fn content(details: &mut Vec<Detail>, scope: &str, origin: Option<u64>, value: C
         ContentState::Unavailable => {
             details.push(detail(label, "Unavailable at this position", scope, origin));
         }
-        ContentState::Unspecified { reset } => details.push(detail(
-            label,
-            "Unspecified after the random-access reset",
-            scope,
-            Some(reset),
-        )),
+        ContentState::Unspecified {
+            reset,
+            inherited_from,
+        } => {
+            let value = if inherited_from.is_empty() {
+                "Unspecified after the random-access reset".into()
+            } else {
+                format!("Unspecified · {}", inheritance(&inherited_from))
+            };
+            details.push(detail(label, value, scope, Some(reset)));
+        }
         ContentState::Signaled {
             reset,
             sequence_header,
@@ -270,14 +275,7 @@ fn content(details: &mut Vec<Detail>, scope: &str, origin: Option<u64>, value: C
             let source = if inherited_from.is_empty() {
                 "Signaled for this layer".to_owned()
             } else {
-                format!(
-                    "Inherited from embedded layers {}",
-                    inherited_from
-                        .iter()
-                        .map(u8::to_string)
-                        .collect::<Vec<_>>()
-                        .join(" → ")
-                )
+                inheritance(&inherited_from)
             };
             details.push(detail(label, source, scope, origin));
             let color = color_codes.map_or_else(
@@ -335,6 +333,18 @@ fn content(details: &mut Vec<Detail>, scope: &str, origin: Option<u64>, value: C
             ));
         }
     }
+}
+
+fn inheritance(layers: &[u8]) -> String {
+    if let [layer] = layers {
+        return format!("Inherited from embedded layer {layer}");
+    }
+    let path = layers
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(" → ");
+    format!("Inherited from embedded layers {path}")
 }
 
 fn tier_name(high_tier: bool) -> &'static str {

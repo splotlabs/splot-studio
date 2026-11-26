@@ -34,3 +34,13 @@ their AVM provenance and expected decode or validation results.
   AVM `a1ec4594d9` decoded four pictures with `--all-layers --rawvideo --i420`
   to 24,576 bytes with SHA-256
   `d9586c8fc72e76c784f1a7f4961a2285a894a06c34a11d0339daffa1268232c3`.
+
+- `syn-ci-default-priority.obu` uses only the first temporal unit of a
+  64 × 64, 8-bit, three-embedded-layer stream encoded through the AVM
+  `a1ec4594d9` C API. The sequence header makes layer 2 depend on layers 0
+  and 1. A CI OBU at byte 35 signals BT.709 for layer 0. Layer 1 has no
+  CI OBU. AVM reports CICP primaries 1, 2, and 2 for layers 0, 1, and 2.
+  The raw I420 outputs at 1 and 8 threads have the same SHA-256
+  `12097703ec09269ef686ae4c30bb85dbcbc0dd9ed3ddfa8ad5d984930ebc6546`.
+  The fixture SHA-256 is
+  `7f43e7f7d2997ee98b9cd378a10d47719f315d70ce3cc898b809b7392a2eadbc`.

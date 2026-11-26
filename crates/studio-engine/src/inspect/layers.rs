@@ -549,9 +549,16 @@ fn embedded_dependencies(
 
 fn content(native: &EffectiveContentInterpretation<'_>) -> (Option<u64>, ContentState) {
     match native {
-        EffectiveContentInterpretation::Unspecified { reset } => {
-            (None, ContentState::Unspecified { reset: reset.get() })
-        }
+        EffectiveContentInterpretation::Unspecified {
+            reset,
+            inherited_from,
+        } => (
+            None,
+            ContentState::Unspecified {
+                reset: reset.get(),
+                inherited_from: inherited_from.iter().map(|id| id.get()).collect(),
+            },
+        ),
         EffectiveContentInterpretation::Signaled {
             reset,
             origin,

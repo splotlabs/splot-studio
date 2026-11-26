@@ -266,6 +266,8 @@ pub enum ContentState {
     Unspecified {
         /// Header offset of the frame that initialized this state.
         reset: u64,
+        /// Layers from the nearest inheritance source to the original source.
+        inherited_from: Vec<u8>,
     },
     /// Native random-access processing established a signaled value.
     Signaled {

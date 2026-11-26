@@ -18,11 +18,14 @@ use super::{Rig, Scratch};
 
 const CONTENT: &[u8] =
     include_bytes!("../../../studio-engine/tests/inspect/fixtures/syn-output-ci-2frame-64x64.ivf");
+const DEFAULT_PRIORITY: &[u8] =
+    include_bytes!("../../../studio-engine/tests/inspect/fixtures/syn-ci-default-priority.obu");
 const POINTS: &[u8] =
     include_bytes!("../../../studio-engine/tests/preview/fixtures/syn-msdo-ops-random-access.obu");
 
 pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch) {
     effective_metadata_and_origin(rig, scratch);
+    inherited_unspecified_metadata(rig, scratch);
     requested_selection_and_visible_filter(rig, scratch);
 }
 
@@ -100,6 +103,26 @@ fn effective_metadata_and_origin(rig: &mut Rig, scratch: &Scratch) {
             .iter()
             .any(|row| row.label == "ci_scan_type_idc")
     );
+}
+
+fn inherited_unspecified_metadata(rig: &mut Rig, scratch: &Scratch) {
+    open(
+        rig,
+        scratch,
+        "default CI priority.obu",
+        DEFAULT_PRIORITY,
+        504,
+    );
+    let inherited = record(rig, |row| {
+        row.label == "Effective content interpretation"
+            && row.context == "Extended layer 0, embedded 2"
+            && row.value == "Unspecified · Inherited from embedded layer 1"
+            && row.origin == "Show OBU at byte 504"
+    });
+    rig.window.global::<Layers>().invoke_open_origin(inherited);
+    rig.idle("the random-access reset for inherited defaults");
+    assert_eq!(selected_header(rig), Some(504));
+    assert_eq!(rig.global().get_evidence_tab(), 1);
 }
 
 fn requested_selection_and_visible_filter(rig: &mut Rig, scratch: &Scratch) {
