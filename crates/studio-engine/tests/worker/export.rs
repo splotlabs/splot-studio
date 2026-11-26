@@ -149,7 +149,7 @@ fn run(export: ExportRequest) -> Answer<ExportOutcome> {
     let mut worker = Live::spawn()?;
     let outcome = match prepare(&mut worker, export)? {
         Event::ExportPrepared { files } => {
-            assert!(!files.is_empty());
+            assert_ne!(files, [] as [ExportTemp; 0]);
             worker.send(REQUEST, Command::ExportProceed)?;
             terminal(&mut worker)?
         }
@@ -160,24 +160,24 @@ fn run(export: ExportRequest) -> Answer<ExportOutcome> {
     Ok(outcome)
 }
 
-fn done(outcome: ExportOutcome, frames: u64, files: usize) {
+fn done(outcome: &ExportOutcome, frames: u64, files: usize) {
     assert!(
-        matches!(outcome, ExportOutcome::Completed { frames: count, files: ref published }
-            if count == frames && published.len() == files),
+        matches!(outcome, ExportOutcome::Completed { frames: count, files: published }
+            if *count == frames && published.len() == files),
         "{outcome:?}"
     );
 }
 
-fn failed(outcome: ExportOutcome) {
+fn failed(outcome: &ExportOutcome) {
     assert!(
         matches!(outcome, ExportOutcome::Failed { .. }),
         "{outcome:?}"
     );
 }
 
-fn refused(outcome: ExportOutcome, code: FailureCode) {
+fn refused(outcome: &ExportOutcome, code: FailureCode) {
     assert!(
-        matches!(outcome, ExportOutcome::Failed { ref failure } if failure.code == code),
+        matches!(outcome, ExportOutcome::Failed { failure } if failure.code == code),
         "{outcome:?}"
     );
 }
@@ -286,7 +286,7 @@ fn y4m_reopens_with_avm_samples_and_declared_geometry() -> TestResult {
         if frames == 1 {
             export.frame_rate = Some(Rational { num: 25, den: 1 });
         }
-        done(run(export)?, frames, 1);
+        done(&run(export)?, frames, 1);
         let (header, actual, hash) = reopen_y4m(&dest)?;
         assert_eq!(hash, oracle, "{layout:?}");
         assert_eq!((header.width, header.height), geometry);
@@ -335,7 +335,7 @@ fn y4m_distinguishes_cadence_from_ivf_ticks_and_unknown_timing() -> TestResult {
     let dest = dir.path().join("fixed.y4m");
     let mut export = request(&source, 10, ChromaLayout::Yuv420, y4m(&dest))?;
     export.range = ExportRange::Inclusive { first: 1, last: 2 };
-    done(run(export)?, 2, 1);
+    done(&run(export)?, 2, 1);
     let (header, frames, hash) = reopen_y4m(&dest)?;
     assert_eq!(header.frame_rate, (15, 1));
     assert_eq!(frames, 2);
@@ -345,9 +345,9 @@ fn y4m_distinguishes_cadence_from_ivf_ticks_and_unknown_timing() -> TestResult {
     let dest = dir.path().join("variable.y4m");
     let mut export = request(&source, 10, ChromaLayout::Yuv420, y4m(&dest))?;
     export.frame_rate = Some(Rational { num: 30, den: 1 });
-    failed(run(export)?);
+    failed(&run(export)?);
     assert!(!dest.exists());
-    assert!(
+    assert_eq!(
         leftovers(
             dir.path(),
             &[
@@ -355,20 +355,20 @@ fn y4m_distinguishes_cadence_from_ivf_ticks_and_unknown_timing() -> TestResult {
                 &dir.path().join("fixed.ivf"),
                 &dir.path().join("fixed.y4m")
             ]
-        )
-        .is_empty()
+        ),
+        [] as [PathBuf; 0]
     );
 
     let source = input(dir.path(), "unknown.obu", &annex_b()?)?;
     let dest = dir.path().join("assumed.y4m");
     let mut export = request(&source, 10, ChromaLayout::Yuv420, y4m(&dest))?;
-    failed(run(export.clone())?);
+    failed(&run(export.clone())?);
     assert!(!dest.exists());
     export.frame_rate = Some(Rational {
         num: 24_000,
         den: 1001,
     });
-    done(run(export)?, 4, 1);
+    done(&run(export)?, 4, 1);
     let (header, frames, hash) = reopen_y4m(&dest)?;
     assert_eq!(header.frame_rate, (24_000, 1001));
     assert_eq!((frames, hash), (4, sha(AVM_10)));
@@ -407,7 +407,7 @@ fn raw_ranges_follow_avm_output_order_without_extra_decode_prerequisites() -> Te
         let layout = dir.path().join(format!("out-{at}.json"));
         let mut export = request(&source, depth, ChromaLayout::Yuv420, raw(&samples, &layout))?;
         export.range = ExportRange::Inclusive { first: 1, last };
-        done(run(export)?, last, 2);
+        done(&run(export)?, last, 2);
         assert_eq!(
             fs::read(samples)?,
             reference[frame_bytes..frame_bytes * (usize::try_from(last)? + 1)]
@@ -472,14 +472,14 @@ fn annex_b_same_unit_outputs_require_raw_or_hashes_unless_the_layer_is_narrowed(
     export.frame_rate = Some(Rational { num: 24, den: 1 });
 
     // The two outputs in each temporal unit share one presentation time.
-    failed(run(export.clone())?);
+    failed(&run(export.clone())?);
     assert!(!dest.exists());
     export.layer = Some(ExportLayer {
         extended: 0,
         embedded: 1,
         temporal: 0,
     });
-    done(run(export)?, 1, 1);
+    done(&run(export)?, 1, 1);
     let (header, frames, hash) = reopen_y4m(&dest)?;
     assert_eq!(header.frame_rate, (24, 1));
     assert_eq!((frames, hash), (1, sha(&AVM_DERIVED_SEF[6144..12_288])));
@@ -487,7 +487,7 @@ fn annex_b_same_unit_outputs_require_raw_or_hashes_unless_the_layer_is_narrowed(
     let samples = dir.path().join("all-outputs.yuv");
     let layout = dir.path().join("all-outputs.json");
     let export = request(&source, 8, ChromaLayout::Yuv420, raw(&samples, &layout))?;
-    done(run(export)?, 4, 2);
+    done(&run(export)?, 4, 2);
     assert_eq!(fs::read(samples)?, AVM_DERIVED_SEF);
     let layout: serde_json::Value = serde_json::from_reader(fs::File::open(layout)?)?;
     assert_eq!(layout["timing"]["kind"], "variable");
@@ -503,8 +503,13 @@ fn annex_b_same_unit_outputs_require_raw_or_hashes_unless_the_layer_is_narrowed(
             path: WirePath::from_path(&hashes),
         },
     )?;
-    done(run(export)?, 4, 1);
-    check_hashes(&hashes, AVM_DERIVED_SEF.chunks_exact(6144).enumerate())?;
+    done(&run(export)?, 4, 1);
+    let (frames, tail) = AVM_DERIVED_SEF.as_chunks::<6144>();
+    assert_eq!(tail, [] as [u8; 0]);
+    check_hashes(
+        &hashes,
+        frames.iter().map(<[u8; 6144]>::as_slice).enumerate(),
+    )?;
     Ok(())
 }
 
@@ -528,7 +533,7 @@ fn the_single_frame_export_keeps_the_selected_grain_variant() -> TestResult {
         let mut export = request(&source, 10, ChromaLayout::Yuv420, raw(&samples, &layout))?;
         export.range = ExportRange::Inclusive { first: 2, last: 2 };
         export.grain = grain;
-        done(run(export)?, 1, 2);
+        done(&run(export)?, 1, 2);
         let samples = fs::read(samples)?;
         assert_eq!(samples.len(), 12_288);
         assert_eq!(sha(&samples), oracle);
@@ -558,7 +563,7 @@ fn hashes_keep_absolute_ordinals_through_the_layer_filter() -> TestResult {
         embedded: 0,
         temporal: 1,
     });
-    done(run(export.clone())?, 2, 1);
+    done(&run(export.clone())?, 2, 1);
     check_hashes(
         &dest,
         [1, 3].map(|ordinal| {
@@ -572,7 +577,7 @@ fn hashes_keep_absolute_ordinals_through_the_layer_filter() -> TestResult {
         path: WirePath::from_path(&dest),
     };
     export.grain = GrainPolicy::Apply;
-    failed(run(export)?);
+    failed(&run(export)?);
     assert!(!dest.exists());
     Ok(())
 }
@@ -585,7 +590,7 @@ fn y4m_refuses_pq_and_changing_geometry_without_publishing() -> TestResult {
         let dest = dir.path().join("out.y4m");
         let mut export = request(&source, depth, ChromaLayout::Yuv420, y4m(&dest))?;
         export.frame_rate = Some(Rational { num: 24, den: 1 });
-        failed(run(export)?);
+        failed(&run(export)?);
         assert!(!dest.exists());
         assert_eq!(fs::read(source)?, bytes);
     }
@@ -599,7 +604,7 @@ fn raw_pq_retains_native_samples_and_per_output_color() -> TestResult {
     let samples = dir.path().join("pq.yuv");
     let layout = dir.path().join("pq.json");
     let export = request(&source, 10, ChromaLayout::Yuv420, raw(&samples, &layout))?;
-    done(run(export)?, 1, 2);
+    done(&run(export)?, 1, 2);
     assert_eq!(
         sha(&fs::read(samples)?),
         "d28d3ac800fa3af64ccbfba31bf7e38d16d871a3791ec57a8f4ab732723323a2"
@@ -619,16 +624,19 @@ fn existing_files_and_source_aliases_are_never_overwritten() -> TestResult {
     let source = input(dir.path(), "source.ivf", IVF_10)?;
     let existing = input(dir.path(), "protected.y4m", b"owner data")?;
     let export = request(&source, 10, ChromaLayout::Yuv420, y4m(&existing))?;
-    refused(run(export)?, FailureCode::DestinationExists);
+    refused(&run(export)?, FailureCode::DestinationExists);
     assert_eq!(fs::read(&existing)?, b"owner data");
 
     let alias = dir.path().join("alias.y4m");
     fs::hard_link(&source, &alias)?;
     let export = request(&source, 10, ChromaLayout::Yuv420, y4m(&alias))?;
-    refused(run(export)?, FailureCode::SourceIsDestination);
+    refused(&run(export)?, FailureCode::SourceIsDestination);
     assert_eq!(fs::read(&source)?, IVF_10);
     assert_eq!(fs::read(&alias)?, IVF_10);
-    assert!(leftovers(dir.path(), &[&source, &existing, &alias]).is_empty());
+    assert_eq!(
+        leftovers(dir.path(), &[&source, &existing, &alias]),
+        [] as [PathBuf; 0]
+    );
     Ok(())
 }
 
@@ -649,9 +657,9 @@ fn a_different_source_with_the_same_file_metadata_fails_before_publication() -> 
         inspected_source(&source)?.fingerprint,
         export.source.fingerprint
     );
-    refused(run(export)?, FailureCode::SourceChanged);
+    refused(&run(export)?, FailureCode::SourceChanged);
     assert_eq!(fs::read(&source)?, changed);
-    assert!(leftovers(dir.path(), &[&source]).is_empty());
+    assert_eq!(leftovers(dir.path(), &[&source]), [] as [PathBuf; 0]);
     Ok(())
 }
 
@@ -734,7 +742,7 @@ fn loss_of_worker_before_proceed_names_only_unpublished_temporaries() -> TestRes
     worker.send(REQUEST, Command::Cancel)?;
     assert_eq!(terminal(&mut worker)?, ExportOutcome::Cancelled);
     close(worker)?;
-    assert!(leftovers(dir.path(), &[&source]).is_empty());
+    assert_eq!(leftovers(dir.path(), &[&source]), [] as [PathBuf; 0]);
     Ok(())
 }
 
@@ -770,6 +778,9 @@ fn a_publication_collision_reports_the_exact_partial_batch() -> TestResult {
     assert_eq!(fs::read(&samples)?, b"owner data");
     assert_eq!(fs::read(&source)?, IVF_10);
     close(worker)?;
-    assert!(leftovers(dir.path(), &[&source, &samples, &layout]).is_empty());
+    assert_eq!(
+        leftovers(dir.path(), &[&source, &samples, &layout]),
+        [] as [PathBuf; 0]
+    );
     Ok(())
 }
