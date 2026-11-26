@@ -611,22 +611,7 @@ impl Analysis {
     }
 
     fn document_input(&mut self, at: usize, input: Input, out: &mut Vec<Effect>) {
-        if matches!(
-            input,
-            Input::RowClicked(_)
-                | Input::Move(_)
-                | Input::ByteClicked(_)
-                | Input::Cursor(_)
-                | Input::SelectAtCursor
-                | Input::Back
-                | Input::Forward
-                | Input::GoTo(_)
-                | Input::EvidencePick(_)
-                | Input::EvidenceMove(_)
-                | Input::FindingStep(_)
-        ) {
-            self.cancel_timeline_location(at);
-        }
+        self.cancel_timeline_if_selection_changes(at, &input);
         // A problem stays in view until the user does something else here.
         self.documents[at].notice = None;
         match input {
@@ -642,29 +627,12 @@ impl Analysis {
             }
             Input::Move(step) => self.step(at, step, out),
             Input::Scroll(rows) => {
-                let doc = &mut self.documents[at];
-                doc.top = if rows < 0 {
-                    doc.top.saturating_sub(u64::from(rows.unsigned_abs()))
-                } else {
-                    doc.top.saturating_add(u64::from(rows.unsigned_abs()))
-                };
-                self.clamp_top(at);
-                self.fill(at, out);
+                let top = self.documents[at]
+                    .top
+                    .saturating_add_signed(i64::from(rows));
+                self.scroll_navigator(at, top, out);
             }
-            Input::ScrollTo(share) => {
-                let doc = &mut self.documents[at];
-                let last = doc.total.unwrap_or(0).saturating_sub(VISIBLE_ROWS);
-                // `last` rows fit an f64 exactly far beyond any document.
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_sign_loss,
-                    clippy::cast_precision_loss
-                )]
-                let top = (f64::from(share.clamp(0.0, 1.0)) * last as f64).round() as u64;
-                doc.top = top;
-                self.clamp_top(at);
-                self.fill(at, out);
-            }
+            Input::ScrollTo(share) => self.scroll_navigator_to(at, share, out),
             Input::ByteClicked(slot) => {
                 let Ok(slot) = u64::try_from(slot) else {
                     return;
@@ -719,7 +687,7 @@ impl Analysis {
             | Input::TimelineSelect(_)
             | Input::TimelineStep(_)
             | Input::TimelineLinkFindings => {
-                self.timeline_input(at, input, out);
+                self.timeline_input(at, &input, out);
             }
             Input::Open(_)
             | Input::OpenResult(_)
@@ -734,6 +702,27 @@ impl Analysis {
             | Input::PlaybackByte { .. }
             | Input::ClearCache => {}
         }
+    }
+
+    fn scroll_navigator(&mut self, at: usize, top: u64, out: &mut Vec<Effect>) {
+        self.documents[at].top = top;
+        self.clamp_top(at);
+        self.fill(at, out);
+    }
+
+    fn scroll_navigator_to(&mut self, at: usize, share: f32, out: &mut Vec<Effect>) {
+        let last = self.documents[at]
+            .total
+            .unwrap_or(0)
+            .saturating_sub(VISIBLE_ROWS);
+        // The index row limit is below the largest integer represented exactly by f64.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let top = (f64::from(share.clamp(0.0, 1.0)) * last as f64).round() as u64;
+        self.scroll_navigator(at, top, out);
     }
 
     fn evidence_input(&mut self, at: usize, input: Input, out: &mut Vec<Effect>) {

@@ -1498,7 +1498,10 @@ fn timeline_drops_a_superseded_time_before_linking_evidence() {
         time: Some(TimelineTime { num: 1, den: 1 }),
     };
     let first = analysis.input(Input::TimelineSelect(target(1)));
-    assert!(analysis.input(Input::TimelineSelect(target(2))).is_empty());
+    assert_eq!(
+        analysis.input(Input::TimelineSelect(target(2))),
+        [] as [Effect; 0]
+    );
     let effects = analysis.event(first[0].request_id, timeline_reply(scan, selection));
     assert!(matches!(
         commands(&effects)[..],
@@ -1508,7 +1511,7 @@ fn timeline_drops_a_superseded_time_before_linking_evidence() {
     let picked = analysis.input(Input::RowClicked(5));
     engine.settle(&mut analysis, picked);
     let late = analysis.event(effects[0].request_id, timeline_reply(scan, selection));
-    assert!(late.is_empty());
+    assert_eq!(late, [] as [Effect; 0]);
     assert_eq!(selected(&analysis), Some((5, Position::Row(5))));
     assert_eq!(analysis.take_timeline_picture(), None);
 }

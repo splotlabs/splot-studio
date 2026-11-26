@@ -169,9 +169,28 @@ impl Analysis {
         }
     }
 
-    pub(super) fn timeline_input(&mut self, at: usize, input: Input, out: &mut Vec<Effect>) {
+    pub(super) fn cancel_timeline_if_selection_changes(&mut self, at: usize, input: &Input) {
+        if matches!(
+            input,
+            Input::RowClicked(_)
+                | Input::Move(_)
+                | Input::ByteClicked(_)
+                | Input::Cursor(_)
+                | Input::SelectAtCursor
+                | Input::Back
+                | Input::Forward
+                | Input::GoTo(_)
+                | Input::EvidencePick(_)
+                | Input::EvidenceMove(_)
+                | Input::FindingStep(_)
+        ) {
+            self.cancel_timeline_location(at);
+        }
+    }
+
+    pub(super) fn timeline_input(&mut self, at: usize, input: &Input, out: &mut Vec<Effect>) {
         let doc = &mut self.documents[at];
-        match input {
+        match *input {
             Input::TimelineBuild if !doc.timeline.collecting => {
                 let document = doc.id;
                 doc.timeline = Timeline::default();
@@ -336,11 +355,14 @@ impl Analysis {
                 && timeline.reading == Some(id) =>
             {
                 timeline.reading = None;
-                if timeline.range == range && page.view == range.view && page.first == range.first {
+                if timeline.range != range {
+                    self.request_timeline_range(at, out);
+                } else if page.view == range.view && page.first == range.first {
                     timeline.page = Some(page);
                     timeline.notice = None;
-                } else if timeline.range != range {
-                    self.request_timeline_range(at, out);
+                } else {
+                    timeline.notice =
+                        Some("The engine returned a different timeline range.".into());
                 }
             }
             (
@@ -372,7 +394,15 @@ impl Analysis {
                 timeline.next_selection = Some((*selection, offset));
                 self.locate(at, LocateTarget::Offset { offset }, Purpose::Timeline, out);
             }
-            _ => {}
+            (Request::Cancel, Event::CancelRequested) => {}
+            _ => {
+                timeline.fail(
+                    id,
+                    request,
+                    "The engine returned an unexpected timeline reply.".into(),
+                );
+                self.retry_timeline_after_failure(at, Asked::Timeline(request), out);
+            }
         }
     }
 
@@ -432,6 +462,12 @@ impl Analysis {
             doc.timeline.notice = Some("The linked OBU offset differs from the index.".into());
             return;
         }
+        let changed = doc.timeline.selection != Some(selection)
+            || doc.bytes.cursor != offset
+            || doc
+                .selected
+                .as_ref()
+                .is_none_or(|selected| selected.row.index != row.index);
         doc.timeline.selection = Some(selection);
         doc.restore = None;
         doc.wanted = None;
@@ -445,7 +481,9 @@ impl Analysis {
         doc.evidence.selected = None;
         self.timeline_picture = Some((doc.id, selection.output_ordinal));
         self.link_timeline_finding(at);
-        self.documents[at].remember_selection();
+        if changed {
+            self.documents[at].remember_selection();
+        }
         if let Position::Row(position) = position {
             self.reveal(at, position);
         } else if position == Position::Unknown {
