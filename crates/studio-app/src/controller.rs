@@ -42,6 +42,7 @@ pub struct Controller {
     resize_settle: Timer,
     advanced: RefCell<advanced::Editor>,
     advanced_settle: Timer,
+    preset_files: presets::PresetFiles,
     /// The window was not minimized when last looked at.
     visible: Cell<bool>,
 }
@@ -148,6 +149,7 @@ impl Controller {
             resize_settle: Timer::default(),
             advanced: RefCell::default(),
             advanced_settle: Timer::default(),
+            preset_files: presets::PresetFiles::default(),
             visible: Cell::new(true),
         });
         CONTROLLER.with(|c| *c.borrow_mut() = Rc::downgrade(&ctl));
@@ -626,6 +628,7 @@ impl Controller {
 
     /// Stops the timers and the session (see [`Session::shutdown`]).
     pub fn shutdown(&self) {
+        self.preset_files.invalidate();
         self.clock.stop();
         self.cancel_deadline.stop();
         self.resize_settle.stop();

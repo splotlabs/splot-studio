@@ -11,7 +11,7 @@ use studio_domain::options::{EffectiveOption, FieldError, OptionDescriptor, Opti
 use studio_domain::protocol::OptionsIdentity;
 
 use crate::advanced::{self, Reset};
-use crate::queue::Item;
+use crate::queue::{Item, ItemId};
 use crate::render::model;
 use crate::session::Session;
 use crate::state::{AppState, Intent};
@@ -24,6 +24,7 @@ const SETTLE: Duration = Duration::from_millis(180);
 
 #[derive(PartialEq, Eq)]
 struct Inputs {
+    item: Option<ItemId>,
     request: OptionRequest,
     source: Option<SourceFacts>,
     engine: Option<OptionsIdentity>,
@@ -118,6 +119,7 @@ impl Controller {
     }
 
     fn open_advanced(self: &Rc<Self>, open: bool) {
+        self.preset_files.invalidate();
         self.advanced_settle.stop();
         let mut editor = self.advanced.borrow_mut();
         editor.inputs = None;
@@ -146,6 +148,7 @@ impl Controller {
 
     pub(super) fn render_advanced(self: &Rc<Self>, window: &AppWindow, session: &Session) {
         if !window.get_advanced_open() || session.state().workspace() != Workspace::Encode {
+            self.preset_files.invalidate();
             return;
         }
         let state = session.state();
@@ -153,6 +156,7 @@ impl Controller {
         let request = state.visible_option_request();
         let item = state.selected();
         let inputs = Inputs {
+            item: item.map(Item::id),
             request: request.clone(),
             source: item.and_then(Item::facts).cloned(),
             engine: state.capabilities().and_then(|cap| cap.options.clone()),
@@ -160,6 +164,7 @@ impl Controller {
         };
         let mut editor = self.advanced.borrow_mut();
         if editor.inputs.as_ref() != Some(&inputs) {
+            self.preset_files.invalidate();
             let refresh = editor.inputs.is_some() && !locked;
             if editor.inputs.is_some() {
                 editor.candidate = None;
