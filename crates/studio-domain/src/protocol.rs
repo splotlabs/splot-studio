@@ -23,6 +23,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::analysis::{AnalysisFailure, DocumentSummary, Framing, LocateTarget, Row, RowFilter};
+use crate::export::{
+    ExportArtifact, ExportOutcome, ExportProgress, ExportRequest, ExportStage, ExportTemp,
+};
 use crate::job::{Failure, JobReport, JobSpec, Progress, SourceFacts, Stage, WirePath};
 use crate::options::{EffectiveOption, FieldError, OptionDescriptor, OptionRequest};
 use crate::preview::{
@@ -36,7 +39,7 @@ use crate::validation::{
 };
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 17;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -206,6 +209,14 @@ pub enum Command {
     /// Confirms the complete policy from [`Event::JobPolicy`] on the same request ID.
     /// The worker resumes the job without a separate acknowledgement.
     ConfirmPolicy,
+    /// Worker only. Prepare to export decoded samples or hashes.
+    ExportPrepare {
+        /// The immutable export request.
+        export: Box<ExportRequest>,
+    },
+    /// Worker only. Call after saving the paths from [`Event::ExportPrepared`].
+    /// Use the request ID of [`Self::ExportPrepare`].
+    ExportProceed,
     /// Asks the running job to stop. [`Event::CancelRequested`] acknowledges
     /// the request; only [`Event::Cancelled`] means the job has stopped.
     /// Closing the worker's input has the same effect.
@@ -500,6 +511,31 @@ pub enum Event {
         total: u32,
         /// Effective options in canonical order.
         values: Vec<EffectiveOption>,
+    },
+    /// The worker has reserved the temporary files and is waiting for acknowledgement.
+    ExportPrepared {
+        /// The paths the client must save before sending [`Command::ExportProceed`].
+        files: Vec<ExportTemp>,
+    },
+    /// The export entered a phase.
+    ExportStage {
+        /// The current phase.
+        stage: ExportStage,
+    },
+    /// The latest counts from a running export.
+    ExportProgress {
+        /// The measured counts.
+        progress: ExportProgress,
+    },
+    /// One file reached its destination.
+    ExportPublished {
+        /// The new file and the result of its sync check.
+        file: ExportArtifact,
+    },
+    /// The only terminal event of an export.
+    ExportFinished {
+        /// The outcome and any published files.
+        outcome: ExportOutcome,
     },
     /// The job created its temporary file, beside the destination. Sent once,
     /// before any output is written. If the worker dies without a terminal
