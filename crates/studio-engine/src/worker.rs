@@ -200,9 +200,7 @@ fn serve<'scope>(
             Command::StartChecked { job: spec, live } => {
                 start(scope, outbox, id, spec, live, true, &mut job);
             }
-            Command::ConfirmPolicy => {
-                outbox.confirm(id);
-            }
+            Command::ConfirmPolicy => outbox.confirm(id),
             Command::ExportPrepare { export } => {
                 export::start(scope, outbox, id, *export, &mut job);
             }
@@ -233,6 +231,8 @@ fn serve<'scope>(
             | Command::AnalysisTimelineLocate { .. }
             | Command::AnalysisReferences { .. }
             | Command::AnalysisCancelReferences { .. }
+            | Command::AnalysisBlocks { .. }
+            | Command::AnalysisCancelBlocks { .. }
             | Command::AnalysisCancel { .. }
             | Command::AnalysisPage { .. }
             | Command::AnalysisLocate { .. }

@@ -14,6 +14,7 @@
 //! document evidence while the work thread serves foreground queries.
 
 mod batch;
+mod blocks;
 pub mod document;
 mod identity;
 mod layers;
@@ -28,13 +29,14 @@ use std::io::{Read, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use studio_domain::analysis::{
     AnalysisFailure, LocateTarget, RowFilter, ScanOutcome, SourceDigest,
 };
+use studio_domain::blocks::{BlockEvidence, BlockQuery};
 use studio_domain::identity::IdentityKind;
 use studio_domain::job::WirePath;
 use studio_domain::layers::LayerDecodeSelection;
@@ -73,7 +75,7 @@ pub fn run(input: &mut impl Read, output: impl Write + Send) -> Result<(), Sessi
             error: None,
         }),
         ledger: Mutex::new(Ledger::default()),
-        stopped: AtomicBool::new(false),
+        stopped: Arc::new(AtomicBool::new(false)),
     };
     let (requests, queue) = mpsc::sync_channel(REQUEST_BACKLOG);
     let shared = &shared;
@@ -183,6 +185,7 @@ type ValidationResult = Result<(ValidationEvidence, SourceDigest), Refusal>;
 #[derive(Debug)]
 enum EvidenceRequest {
     References(ReferenceQuery),
+    Blocks(BlockQuery),
     Validate(ValidationSettings),
     Identity {
         grain: GrainPolicy,
@@ -202,6 +205,10 @@ impl EvidenceRequest {
                 validation: id,
             },
             Self::Identity { .. } => Pending::Identity { document, scan: id },
+            Self::Blocks(_) => Pending::Blocks {
+                document,
+                blocks: id,
+            },
             Self::References(_) => Pending::References {
                 document,
                 reference: id,
@@ -222,8 +229,23 @@ impl EvidenceRequest {
                 let (file, query) = doc.prepare_layers(id, element, selection)?;
                 EvidenceTask::Layers(file, query)
             }
+            Self::Blocks(query) => {
+                if !query.is_valid() {
+                    return Err(Refusal::new(
+                        AnalysisFailure::InvalidRequest,
+                        "Use a valid region and positive budgets within the block capture limits.",
+                    ));
+                }
+                let (file, limit) = doc.prepare_replay(query.coded_offset)?;
+                EvidenceTask::Blocks {
+                    file,
+                    query,
+                    limit,
+                    partial: limit < doc.summary().fingerprint.len,
+                }
+            }
             Self::References(query) => {
-                let (file, limit) = doc.prepare_references(query.coded_offset)?;
+                let (file, limit) = doc.prepare_replay(query.coded_offset)?;
                 EvidenceTask::References {
                     file,
                     query,
@@ -254,6 +276,12 @@ enum EvidenceTask {
         limit: u64,
         partial: bool,
     },
+    Blocks {
+        file: File,
+        query: BlockQuery,
+        limit: u64,
+        partial: bool,
+    },
     Identity {
         file: File,
         index: identity::IdentityIndex,
@@ -262,7 +290,8 @@ enum EvidenceTask {
 }
 
 impl EvidenceTask {
-    fn run(self, cancelled: &dyn Fn() -> bool) -> EvidenceResult {
+    fn run(self, cancellation: Cancellation) -> EvidenceResult {
+        let cancelled = &|| cancellation.is_set();
         match self {
             Self::Validate(mut file, settings) => EvidenceResult::Validation(Box::new(
                 validation::validate(&mut file, &settings, cancelled),
@@ -270,6 +299,14 @@ impl EvidenceTask {
             Self::Layers(file, query) => {
                 EvidenceResult::Layers(Box::new(layers::inspect(file, query, cancelled)))
             }
+            Self::Blocks {
+                file,
+                query,
+                limit,
+                partial,
+            } => EvidenceResult::Blocks(
+                blocks::replay(file, limit, partial, query, cancellation).map(Box::new),
+            ),
             Self::References {
                 file,
                 query,
@@ -293,6 +330,7 @@ enum EvidenceResult {
     Identity(Result<(), Refusal>),
     Layers(Box<Result<layers::Report, Refusal>>),
     References(Result<Box<ReferenceEvidence>, Refusal>),
+    Blocks(Result<Box<BlockEvidence>, Refusal>),
     Aborted(Pending),
 }
 
@@ -322,8 +360,15 @@ impl EvidenceResult {
                     summary: Box::new(summary),
                 })
             }
+            Self::Blocks(result) => {
+                doc.verify_replay()?;
+                Ok(Event::AnalysisBlocksReady {
+                    document,
+                    evidence: result?,
+                })
+            }
             Self::References(result) => {
-                doc.verify_references()?;
+                doc.verify_replay()?;
                 Ok(Event::AnalysisReferencesReady {
                     document,
                     evidence: result?,
@@ -346,7 +391,7 @@ struct Shared<W> {
     out: Mutex<Out<W>>,
     ledger: Mutex<Ledger>,
     /// The input ended or the output failed. Cancel all pending operations.
-    stopped: AtomicBool,
+    stopped: Arc<AtomicBool>,
 }
 
 struct Out<W> {
@@ -363,6 +408,7 @@ enum Pending {
     Identity { document: u64, scan: u64 },
     Layers { document: u64, inspection: u64 },
     References { document: u64, reference: u64 },
+    Blocks { document: u64, blocks: u64 },
 }
 
 impl Pending {
@@ -371,7 +417,8 @@ impl Pending {
             Self::Validation { document, .. }
             | Self::Identity { document, .. }
             | Self::Layers { document, .. }
-            | Self::References { document, .. } => document == member,
+            | Self::References { document, .. }
+            | Self::Blocks { document, .. } => document == member,
             _ => false,
         }
     }
@@ -383,7 +430,7 @@ struct Ledger {
     /// The newest document id an open was queued for.
     newest: u64,
     /// At most the queued requests and active scans and evidence pass.
-    pending: Vec<(Pending, bool)>,
+    pending: Vec<(Pending, Arc<AtomicBool>)>,
 }
 
 impl Ledger {
@@ -393,29 +440,51 @@ impl Ledger {
 
     fn queue_open(&mut self, document: u64) {
         self.newest = document;
-        self.pending.push((Pending::Open(document), false));
+        self.queue(Pending::Open(document));
     }
 
     fn contains(&self, request: Pending) -> bool {
         self.pending.iter().any(|(pending, _)| *pending == request)
     }
 
-    fn cancel(&mut self, request: Pending) -> bool {
-        let Some((_, cancelled)) = self.pending.iter_mut().find(|(id, _)| *id == request) else {
-            return false;
-        };
-        *cancelled = true;
-        true
+    fn queue(&mut self, request: Pending) {
+        self.pending.push((request, Arc::default()));
+    }
+
+    fn flag(&self, request: Pending) -> Option<&Arc<AtomicBool>> {
+        self.pending
+            .iter()
+            .find_map(|(id, flag)| (*id == request).then_some(flag))
+    }
+
+    fn cancel(&self, request: Pending) -> bool {
+        if let Some(flag) = self.flag(request) {
+            flag.store(true, Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
     }
 
     fn is_cancelled(&self, request: Pending) -> bool {
-        self.pending
-            .iter()
-            .any(|(id, cancelled)| *id == request && *cancelled)
+        self.flag(request)
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
     }
 
     fn settle(&mut self, request: Pending) {
         self.pending.retain(|(id, _)| *id != request);
+    }
+}
+
+#[derive(Clone)]
+struct Cancellation {
+    stopped: Arc<AtomicBool>,
+    requested: Arc<AtomicBool>,
+}
+
+impl Cancellation {
+    fn is_set(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst) || self.requested.load(Ordering::SeqCst)
     }
 }
 
@@ -458,7 +527,7 @@ impl<W: Write> Shared<W> {
     }
 
     fn cancel(&self, id: u64, request: Pending) {
-        let mut ledger = self.ledger();
+        let ledger = self.ledger();
         let reply = if ledger.cancel(request) {
             Event::CancelRequested
         } else {
@@ -534,6 +603,7 @@ fn cancellation_target(command: &Command) -> Option<Pending> {
             document,
             reference,
         },
+        Command::AnalysisCancelBlocks { document, blocks } => Pending::Blocks { document, blocks },
         Command::BatchCancel { validation } => Pending::BatchValidation(validation),
         _ => return None,
     })
@@ -555,7 +625,7 @@ fn route<W: Write>(shared: &Shared<W>, requests: &SyncSender<Queued>, id: u64, c
             }
         }
         Command::AnalysisClose { document } => {
-            let mut ledger = shared.ledger();
+            let ledger = shared.ledger();
             if requests.try_send((id, document, Request::Close)).is_ok() {
                 // Let the active read yield before the scheduler handles the close.
                 ledger.cancel(Pending::Open(document));
@@ -603,6 +673,15 @@ fn route<W: Write>(shared: &Shared<W>, requests: &SyncSender<Queued>, id: u64, c
                 id,
                 document,
                 EvidenceRequest::Layers { element, selection },
+            );
+        }
+        Command::AnalysisBlocks { document, query } => {
+            queue_evidence(
+                shared,
+                requests,
+                id,
+                document,
+                EvidenceRequest::Blocks(query),
             );
         }
         Command::AnalysisReferences { document, query } => {
@@ -841,7 +920,7 @@ fn queue_evidence<W: Write>(
         .try_send((id, document, Request::Evidence(request)))
         .is_ok()
     {
-        ledger.pending.push((operation, false));
+        ledger.queue(operation);
     } else {
         drop(ledger);
         busy(shared, id, document);
@@ -1109,17 +1188,29 @@ impl<W: Write + Send> Scheduler<'_, '_, W> {
 
         let operation = request.pending(document, id);
         let task = request.prepare(self.documents[at].1.document_mut(), id)?;
-        let shared = self.shared;
+        let requested = self
+            .shared
+            .ledger()
+            .flag(operation)
+            .cloned()
+            .ok_or_else(|| {
+                Refusal::new(
+                    AnalysisFailure::InvalidRequest,
+                    "The evidence request is no longer pending.",
+                )
+            })?;
+        let cancellation = Cancellation {
+            stopped: Arc::clone(&self.shared.stopped),
+            requested,
+        };
         let replies = self.replies;
         let job = thread::Builder::new()
             .name("studio-inspect-evidence".to_owned())
             .stack_size(JOB_STACK_BYTES)
             .spawn_scoped(self.scope, move || {
                 // Always wake the scheduler, even if the codec unwinds.
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    task.run(&|| shared.cancelled(operation))
-                }))
-                .unwrap_or(EvidenceResult::Aborted(operation));
+                let result = catch_unwind(AssertUnwindSafe(|| task.run(cancellation)))
+                    .unwrap_or(EvidenceResult::Aborted(operation));
                 let _ = replies.send((id, document, Request::EvidenceDone(result)));
             })
             .map_err(|error| {
@@ -1405,7 +1496,7 @@ mod tests {
                 error: None,
             }),
             ledger: Mutex::new(Ledger::default()),
-            stopped: false.into(),
+            stopped: std::sync::Arc::default(),
         };
         shared.ledger().queue_open(1);
         shared.ledger().queue_open(2);
@@ -1417,6 +1508,54 @@ mod tests {
         route(&shared, &tx, 4, Command::AnalysisClose { document: 2 });
         assert!(!shared.cancelled(Pending::Open(2)));
         assert!(matches!(rx.try_recv(), Ok((3, 1, Request::Close))));
+    }
+
+    #[test]
+    fn a_failed_cancel_reply_stops_block_capture() {
+        use std::io::{self, Write};
+        use std::sync::Arc;
+
+        struct ClosedPipe;
+
+        impl Write for ClosedPipe {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let shared = Shared {
+            out: Mutex::new(Out {
+                writer: ClosedPipe,
+                error: None,
+            }),
+            ledger: Mutex::new(Ledger::default()),
+            stopped: Arc::default(),
+        };
+        let operation = Pending::Blocks {
+            document: 1,
+            blocks: 2,
+        };
+        shared.ledger().queue(operation);
+        let (tx, _) = mpsc::sync_channel(1);
+        route(
+            &shared,
+            &tx,
+            3,
+            Command::AnalysisCancelBlocks {
+                document: 1,
+                blocks: 2,
+            },
+        );
+        assert!(shared.cancelled(operation));
+        assert!(shared.stopped());
+        assert!(matches!(
+            shared.out().error.as_ref(),
+            Some(super::ProtocolError::Io(error)) if error.kind() == io::ErrorKind::BrokenPipe
+        ));
     }
 
     /// An open the full queue refused is not recorded: its id can be sent

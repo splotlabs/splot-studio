@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::analysis::{AnalysisFailure, DocumentSummary, Framing, LocateTarget, Row, RowFilter};
+use crate::blocks::{BlockEvidence, BlockQuery};
 use crate::export::{
     ExportArtifact, ExportOutcome, ExportProgress, ExportRequest, ExportStage, ExportTemp,
 };
@@ -43,7 +44,7 @@ use crate::validation::{
 };
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -508,6 +509,20 @@ pub enum Command {
         /// The request ID of the reference query to stop.
         reference: u64,
     },
+    /// Inspect process only. Collect a bounded set of decoder block records.
+    AnalysisBlocks {
+        /// The document generation.
+        document: u64,
+        /// The selected coded frame and capture limits.
+        query: BlockQuery,
+    },
+    /// Inspect process only. Stop a pending block request.
+    AnalysisCancelBlocks {
+        /// The document generation.
+        document: u64,
+        /// The request ID of the block query to stop.
+        blocks: u64,
+    },
     /// Inspect process only. Checks validation options before starting a batch.
     BatchCheckSettings {
         /// The options to check.
@@ -902,6 +917,13 @@ pub enum Event {
         document: u64,
         /// Reference state and direct dependency candidates.
         evidence: Box<ReferenceEvidence>,
+    },
+    /// Terminal answer to [`Command::AnalysisBlocks`].
+    AnalysisBlocksReady {
+        /// The document generation.
+        document: u64,
+        /// Native block facts and coverage.
+        evidence: Box<BlockEvidence>,
     },
     /// Answers [`Command::BatchCheckSettings`] when the options are valid.
     BatchSettingsChecked,

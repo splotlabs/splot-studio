@@ -21,7 +21,7 @@ pub(super) fn render_document(view: &References<'_>, document: Option<&Document>
         render(view, None, "", false, "");
         return;
     };
-    let ready = document.reference_offset().is_some() && !document.selection_pending();
+    let ready = document.coded_offset().is_some() && !document.selection_pending();
     let references = &document.references;
     let busy = references.busy();
     let evidence = document.reference_evidence().filter(|_| ready);
@@ -37,14 +37,16 @@ pub(super) fn render_document(view: &References<'_>, document: Option<&Document>
             ""
         }
     });
-    let output = evidence.map_or_else(String::new, |evidence| output_text(document, evidence));
+    let output = evidence.map_or_else(String::new, |evidence| {
+        output_text(document, evidence.frame.coded_offset)
+    });
     render(view, evidence, status, busy, &output);
 }
 
-fn output_text(document: &Document, evidence: &ReferenceEvidence) -> String {
+pub(super) fn output_text(document: &Document, coded_offset: u64) -> String {
     let Some(selection) = document
-        .reference_timeline()
-        .filter(|frame| frame.coded_offset == evidence.frame.coded_offset)
+        .coded_timeline()
+        .filter(|frame| frame.coded_offset == coded_offset)
     else {
         return "Indexed output identity is unavailable.".to_owned();
     };

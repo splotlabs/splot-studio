@@ -55,6 +55,7 @@ use studio_domain::protocol::{Command, Event};
 use studio_domain::timeline::{TimelineTarget, TimelineView};
 
 mod batch;
+pub(crate) mod blocks;
 mod bytes;
 mod document;
 mod timeline_links;
@@ -252,6 +253,10 @@ pub enum Input {
     InspectReferences,
     /// Stop reading the reference evidence.
     StopReferences,
+    /// Request block evidence for the selected coded frame.
+    InspectBlocks,
+    /// Stop reading block evidence.
+    StopBlocks,
     /// Follow the direct dependency at this row.
     FollowReference(i32),
     /// Remove the indexes saved on disk.
@@ -267,6 +272,7 @@ enum Asked {
     Layers(layers::Request),
     CancelLayers,
     References(studio_domain::references::ReferenceQuery),
+    Blocks(studio_domain::blocks::BlockQuery),
     Cancel,
     Close,
     Page { generation: u64, first: u64 },
@@ -687,6 +693,8 @@ impl Analysis {
             Input::Back => self.travel(at, false, out),
             Input::Forward => self.travel(at, true, out),
             Input::GoTo(text) => self.go_to(at, &text, out),
+            Input::InspectBlocks => self.request_blocks(at, out),
+            Input::StopBlocks => self.stop_blocks(at, out),
             Input::InspectReferences => self.request_references(at, out),
             Input::StopReferences => self.stop_references(at, out),
             Input::FollowReference(index) => self.follow_reference(at, index, out),
@@ -756,12 +764,15 @@ impl Analysis {
                 if tab != references::TAB && self.documents[at].evidence.tab == references::TAB {
                     self.cancel_references(at, out);
                 }
+                if tab != blocks::TAB && self.documents[at].evidence.tab == blocks::TAB {
+                    self.cancel_blocks(at, out);
+                }
                 self.documents[at].layers.shown = tab == layers::TAB;
                 if tab == layers::TAB {
                     return;
                 }
                 let evidence = &mut self.documents[at].evidence;
-                evidence.tab = tab.clamp(0, references::TAB);
+                evidence.tab = tab.clamp(0, blocks::TAB);
                 let doc = &mut self.documents[at];
                 if doc.evidence.selected.is_none()
                     && let Some(place) = doc.history.get_mut(doc.at)
@@ -853,12 +864,15 @@ impl Analysis {
 
     fn show_document(&mut self, at: usize, out: &mut Vec<Effect>) {
         if at != self.shown
-            && self
-                .documents
-                .get(self.shown)
-                .is_some_and(|document| document.references.busy())
+            && let Some(document) = self.documents.get(self.shown)
         {
-            self.cancel_references(self.shown, out);
+            let (references, blocks) = (document.references.busy(), document.blocks.busy());
+            if references {
+                self.cancel_references(self.shown, out);
+            }
+            if blocks {
+                self.cancel_blocks(self.shown, out);
+            }
         }
         self.shown = at;
     }
@@ -889,7 +903,7 @@ impl Analysis {
     /// Starts a new read of document `at` with a new engine id. Everything
     /// the last read showed is dropped; its view stays in `restore`.
     fn read(&mut self, at: usize, out: &mut Vec<Effect>) {
-        self.cancel_references(at, out);
+        self.clear_frame_evidence(at, out);
         self.next_document += 1;
         let id = self.next_document;
         let old = &self.documents[at];
@@ -928,7 +942,7 @@ impl Analysis {
         if self.shown >= self.documents.len() {
             return;
         }
-        self.cancel_references(self.shown, out);
+        self.clear_frame_evidence(self.shown, out);
         let doc = self.documents.remove(self.shown);
         // Its answers have nobody to go to now.
         self.pending.retain(|_, (document, _)| *document != doc.id);
@@ -1076,6 +1090,14 @@ impl Analysis {
                         None,
                         "The result had a different frame or selection.",
                     );
+                }
+            }
+            (Asked::Blocks(query), Event::AnalysisBlocksReady { evidence, .. }) => {
+                let blocks = &mut self.documents[at].blocks;
+                if evidence.matches(query) {
+                    blocks.accept(request_id, evidence);
+                } else {
+                    blocks.fail(request_id, None, "The engine sent invalid block evidence.");
                 }
             }
             (_, Event::AnalysisFailed { code, message, .. }) => {
@@ -1356,6 +1378,16 @@ impl Analysis {
                     doc.references.fail(request_id, code, &message);
                 }
             }
+            Asked::Blocks(_) => {
+                if matches!(
+                    code,
+                    Some(AnalysisFailure::SourceChanged | AnalysisFailure::UnknownDocument)
+                ) {
+                    fail_or_notice(doc, code, &message);
+                } else {
+                    doc.blocks.fail(request_id, code, &message);
+                }
+            }
             Asked::Cancel | Asked::Close | Asked::CancelLayers => {}
         }
     }
@@ -1460,7 +1492,7 @@ impl Analysis {
             }
             return;
         }
-        self.cancel_references(at, out);
+        self.clear_frame_evidence(at, out);
         let doc = &mut self.documents[at];
         // A new selection replaces a restored view kept; the restored
         // element's own locate puts it back (`Purpose::Restore`).
@@ -1496,7 +1528,7 @@ impl Analysis {
         let Some(place) = doc.history.get(to).cloned() else {
             return;
         };
-        self.cancel_references(at, out);
+        self.clear_frame_evidence(at, out);
         let doc = &mut self.documents[at];
         doc.at = to;
         doc.wanted = None;
@@ -1798,6 +1830,7 @@ fn reply_document(event: &Event) -> Option<u64> {
         | Event::AnalysisLayerPage { document: d, .. }
         | Event::AnalysisSyntaxReady { document: d, .. }
         | Event::AnalysisReferencesReady { document: d, .. }
+        | Event::AnalysisBlocksReady { document: d, .. }
         | Event::AnalysisSyntaxPage { document: d, .. }
         | Event::AnalysisValidated { document: d, .. }
         | Event::AnalysisFindings { document: d, .. }

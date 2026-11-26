@@ -69,7 +69,7 @@ use crate::state::{AppState, JournalProblem, Startup};
 
 pub use render::{render, render_analysis, render_counters, render_jobs, render_preview};
 pub use ui::{
-    Analysis, AnalysisState, AppWindow, ByteRegion, CheckRow, DecodeExport, ExportForm,
+    Analysis, AnalysisState, AppWindow, Blocks, ByteRegion, CheckRow, DecodeExport, ExportForm,
     ExportPurpose, ExportSourceRow, Fact, JobAction, JobRow, JobView, NavStep, Notice,
     NoticeWindow, Palette, Playback, QueueRow, References, RowState, SourceView, StageState,
     TimelineUi, Tone, ViewMode, WorkspaceView,
@@ -326,6 +326,7 @@ pub fn new_window() -> Result<AppWindow, slint::PlatformError> {
 pub fn bind_analysis(window: &AppWindow, send: impl Fn(analysis::Input) + Clone + 'static) {
     use analysis::{Input, Step};
     render::timeline::bind(window, send.clone());
+    render::blocks::bind(window, send.clone());
     let global = window.global::<Analysis>();
     let step = |step: NavStep| match step {
         // The window sends no `None`; treat it as no movement.

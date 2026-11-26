@@ -87,7 +87,7 @@ pub(super) fn queue<W: Write>(
             .try_send((id, 0, super::Request::Batch(request)))
             .is_ok()
         {
-            ledger.pending.push((operation, false));
+            ledger.queue(operation);
         } else {
             drop(ledger);
             shared.send(id, busy());

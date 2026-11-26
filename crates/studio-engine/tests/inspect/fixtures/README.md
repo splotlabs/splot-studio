@@ -44,3 +44,21 @@ their AVM provenance and expected decode or validation results.
   `12097703ec09269ef686ae4c30bb85dbcbc0dd9ed3ddfa8ad5d984930ebc6546`.
   The fixture SHA-256 is
   `7f43e7f7d2997ee98b9cd378a10d47719f315d70ce3cc898b809b7392a2eadbc`.
+
+## Block records
+
+The three IVF files below come from the Splot conformance corpus at commit
+`8e08378f2bbb08213f2fc89685fe471c740e3cbf`. AVM `a1ec4594d9` inspection
+provides the expected mode, geometry, quantizer, and motion facts.
+
+- `syn-2tile-zone1-edge-128x64-q192.ivf` has an 8-bit vertical intra block
+  at (64, 0), size 64 × 32, in tile 1 with qindex 192.
+  SHA-256 `c9fd016f591250511b12d9a28ce2608b28be98035794042b4f04468ab3507475`.
+- The [padded 10-bit fixture](../../preview/fixtures/syn-mrl-padded-444-67x67-10bit-q120.ivf) has a D203 block at (32, 64)
+  with size 16 × 8 and visible size 16 × 3. Its reference line is 1.
+  The angle delta is 2 and the qindex is 168.
+  SHA-256 `53ff44b12489cfc3e8209df5ab176598163ad553f77063f5d4e3879ff1734e42`.
+- `syn-2frame-sameref-compound-64x32-10bit-q150.ivf` has a 64 × 16
+  NEW_NEWMV block at (0, 0) in the second coded frame. Its quarter-sample
+  vectors are (32, 0) and (-128, 0) in eighth-sample units. Both use slot 0.
+  SHA-256 `d0a83ae53e5ef9ff9009a1c1c1679eca71935234601d1ec7752061957b3381d4`.

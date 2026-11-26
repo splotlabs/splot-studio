@@ -6,6 +6,8 @@
 
 #[path = "inspect/batch.rs"]
 mod batch;
+#[path = "inspect/blocks.rs"]
+mod blocks;
 mod common;
 #[path = "inspect/layers.rs"]
 mod layers;

@@ -18,6 +18,7 @@
 //! shows a decoded Y plane at 4× and an exact sample value.
 //! `analyze-export-setup` shows the export dialog for a real decoded frame.
 //! `analyze-layers` shows the layer inspector on an AVM content-interpretation fixture.
+//! `analyze-blocks-8bit` and `analyze-blocks-10bit` inspect the first coded frame.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -296,6 +297,7 @@ pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
     match name {
         "analyze-empty" | "analyze-playback" | "analyze-sample" | "analyze-export-setup" => {}
         "analyze-layers" => layer_evidence(&mut scenario)?,
+        "analyze-blocks-8bit" | "analyze-blocks-10bit" => block_evidence(&mut scenario, name)?,
         "analyze-opening" => {
             // Asked for, and never answered here.
             let path = scenario.file("park walk.ivf", &ivf())?;
@@ -360,6 +362,32 @@ pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
         other => return Err(format!("unknown scenario {other:?}")),
     }
     Ok(Some(scenario))
+}
+
+fn block_evidence(scenario: &mut Scenario, name: &str) -> Result<(), String> {
+    let (bytes, offset): (&[u8], u64) = if name == "analyze-blocks-8bit" {
+        (
+            include_bytes!(
+                "../../../studio-engine/tests/preview/fixtures/syn-luma-palette2-row-mono-16x16-q0.ivf"
+            ),
+            59,
+        )
+    } else {
+        (
+            include_bytes!(
+                "../../../studio-engine/tests/preview/fixtures/syn-mrl-padded-444-67x67-10bit-q120.ivf"
+            ),
+            62,
+        )
+    };
+    let path = scenario.file(&format!("{name}.ivf"), bytes)?;
+    scenario.input(Input::Open(vec![path]));
+    scenario.settle()?;
+    scenario.input(Input::GoTo(offset.to_string()));
+    scenario.settle()?;
+    scenario.input(Input::EvidenceView(5));
+    scenario.input(Input::InspectBlocks);
+    scenario.settle()
 }
 
 fn layer_evidence(scenario: &mut Scenario) -> Result<(), String> {
