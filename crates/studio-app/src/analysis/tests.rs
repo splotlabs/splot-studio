@@ -1516,11 +1516,81 @@ fn timeline_drops_a_superseded_time_before_linking_evidence() {
     assert_eq!(analysis.take_timeline_picture(), None);
 }
 
+#[test]
+fn a_live_timeline_keeps_one_range_request_and_refreshes_after_completion() {
+    use studio_domain::timeline::{
+        TimelineClock, TimelineFileBytes, TimelinePage, TimelineTarget, TimelineView,
+    };
+
+    let (mut analysis, _) = opened(40);
+    let scan = analysis.input(Input::TimelineBuild)[0].request_id;
+    assert!(doc(&analysis).timeline().can_refresh());
+    let first = analysis.input(Input::TimelineRefresh);
+    assert!(matches!(
+        commands(&first)[..],
+        [Command::AnalysisTimeline { .. }]
+    ));
+    assert!(!doc(&analysis).timeline().can_refresh());
+    assert_eq!(analysis.input(Input::TimelineRefresh), []);
+
+    let live_page = || Event::AnalysisTimeline {
+        document: 1,
+        scan,
+        page: Box::new(TimelinePage {
+            view: TimelineView::Coded,
+            first: 0,
+            total: 1,
+            complete: false,
+            verified: false,
+            clock: TimelineClock::Unavailable,
+            file_bytes: TimelineFileBytes {
+                file: 360,
+                obu: 9,
+                assigned_obu: 9,
+                unassigned_obu: 0,
+                framing: 0,
+                unclassified: 351,
+            },
+            bytes: None,
+            rate: None,
+            buckets: Vec::new(),
+        }),
+    };
+    assert_eq!(analysis.event(first[0].request_id, live_page()), []);
+    assert!(doc(&analysis).timeline().can_refresh());
+    let linked = analysis.input(Input::TimelineSelect(TimelineTarget::Coded { index: 0 }));
+    assert!(matches!(
+        commands(&linked)[..],
+        [Command::AnalysisTimelineLocate { .. }]
+    ));
+
+    let in_flight = analysis.input(Input::TimelineRefresh);
+    assert!(matches!(
+        commands(&analysis.input(Input::TimelineCancel))[..],
+        [Command::AnalysisCancelIdentity { .. }]
+    ));
+    assert!(!doc(&analysis).timeline().can_refresh());
+    assert_eq!(analysis.input(Input::TimelineRefresh), []);
+    assert_eq!(analysis.event(scan, timeline_finished()), []);
+    let final_range = analysis.event(in_flight[0].request_id, live_page());
+    assert!(matches!(
+        commands(&final_range)[..],
+        [Command::AnalysisTimeline { .. }]
+    ));
+    assert!(!doc(&analysis).timeline().can_refresh());
+}
+
 fn start_timeline(analysis: &mut Analysis) -> u64 {
-    use studio_domain::identity::{IdentityCompletion, IdentitySummary};
-    use studio_domain::preview::GrainPolicy;
     let effects = analysis.input(Input::TimelineBuild);
     let scan = effects[0].request_id;
+    let _ = analysis.event(scan, timeline_finished());
+    scan
+}
+
+fn timeline_finished() -> Event {
+    use studio_domain::identity::{IdentityCompletion, IdentitySummary};
+    use studio_domain::preview::GrainPolicy;
+
     let summary = IdentitySummary {
         schema: 1,
         codec_revision: "codec".into(),
@@ -1535,14 +1605,10 @@ fn start_timeline(analysis: &mut Analysis) -> u64 {
         continuations: 0,
         outputs: 3,
     };
-    let _ = analysis.event(
-        scan,
-        Event::AnalysisIdentityScanned {
-            document: 1,
-            summary: Box::new(summary),
-        },
-    );
-    scan
+    Event::AnalysisIdentityScanned {
+        document: 1,
+        summary: Box::new(summary),
+    }
 }
 
 fn timeline_reply(scan: u64, selection: studio_domain::timeline::TimelineSelection) -> Event {

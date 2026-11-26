@@ -50,6 +50,7 @@ pub struct Timeline {
     cancelling: bool,
     range: TimelineRange,
     reading: Option<u64>,
+    refresh_after_finish: bool,
     locating: Option<u64>,
     queued_target: Option<TimelineTarget>,
     next_selection: Option<(TimelineSelection, u64)>,
@@ -86,6 +87,12 @@ impl Timeline {
         self.collecting && !self.cancelling
     }
 
+    /// Whether a visible timeline can refresh its partial rows.
+    #[must_use]
+    pub const fn can_refresh(&self) -> bool {
+        self.can_cancel() && self.reading.is_none()
+    }
+
     /// The range requested by the user.
     #[must_use]
     pub const fn range(&self) -> TimelineRange {
@@ -108,6 +115,14 @@ impl Timeline {
     #[must_use]
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
+    }
+
+    fn has_indexed_target(&self, target: TimelineTarget) -> bool {
+        self.page().is_some_and(|page| match (page.view, target) {
+            (TimelineView::Coded, TimelineTarget::Coded { index })
+            | (TimelineView::Output, TimelineTarget::Output { index }) => index < page.total,
+            _ => false,
+        })
     }
 
     pub(super) fn history(&self) -> Option<(u64, TimelineSelection)> {
@@ -216,6 +231,9 @@ impl Analysis {
                     );
                 }
             }
+            Input::TimelineRefresh if doc.timeline.can_refresh() => {
+                self.request_timeline_range(at, out);
+            }
             Input::TimelineRange {
                 view,
                 first,
@@ -266,7 +284,7 @@ impl Analysis {
         let doc = &self.documents[at];
         let timeline = &doc.timeline;
         let Some(scan) = timeline.scan else { return };
-        if timeline.collecting || timeline.reading.is_some() {
+        if timeline.reading.is_some() || timeline.cancelling {
             return;
         }
         let range = timeline.range;
@@ -295,7 +313,8 @@ impl Analysis {
         let doc = &mut self.documents[at];
         let timeline = &mut doc.timeline;
         let Some(scan) = timeline.scan else { return };
-        if timeline.collecting {
+        if timeline.collecting && !timeline.has_indexed_target(target) {
+            timeline.notice = Some("Choose a frame from the indexed range.".into());
             return;
         }
         timeline.notice = None;
@@ -341,6 +360,7 @@ impl Analysis {
             {
                 timeline.collecting = false;
                 timeline.cancelling = false;
+                timeline.refresh_after_finish = timeline.reading.is_some();
                 self.request_timeline_range(at, out);
             }
             (
@@ -355,7 +375,8 @@ impl Analysis {
                 && timeline.reading == Some(id) =>
             {
                 timeline.reading = None;
-                if timeline.range != range {
+                let refresh = std::mem::take(&mut timeline.refresh_after_finish);
+                if timeline.range != range || refresh {
                     self.request_timeline_range(at, out);
                 } else if page.view == range.view && page.first == range.first {
                     timeline.page = Some(page);
@@ -422,12 +443,13 @@ impl Analysis {
         request: Asked,
         out: &mut Vec<Effect>,
     ) {
-        let timeline = &self.documents[at].timeline;
+        let timeline = &mut self.documents[at].timeline;
         match request {
-            Asked::Timeline(Request::Range { scan, range })
-                if timeline.scan == Some(scan) && timeline.range != range =>
-            {
-                self.request_timeline_range(at, out);
+            Asked::Timeline(Request::Range { scan, range }) if timeline.scan == Some(scan) => {
+                let refresh = std::mem::take(&mut timeline.refresh_after_finish);
+                if timeline.range != range || refresh {
+                    self.request_timeline_range(at, out);
+                }
             }
             Asked::Timeline(Request::Locate { scan, .. })
                 if timeline.scan == Some(scan) && timeline.locating.is_none() =>

@@ -26,6 +26,7 @@ export global TimelineUi {
     in property <bool> built;
     in property <bool> can-build;
     in property <bool> can-cancel;
+    in property <bool> can-refresh;
     in property <bool> can-pan-back;
     in property <bool> can-pan-forward;
     in property <bool> can-zoom-in;
@@ -49,6 +50,7 @@ export global TimelineUi {
 
     callback build();
     callback cancel();
+    callback refresh();
     callback reorder(int);
     callback pan(int);
     callback zoom(int);
@@ -146,8 +148,15 @@ component TimelineGraph inherits KeyboardFocus {
 }
 
 export component TimelinePane inherits VerticalLayout {
+    in property <bool> active;
     callback copy(string);
     spacing: Tokens.space-2;
+
+    Timer {
+        interval: 400ms;
+        running: root.active && TimelineUi.expanded && TimelineUi.can-refresh;
+        triggered => { TimelineUi.refresh(); }
+    }
 
     HorizontalLayout {
         spacing: Tokens.space-2;

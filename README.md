@@ -70,8 +70,9 @@ codec is young.
   seek can require decoding from the start of the stream. You can cancel the seek.
   When timing is unavailable, playback uses a labeled 30 fps assumption.
   A decode error leaves the navigator, syntax, and bytes available.
-- In Analyze, select **Show Frame Timeline** and then **Build Timeline**. When the
-  scan ends, the timeline shows the indexed range and its verification status.
+- In Analyze, select **Show Frame Timeline** and then **Build Timeline**. You can
+  inspect the indexed rows during the scan. The timeline shows the available
+  range and its verification status.
   Use **Coded order** to include frames with no output. Use **Output order** to
   inspect displayed pictures. A cancelled scan shows the retained rows with
   partial coverage.

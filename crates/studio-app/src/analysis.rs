@@ -224,6 +224,8 @@ pub enum Input {
     TimelineBuild,
     /// Stop collecting timeline facts.
     TimelineCancel,
+    /// Refresh indexed rows during an active timeline scan.
+    TimelineRefresh,
     /// Request a range in the selected order.
     TimelineRange {
         /// The timeline order.
@@ -683,6 +685,7 @@ impl Analysis {
             | Input::CancelValidation => self.evidence_input(at, input, out),
             Input::TimelineBuild
             | Input::TimelineCancel
+            | Input::TimelineRefresh
             | Input::TimelineRange { .. }
             | Input::TimelineSelect(_)
             | Input::TimelineStep(_)

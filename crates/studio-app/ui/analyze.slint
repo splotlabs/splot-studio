@@ -1015,6 +1015,7 @@ export component AnalyzeView inherits VerticalLayout {
         spacing: Tokens.space-2;
 
         if TimelineUi.available: TimelinePane {
+            active: root.visible;
             copy(text) => { root.copy(text); }
         }
 

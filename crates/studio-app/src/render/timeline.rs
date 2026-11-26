@@ -24,6 +24,7 @@ pub(super) fn render(window: &AppWindow, analysis: &Analysis) {
     ui.set_available(doc.is_some_and(|doc| matches!(doc.phase(), Phase::Open(_))));
     let Some(doc) = doc else {
         ui.set_built(false);
+        ui.set_can_refresh(false);
         ui.set_exact_statistics(SharedString::new());
         return;
     };
@@ -32,6 +33,7 @@ pub(super) fn render(window: &AppWindow, analysis: &Analysis) {
     ui.set_built(timeline.shown());
     ui.set_can_build(!timeline.busy());
     ui.set_can_cancel(timeline.can_cancel());
+    ui.set_can_refresh(timeline.can_refresh());
     ui.set_status(
         timeline
             .notice()
@@ -369,6 +371,7 @@ pub(crate) fn bind(window: &AppWindow, send: impl Fn(Input) + Clone + 'static) {
     };
     ui.on_build(on(Input::TimelineBuild));
     ui.on_cancel(on(Input::TimelineCancel));
+    ui.on_refresh(on(Input::TimelineRefresh));
     ui.on_findings(on(Input::TimelineLinkFindings));
     ui.on_step({
         let send = send.clone();
