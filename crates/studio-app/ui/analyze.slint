@@ -8,6 +8,7 @@
 // answers by setting the global again. Only the visible rows and one byte
 // window exist here, however large the file. Nothing here reads files.
 
+import { TimelinePane, TimelineUi } from "timeline.slint";
 import { Button, ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
 import { Tokens } from "tokens.slint";
 import { DecodeExport, ExportPurpose } from "export-setup.slint";
@@ -1012,6 +1013,10 @@ export component AnalyzeView inherits VerticalLayout {
 
     if Analysis.state == AnalysisState.open: VerticalLayout {
         spacing: Tokens.space-2;
+
+        if TimelineUi.available: TimelinePane {
+            copy(text) => { root.copy(text); }
+        }
 
         HorizontalLayout {
             spacing: Tokens.space-2;

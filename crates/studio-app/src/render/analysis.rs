@@ -23,6 +23,7 @@ use crate::ui::{
 ///
 /// Public so renderer snapshots and UI tests can show a state.
 pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
+    super::timeline::render(window, analysis);
     let global = window.global::<Global>();
     global.set_visible_rows(int(VISIBLE_ROWS));
     let documents: Vec<SharedString> = analysis
