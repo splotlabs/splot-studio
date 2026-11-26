@@ -10,9 +10,12 @@
 //! length prefix span, an IVF record header span and every elementary-stream
 //! span are Studio arithmetic on those values ([`Provenance::Derived`]).
 
+use std::fmt;
 use std::fs::File;
-use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
+use std::ops::Deref;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -97,7 +100,6 @@ pub struct Document {
     stamp: FileChangeStamp,
     summary: DocumentSummary,
     index: Index,
-    scan: Option<Scan<BufReader<HashReader<File>>>>,
     evidence: Evidence,
     cache: Option<CacheSession>,
 }
@@ -112,27 +114,38 @@ impl Document {
     /// nor Annex B, [`AnalysisFailure::Cancelled`], and
     /// [`AnalysisFailure::SourceChanged`] when it changed while being read.
     pub fn open(source: &WirePath, cancelled: &dyn Fn() -> bool) -> Result<Self, Refusal> {
+        Ok(Self::open_complete(source, cancelled)?.document)
+    }
+
+    pub(super) fn open_complete<'scan>(
+        source: &WirePath,
+        cancelled: impl Fn() -> bool + 'scan,
+    ) -> Result<OpeningDocument<'scan>, Refusal> {
         let mut document = Self::open_impl(source, cancelled, false)?;
-        while !document.advance(cancelled)? {}
+        while !document.advance()? {}
         Ok(document)
     }
 
     /// Opens the source and reads its first framing unit.
     ///
+    /// The scan polls `cancelled` before each framing read and while it indexes
+    /// IVF payloads. The caller can change the state observed by this predicate
+    /// until the scan ends.
+    ///
     /// # Errors
     /// The source could not be identified, opened or read.
-    pub fn open_progressive(
+    pub fn open_progressive<'scan>(
         source: &WirePath,
-        cancelled: &dyn Fn() -> bool,
-    ) -> Result<Self, Refusal> {
+        cancelled: impl Fn() -> bool + 'scan,
+    ) -> Result<OpeningDocument<'scan>, Refusal> {
         Self::open_impl(source, cancelled, true)
     }
 
-    fn open_impl(
+    fn open_impl<'scan>(
         source: &WirePath,
-        cancelled: &dyn Fn() -> bool,
+        cancelled: impl Fn() -> bool + 'scan,
         cached: bool,
-    ) -> Result<Self, Refusal> {
+    ) -> Result<OpeningDocument<'scan>, Refusal> {
         let io =
             |what: &str, e: io::Error| Refusal::new(AnalysisFailure::Io, format!("{what}: {e}"));
         let path = source
@@ -173,10 +186,7 @@ impl Document {
             ));
         }
         if cancelled() {
-            return Err(Refusal::new(
-                AnalysisFailure::Cancelled,
-                "The open was cancelled.",
-            ));
+            return Err(super::cancelled_open());
         }
         let header =
             probe_ivf_header(&mut reader).map_err(|e| io("Cannot inspect the file header", e))?;
@@ -187,13 +197,15 @@ impl Document {
             })?;
         }
         let buffer_bytes = header.map_or(8192, |header| usize::from(header.header_len).max(8192));
-        let mut input = BufReader::with_capacity(buffer_bytes, HashReader::new(reader));
+        let cancelled: Rc<dyn Fn() -> bool + 'scan> = Rc::new(cancelled);
+        let mut input =
+            BufReader::with_capacity(buffer_bytes, ScanReader::new(reader, Rc::clone(&cancelled)));
         // Seed the digest for the IVF header even before the first record.
-        if header.is_some() {
-            use std::io::BufRead;
-            input
-                .fill_buf()
-                .map_err(|e| io("Cannot read the file", e))?;
+        if header.is_some()
+            && let Err(error) = input.fill_buf()
+            && !cancelled()
+        {
+            return Err(io("Cannot read the file", error));
         }
         let mut scan = Scan::new(input);
         scan.builder.framing = header.map(|_| Framing::Ivf);
@@ -214,8 +226,8 @@ impl Document {
                     None,
                 )
                 .map(Some)?,
-            Some(_) => None,
-            None => scan.step(fingerprint.len, &mut index, cancelled)?,
+            Some(_) if !cancelled() => None,
+            _ => scan.step(fingerprint.len, &mut index, cancelled.as_ref())?,
         };
         let summary = scan.summary(fingerprint, &index, outcome.as_ref());
         let cache = cached
@@ -228,76 +240,17 @@ impl Document {
             id,
             stamp,
             index,
-            scan: outcome.is_none().then_some(scan),
             evidence: Evidence::default(),
             cache,
         };
         document.check()?;
-        if document.scan.is_none() {
+        if outcome.is_some() {
             document.publish_cache();
         }
-        Ok(document)
-    }
-
-    /// Reads another batch of framing units. Returns true when the scan ends.
-    ///
-    /// # Errors
-    /// The source changed or the scan could not continue.
-    pub fn advance(&mut self, cancelled: &dyn Fn() -> bool) -> Result<bool, Refusal> {
-        self.check()?;
-        if self.scan.is_none() {
-            return Ok(true);
-        }
-        // Keep a useful cold prefix available while the worker verifies a cache candidate.
-        let has_prefix =
-            self.summary.elements > 1 && (self.summary.obus > 0 || self.summary.packets > 1);
-        let mut cache_cancelled = false;
-        if has_prefix && let Some(cache) = &mut self.cache {
-            match cache.advance(&self.summary, cancelled) {
-                Ok(Progress::Warm(entry)) => {
-                    let (index, summary) = *entry;
-                    self.check()?;
-                    self.index = index;
-                    self.summary = summary;
-                    self.scan = None;
-                    return Ok(true);
-                }
-                Ok(Progress::Reading) => {
-                    self.check()?;
-                    return Ok(false);
-                }
-                Ok(Progress::Cold) => {}
-                Err(error) if error.code == AnalysisFailure::Cancelled => cache_cancelled = true,
-                Err(error) => return Err(error),
-            }
-        }
-        let Some(scan) = &mut self.scan else {
-            return Ok(true);
-        };
-        let fingerprint = self.summary.fingerprint;
-        let start = scan.units.get_ref().get_ref().bytes;
-        let rows = self.index.len();
-        let mut outcome = None;
-        for _ in 0..256 {
-            outcome = scan.step(fingerprint.len, &mut self.index, &|| {
-                cache_cancelled || cancelled()
-            })?;
-            if outcome.is_some()
-                || self.index.len() - rows >= 256
-                || scan.units.get_ref().get_ref().bytes - start >= 4 << 20
-            {
-                break;
-            }
-        }
-        self.summary = scan.summary(fingerprint, &self.index, outcome.as_ref());
-        if outcome.is_some() {
-            self.scan = None;
-        }
-        self.check()?;
-        if self.scan.is_none() {
-            self.publish_cache();
-        }
-        Ok(self.scan.is_none())
+        Ok(OpeningDocument {
+            document,
+            scan: outcome.is_none().then_some(scan),
+        })
     }
 
     fn publish_cache(&self) {
@@ -385,6 +338,90 @@ impl Document {
     }
 }
 
+/// A document with framing work that can advance between foreground requests.
+#[derive(Debug)]
+pub struct OpeningDocument<'scan> {
+    document: Document,
+    scan: Option<Scan<BufReader<ScanReader<'scan, File>>>>,
+}
+
+impl Deref for OpeningDocument<'_> {
+    type Target = Document;
+
+    fn deref(&self) -> &Self::Target {
+        &self.document
+    }
+}
+
+impl OpeningDocument<'_> {
+    pub(super) fn document_mut(&mut self) -> &mut Document {
+        &mut self.document
+    }
+
+    /// Reads another batch of framing units. Returns true when the scan ends.
+    ///
+    /// # Errors
+    /// The source changed or the scan could not continue.
+    pub fn advance(&mut self) -> Result<bool, Refusal> {
+        let document = &mut self.document;
+        document.check()?;
+        let Some(scan) = &self.scan else {
+            return Ok(true);
+        };
+        let cancelled = Rc::clone(&scan.units.get_ref().get_ref().cancelled);
+        // Keep a useful cold prefix available while the worker verifies a cache candidate.
+        let has_prefix = document.summary.elements > 1
+            && (document.summary.obus > 0 || document.summary.packets > 1);
+        let mut cache_cancelled = false;
+        if has_prefix && let Some(cache) = &mut document.cache {
+            match cache.advance(&document.summary, cancelled.as_ref()) {
+                Ok(Progress::Warm(entry)) => {
+                    let (index, summary) = *entry;
+                    document.check()?;
+                    document.index = index;
+                    document.summary = summary;
+                    self.scan = None;
+                    return Ok(true);
+                }
+                Ok(Progress::Reading) => {
+                    document.check()?;
+                    return Ok(false);
+                }
+                Ok(Progress::Cold) => {}
+                Err(error) if error.code == AnalysisFailure::Cancelled => cache_cancelled = true,
+                Err(error) => return Err(error),
+            }
+        }
+        let Some(scan) = &mut self.scan else {
+            return Ok(true);
+        };
+        let fingerprint = document.summary.fingerprint;
+        let start = scan.units.get_ref().get_ref().hash.bytes;
+        let rows = document.index.len();
+        let mut outcome = None;
+        for _ in 0..256 {
+            outcome = scan.step(fingerprint.len, &mut document.index, &|| {
+                cache_cancelled || cancelled()
+            })?;
+            if outcome.is_some()
+                || document.index.len() - rows >= 256
+                || scan.units.get_ref().get_ref().hash.bytes - start >= 4 << 20
+            {
+                break;
+            }
+        }
+        document.summary = scan.summary(fingerprint, &document.index, outcome.as_ref());
+        if outcome.is_some() {
+            self.scan = None;
+        }
+        document.check()?;
+        if self.scan.is_none() {
+            document.publish_cache();
+        }
+        Ok(self.scan.is_none())
+    }
+}
+
 fn probe_ivf_header(reader: &mut File) -> io::Result<Option<IvfHeader>> {
     let mut prefix = [0; 4];
     let ivf = match reader.read_exact(&mut prefix) {
@@ -424,6 +461,36 @@ impl<R: Read> Read for Checked<'_, R> {
         }
         let max = buf.len().min(1 << 20);
         self.inner.read(&mut buf[..max])
+    }
+}
+
+/// Keeps the same cancellation predicate through native reads and scan steps.
+struct ScanReader<'a, R> {
+    hash: HashReader<R>,
+    cancelled: Rc<dyn Fn() -> bool + 'a>,
+}
+
+impl<'a, R> ScanReader<'a, R> {
+    fn new(inner: R, cancelled: Rc<dyn Fn() -> bool + 'a>) -> Self {
+        Self {
+            hash: HashReader::new(inner),
+            cancelled,
+        }
+    }
+}
+
+impl<R> fmt::Debug for ScanReader<'_, R> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScanReader")
+            .field("bytes", &self.hash.bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: Read> Read for ScanReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        Checked::new(&mut self.hash, self.cancelled.as_ref()).read(buffer)
     }
 }
 
@@ -1035,7 +1102,7 @@ impl<R: Read> Scan<R> {
     }
 }
 
-impl Scan<BufReader<HashReader<File>>> {
+impl<R: Read> Scan<BufReader<ScanReader<'_, R>>> {
     fn summary(
         &self,
         fingerprint: SourceFingerprint,
@@ -1047,8 +1114,8 @@ impl Scan<BufReader<HashReader<File>>> {
             self.builder.framing.unwrap_or(Framing::AnnexB),
             self.header,
             outcome.cloned().unwrap_or(ScanOutcome::Scanning),
-            (self.units.get_ref().get_ref().bytes >= index.end() || outcome.is_some())
-                .then(|| self.units.get_ref().get_ref().snapshot()),
+            (self.units.get_ref().get_ref().hash.bytes >= index.end() || outcome.is_some())
+                .then(|| self.units.get_ref().get_ref().hash.snapshot()),
         )
     }
 }

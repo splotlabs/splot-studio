@@ -1040,7 +1040,6 @@ fn a_document_closed_while_read_frees_its_slot() -> TestResult {
             document: 4,
             source: WirePath::from_path(&long),
         },
-        Command::AnalysisCancel { document: 4 },
         Command::AnalysisClose { document: 4 },
         Command::AnalysisOpen {
             document: 5,
@@ -1048,13 +1047,13 @@ fn a_document_closed_while_read_frees_its_slot() -> TestResult {
         },
     ])?;
     let mut answers = std::collections::HashMap::new();
-    for _ in 0..4 {
+    for _ in 0..3 {
         let answer = inspect.next()?;
         answers.insert(answer.request_id, answer.body);
     }
     assert!(
         matches!(
-            answers.get(&ids[3]),
+            answers.get(&ids[2]),
             Some(Event::AnalysisOpened { document: 5, .. })
         ),
         "{answers:?}"

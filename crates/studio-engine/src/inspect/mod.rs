@@ -43,7 +43,7 @@ use studio_domain::protocol::{
 use studio_domain::syntax::SYNTAX_SCHEMA;
 use studio_domain::validation::{VALIDATION_SCHEMA, ValidationEvidence, ValidationSettings};
 
-use self::document::{Document, Refusal};
+use self::document::{Document, OpeningDocument, Refusal};
 use crate::job::JOB_STACK_BYTES;
 use crate::worker::{SessionError, request_id_of};
 use crate::{build_identity, capabilities};
@@ -458,6 +458,16 @@ fn route<W: Write>(shared: &Shared<W>, requests: &SyncSender<Queued>, id: u64, c
                 },
             );
         }
+        Command::AnalysisClose { document } => {
+            let mut ledger = shared.ledger();
+            if requests.try_send((id, document, Request::Close)).is_ok() {
+                // Let the active read yield before the scheduler handles the close.
+                ledger.cancel(Pending::Open(document));
+            } else {
+                drop(ledger);
+                busy(shared, id, document);
+            }
+        }
         Command::AnalysisOpen { document, source } => {
             queue_open(shared, requests, id, document, source, false);
         }
@@ -577,7 +587,6 @@ fn queued_request(command: &Command) -> Option<(u64, Request)> {
                 kind,
             }),
         ),
-        Command::AnalysisClose { document } => (document, Request::Close),
         _ => return None,
     })
 }
@@ -741,7 +750,7 @@ struct Scheduler<'scope, 'env, W> {
     shared: &'scope Shared<W>,
     scope: &'scope thread::Scope<'scope, 'env>,
     replies: &'scope SyncSender<Queued>,
-    documents: Vec<(u64, Document)>,
+    documents: Vec<(u64, OpeningDocument<'scope>)>,
     batch: batch::Archive,
     scans: VecDeque<Scan>,
     waiting: VecDeque<Queued>,
@@ -806,7 +815,9 @@ impl<W: Write + Send> Scheduler<'_, '_, W> {
                 let result = self
                     .document_index(document)
                     .ok_or_else(|| unknown_document(document))
-                    .and_then(|at| serve_document(&mut self.documents[at].1, document, id, query));
+                    .and_then(|at| {
+                        serve_document(self.documents[at].1.document_mut(), document, id, query)
+                    });
                 result.unwrap_or_else(|error| self.fail_document(document, error))
             }
         };
@@ -814,15 +825,16 @@ impl<W: Write + Send> Scheduler<'_, '_, W> {
     }
 
     fn open_document(&mut self, id: u64, document: u64, source: &WirePath, progressive: bool) {
-        let cancelled = || self.shared.cancelled(Pending::Open(document));
+        let shared = self.shared;
+        let cancelled = move || shared.cancelled(Pending::Open(document));
         let opened = if cancelled() {
             Err(cancelled_open())
         } else if self.documents.len() >= MAX_DOCUMENTS {
             Err(open_limit())
         } else if progressive {
-            Document::open_progressive(source, &cancelled)
+            Document::open_progressive(source, cancelled)
         } else {
-            Document::open(source, &cancelled)
+            Document::open_complete(source, cancelled)
         };
         let answer = match opened {
             Ok(doc) => {
@@ -860,7 +872,7 @@ impl<W: Write + Send> Scheduler<'_, '_, W> {
         };
         let shared = self.shared;
         let doc = &mut self.documents[at].1;
-        match doc.advance(&|| shared.cancelled(Pending::Open(document))) {
+        match doc.advance() {
             Ok(true) => {
                 let summary = doc.summary().clone();
                 settle_open(
@@ -917,7 +929,7 @@ impl<W: Write + Send> Scheduler<'_, '_, W> {
         }
 
         let operation = request.pending(document, id);
-        let task = request.prepare(&mut self.documents[at].1, id)?;
+        let task = request.prepare(self.documents[at].1.document_mut(), id)?;
         let shared = self.shared;
         let replies = self.replies;
         let job = thread::Builder::new()
@@ -933,7 +945,7 @@ impl<W: Write + Send> Scheduler<'_, '_, W> {
             })
             .map_err(|error| {
                 if matches!(operation, Pending::Identity { .. }) {
-                    self.documents[at].1.drop_identity(id);
+                    self.documents[at].1.document_mut().drop_identity(id);
                 }
                 Refusal::new(
                     AnalysisFailure::Io,
@@ -952,7 +964,7 @@ impl<W: Write + Send> Scheduler<'_, '_, W> {
         let answer = self
             .document_index(document)
             .ok_or_else(|| unknown_document(document))
-            .and_then(|at| result.finish(&mut self.documents[at].1, document, id))
+            .and_then(|at| result.finish(self.documents[at].1.document_mut(), document, id))
             .unwrap_or_else(|error| self.fail_document(document, error));
         settle_evidence(self.shared, id, operation, answer);
     }
@@ -1130,7 +1142,8 @@ fn abandon_scan<W: Write>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Ledger, Pending};
+    use super::{Command, Ledger, Out, Pending, Request, Shared, route};
+    use std::sync::{Mutex, mpsc};
 
     /// Queues `document` as the reader does when the queue takes it.
     fn queued(ledger: &mut Ledger, document: u64) -> bool {
@@ -1163,6 +1176,28 @@ mod tests {
         // Ids only increase; an id never sent is not pending.
         assert!(!ledger.admits(4) && !ledger.admits(2));
         assert!(!ledger.cancel(Pending::Open(9)));
+    }
+
+    #[test]
+    fn a_queued_close_cancels_only_its_inflight_read() {
+        let shared = Shared {
+            out: Mutex::new(Out {
+                writer: Vec::new(),
+                error: None,
+            }),
+            ledger: Mutex::new(Ledger::default()),
+            stopped: false.into(),
+        };
+        shared.ledger().queue_open(1);
+        shared.ledger().queue_open(2);
+        let (tx, rx) = mpsc::sync_channel(1);
+        route(&shared, &tx, 3, Command::AnalysisClose { document: 1 });
+        // The scheduler has not yet received the close.
+        assert!(shared.cancelled(Pending::Open(1)));
+        assert!(!shared.cancelled(Pending::Open(2)));
+        route(&shared, &tx, 4, Command::AnalysisClose { document: 2 });
+        assert!(!shared.cancelled(Pending::Open(2)));
+        assert!(matches!(rx.try_recv(), Ok((3, 1, Request::Close))));
     }
 
     /// An open the full queue refused is not recorded: its id can be sent

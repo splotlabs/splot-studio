@@ -1194,58 +1194,68 @@ fn a_kept_element_takes_at_most_64_bytes() {
     assert!(size_of::<Item>() <= 64, "{}", size_of::<Item>());
 }
 
-/// Serves `bytes` and raises `trip` on read number `trip_at`.
-struct Tripping<'a> {
+/// Waits for the requested read boundary before making cancellation visible.
+struct Chunked<'a> {
     bytes: &'a [u8],
     at: usize,
-    reads: usize,
-    trip_at: usize,
-    trip: &'a Cell<bool>,
+    cancel_after: usize,
+    cancelled: &'a Cell<bool>,
 }
 
-impl Read for Tripping<'_> {
+impl Read for Chunked<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.reads += 1;
-        if self.reads == self.trip_at {
-            self.trip.set(true);
-        }
-        let n = buf.len().min(self.bytes.len() - self.at);
+        let n = buf.len().min(4096).min(self.bytes.len() - self.at);
         buf[..n].copy_from_slice(&self.bytes[self.at..self.at + n]);
         self.at += n;
+        if self.at >= self.cancel_after {
+            self.cancelled.set(true);
+        }
         Ok(n)
     }
 }
 
-/// A cancel during the read of one large unit stops inside it: the next
-/// read fails, and the failure is reported as the cancel, not as I/O.
 #[test]
-fn a_cancel_inside_one_large_unit_stops_its_read() {
-    let mut bytes = vec![0x01, 0x08, 0x81, 0x80, 0x40, 0x64];
-    bytes.resize(bytes.len() + (1 << 20), 0);
-    let trip = Cell::new(false);
-    let cancelled = || trip.get();
-    let mut source = Tripping {
-        bytes: &bytes,
-        at: 0,
-        reads: 0,
-        trip_at: 4,
-        trip: &trip,
-    };
-    let checked = Checked {
-        inner: &mut source,
-        cancelled: &cancelled,
-    };
-    let len = bytes.len() as u64;
-    let got = scan(checked, len, &cancelled);
-    // The temporal delimiter before the cancel is kept; the padding OBU it
-    // stopped in is the region that was not read.
-    let Ok(got) = got else {
-        unreachable!("{got:?}")
-    };
-    assert_eq!(obus(&elements(&got)).len(), 1);
-    assert_eq!(stopped(&got), Some((ProblemKind::Cancelled, 2, len - 2)));
-    // Stopped inside the padding OBU, long before its end.
-    assert!(source.at < bytes.len() / 2, "{}", source.at);
+fn cancellation_interrupts_chunked_framing_reads_in_both_formats() -> Result<(), Refusal> {
+    let mut large = leb128((1 << 20) + 1);
+    large.push(0x64); // Padding OBU.
+    large.resize(large.len() + (1 << 20), 0);
+    for framing in [Framing::AnnexB, Framing::Ivf] {
+        let delimiter = [0x01, 0x08];
+        let (mut bytes, tail) = if framing == Framing::Ivf {
+            let mut bytes = ivf_header(*b"AV02", 32);
+            bytes.extend(record(0, &delimiter));
+            (bytes, record(1, &large))
+        } else {
+            (delimiter.to_vec(), large.clone())
+        };
+        let prefix = bytes.len();
+        bytes.extend(tail);
+        let trip = Cell::new(false);
+        let cancelled = || trip.get();
+        let cancel_after = prefix + 8192;
+        let mut source = Chunked {
+            bytes: &bytes,
+            at: 0,
+            cancel_after,
+            cancelled: &trip,
+        };
+        let read = BufReader::new(ScanReader::new(&mut source, Rc::new(cancelled)));
+        let len = bytes.len() as u64;
+        let got = scan(read, len, &cancelled)?;
+        assert_eq!(got.framing, framing);
+        assert_eq!(obus(&elements(&got)).len(), 1);
+        assert_eq!(
+            stopped(&got),
+            Some((ProblemKind::Cancelled, prefix as u64, len - prefix as u64))
+        );
+        assert!((cancel_after..cancel_after + 4096).contains(&source.at));
+        let offset = if framing == Framing::Ivf { 45 } else { 1 };
+        let (_, row) = got
+            .facts
+            .locate(RowFilter::default(), LocateTarget::Offset { offset })?;
+        assert!(matches!(row.element, Element::Obu { .. }));
+    }
+    Ok(())
 }
 
 /// The file changes while the open reads it: the open is refused.
@@ -1386,12 +1396,17 @@ fn progressive_pages_keep_packet_links_and_source_coordinates()
     bytes.extend(record(0, &payload));
     bytes.extend(record(1, &TD_SH));
     std::fs::write(&path, &bytes)?;
-    let mut doc = Document::open_progressive(&WirePath::from_path(&path), &never)
+    let mut doc = Document::open_progressive(&WirePath::from_path(&path), never)
         .map_err(|reason| reason.message)?;
     assert_eq!(doc.summary().outcome, ScanOutcome::Scanning);
     assert_eq!(doc.summary().elements, 1);
-    assert_eq!(doc.bytes(0, 4).map_err(|reason| reason.message)?, *b"DKIF");
-    while !doc.advance(&never).map_err(|reason| reason.message)? {}
+    assert_eq!(
+        doc.document_mut()
+            .bytes(0, 4)
+            .map_err(|reason| reason.message)?,
+        *b"DKIF"
+    );
+    while !doc.advance().map_err(|reason| reason.message)? {}
     assert_eq!(doc.summary().outcome, ScanOutcome::Complete);
     let reference = scanned(&bytes).map_err(|reason| reason.message)?;
     assert_eq!(doc.summary().elements, reference.items.len() as u64);
@@ -1456,7 +1471,15 @@ fn a_large_ivf_record_yields_and_cancels_during_payload_indexing()
     }
     drop(file);
 
-    let mut doc = Document::open_progressive(&WirePath::from_path(&path), &never)
+    let polls = Cell::new(0);
+    let armed = Cell::new(false);
+    let cancel = || {
+        if armed.get() {
+            polls.set(polls.get() + 1);
+        }
+        polls.get() > 16
+    };
+    let mut doc = Document::open_progressive(&WirePath::from_path(&path), cancel)
         .map_err(|error| error.message)?;
     let digest = doc
         .summary()
@@ -1468,8 +1491,8 @@ fn a_large_ivf_record_yields_and_cancels_during_payload_indexing()
         digest.sha256,
         crate::artifact::hex(&Sha256::digest(&header))
     );
-    assert!(!doc.advance(&never).map_err(|error| error.message)?);
-    assert!(!doc.advance(&never).map_err(|error| error.message)?);
+    assert!(!doc.advance().map_err(|error| error.message)?);
+    assert!(!doc.advance().map_err(|error| error.message)?);
     assert_eq!(doc.summary().outcome, ScanOutcome::Scanning);
     assert_eq!(doc.summary().obus, 256);
     let (_, rows) = doc
@@ -1477,12 +1500,8 @@ fn a_large_ivf_record_yields_and_cancels_during_payload_indexing()
         .map_err(|error| error.message)?;
     assert_eq!(rows[0].parent, Some(1));
 
-    let polls = Cell::new(0);
-    let cancel = || {
-        polls.set(polls.get() + 1);
-        polls.get() > 16
-    };
-    assert!(doc.advance(&cancel).map_err(|error| error.message)?);
+    armed.set(true);
+    assert!(doc.advance().map_err(|error| error.message)?);
     assert!(matches!(&doc.summary().outcome,
         ScanOutcome::Stopped { problem } if problem.kind == ProblemKind::Cancelled));
     assert!((257..=272).contains(&doc.summary().obus));
