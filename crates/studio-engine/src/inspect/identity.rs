@@ -434,8 +434,8 @@ mod tests {
     fn distinct_temporal_units_and_non_output_frame_within_one_ivf_packet() -> TestResult {
         let mut source = tempfile::NamedTempFile::new()?;
         source.write_all(BRIDGE_IVF)?;
-        let document =
-            Document::open(&WirePath::from_path(source.path()), &|| false).map_err(refusal)?;
+        let source = source.into_temp_path();
+        let document = Document::open(&WirePath::from_path(&source), &|| false).map_err(refusal)?;
         let summary = document.summary();
         assert_eq!(summary.packets, 1);
         let index = IdentityIndex::new(GrainPolicy::Skip, summary.fingerprint).map_err(refusal)?;
@@ -448,7 +448,11 @@ mod tests {
             IdentityCompletion::Running
         );
         index
-            .scan(&mut source.reopen()?, summary.digest.as_deref(), &|| false)
+            .scan(
+                &mut File::open(&source)?,
+                summary.digest.as_deref(),
+                &|| false,
+            )
             .map_err(refusal)?;
         let summary = index.summary();
         assert!(summary.matches_structure);
@@ -497,12 +501,16 @@ mod tests {
     fn ten_bit_output_paging_and_source_verification() -> TestResult {
         let mut source = tempfile::NamedTempFile::new()?;
         source.write_all(LAYERED_10_BIT)?;
-        let document =
-            Document::open(&WirePath::from_path(source.path()), &|| false).map_err(refusal)?;
+        let source = source.into_temp_path();
+        let document = Document::open(&WirePath::from_path(&source), &|| false).map_err(refusal)?;
         let summary = document.summary();
         let index = IdentityIndex::new(GrainPolicy::Skip, summary.fingerprint).map_err(refusal)?;
         index
-            .scan(&mut source.reopen()?, summary.digest.as_deref(), &|| false)
+            .scan(
+                &mut File::open(&source)?,
+                summary.digest.as_deref(),
+                &|| false,
+            )
             .map_err(refusal)?;
         let page = index.page(IdentityKind::Output, 0, 4).map_err(refusal)?;
         assert!(page.summary.matches_structure);
@@ -520,7 +528,7 @@ mod tests {
         wrong.sha256 = "wrong".into();
         let index = IdentityIndex::new(GrainPolicy::Skip, summary.fingerprint).map_err(refusal)?;
         assert!(matches!(
-            index.scan(&mut source.reopen()?, Some(&wrong), &|| false),
+            index.scan(&mut File::open(&source)?, Some(&wrong), &|| false),
             Err(Refusal {
                 code: AnalysisFailure::SourceChanged,
                 ..
