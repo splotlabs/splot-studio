@@ -210,8 +210,8 @@ impl Cache {
         }
         let _lock = self.lock()?;
         check_cancel(cancelled)?;
-        self.remove_staging()?;
-        self.evict_for(&path, required)?;
+        let staging_bytes = self.remove_staging()?;
+        self.evict_for(&path, required, staging_bytes)?;
 
         self.check_root()?;
         let mut temp = tempfile::Builder::new()
@@ -254,11 +254,11 @@ impl Cache {
         Ok(())
     }
 
-    fn evict_for(&self, path: &Path, required: u64) -> io::Result<()> {
+    fn evict_for(&self, path: &Path, required: u64, staging_bytes: u64) -> io::Result<()> {
         let mut entries = self.entries()?;
         let mut used = entries
             .iter()
-            .fold(0_u64, |sum, entry| sum.saturating_add(entry.bytes));
+            .fold(staging_bytes, |sum, entry| sum.saturating_add(entry.bytes));
         // Reserve enough bytes before changing the directory. A lease keeps its entry
         // in the budget but prevents eviction.
         entries.sort_unstable_by_key(|entry| (entry.path != path, entry.modified));
@@ -297,7 +297,12 @@ impl Cache {
         let _lock = self.lock()?;
         let mut remove = Vec::new();
         for entry in self.entries()?.into_iter().filter(|entry| entry.owned) {
-            let file = self.exclusive_entry(&entry.path)?.ok_or_else(busy)?;
+            let file = self.exclusive_entry(&entry.path)?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Close the documents that use the cache. Try again.",
+                )
+            })?;
             remove.push((entry.path, file));
         }
         self.remove_staging()?;
@@ -415,8 +420,9 @@ impl Cache {
         Ok(entries)
     }
 
-    fn remove_staging(&self) -> io::Result<()> {
+    fn remove_staging(&self) -> io::Result<u64> {
         self.check_root()?;
+        let mut remaining = 0_u64;
         for item in fs::read_dir(&self.root)? {
             let item = item?;
             let name = item.file_name();
@@ -437,10 +443,12 @@ impl Cache {
                     .read_to_end(&mut prefix)?;
                 if MAGIC.starts_with(&prefix) {
                     self.remove_file(&path, &file)?;
+                } else {
+                    remaining = remaining.saturating_add(file.metadata()?.len());
                 }
             }
         }
-        Ok(())
+        Ok(remaining)
     }
 }
 
@@ -787,9 +795,13 @@ mod tests {
         fs::write(&looks_owned, b"media")?;
         cache.max_bytes += 5;
         let stale = cache.root.join(".stage-0123456789abcdef");
+        let noncache_stage = cache.root.join(".stage-abcdef0123456789");
+        fs::write(&noncache_stage, b"media")?;
         fs::write(&unrelated, b"source")?;
         fs::write(&outside, b"output")?;
         fs::write(&stale, &MAGIC[..6])?;
+        assert!(error_is(&store(&cache, &second), io::ErrorKind::WouldBlock));
+        cache.max_bytes += 5;
         store(&cache, &second)?;
         assert!(!stale.exists());
         assert!(
@@ -816,6 +828,7 @@ mod tests {
         assert_eq!(fs::read(unrelated)?, b"source");
         assert_eq!(fs::read(outside)?, b"output");
         assert_eq!(fs::read(looks_owned)?, b"media");
+        assert_eq!(fs::read(noncache_stage)?, b"media");
         Ok(())
     }
 
