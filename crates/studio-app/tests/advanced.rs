@@ -195,7 +195,10 @@ fn check_native_width(rig: &Rig) {
             Instant::now() >= settled && window.get_compact_advanced() == compact
         });
         assert_eq!(native.size().width, size.to_physical(scale).width);
-        assert!(!rig.pixels().is_empty());
+        assert_eq!(
+            rig.pixels().len(),
+            (native.size().width * native.size().height) as usize
+        );
     }
 }
 
