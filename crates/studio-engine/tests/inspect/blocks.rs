@@ -15,7 +15,7 @@ use studio_domain::protocol::{Command, Event};
 use super::{Inspect, TestResult, failure};
 
 const MULTI_TILE: &[u8] = include_bytes!("fixtures/syn-2tile-zone1-edge-128x64-q192.ivf");
-const PADDED: &[u8] = include_bytes!("fixtures/syn-mrl-padded-444-67x67-10bit-q120.ivf");
+const PADDED: &[u8] = include_bytes!("../preview/fixtures/syn-mrl-padded-444-67x67-10bit-q120.ivf");
 const COMPOUND: &[u8] = include_bytes!("fixtures/syn-2frame-sameref-compound-64x32-10bit-q150.ivf");
 
 fn query(coded_offset: u64, x: u32, y: u32) -> BlockQuery {

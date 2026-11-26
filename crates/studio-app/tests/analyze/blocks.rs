@@ -13,7 +13,7 @@ const MULTI_TILE: &[u8] = include_bytes!(
     "../../../studio-engine/tests/inspect/fixtures/syn-2tile-zone1-edge-128x64-q192.ivf"
 );
 const PADDED: &[u8] = include_bytes!(
-    "../../../studio-engine/tests/inspect/fixtures/syn-mrl-padded-444-67x67-10bit-q120.ivf"
+    "../../../studio-engine/tests/preview/fixtures/syn-mrl-padded-444-67x67-10bit-q120.ivf"
 );
 
 pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch) {
