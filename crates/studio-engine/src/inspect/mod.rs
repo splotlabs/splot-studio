@@ -224,7 +224,12 @@ impl EvidenceRequest {
             }
             Self::References(query) => {
                 let (file, limit) = doc.prepare_references(query.coded_offset)?;
-                EvidenceTask::References { file, query, limit }
+                EvidenceTask::References {
+                    file,
+                    query,
+                    limit,
+                    partial: limit < doc.summary().fingerprint.len,
+                }
             }
             Self::Identity { grain, selection } => {
                 let file = doc.open_evidence_source()?;
@@ -247,6 +252,7 @@ enum EvidenceTask {
         file: File,
         query: ReferenceQuery,
         limit: u64,
+        partial: bool,
     },
     Identity {
         file: File,
@@ -264,8 +270,13 @@ impl EvidenceTask {
             Self::Layers(file, query) => {
                 EvidenceResult::Layers(Box::new(layers::inspect(file, query, cancelled)))
             }
-            Self::References { file, query, limit } => EvidenceResult::References(
-                references::replay(file, limit, query, cancelled).map(Box::new),
+            Self::References {
+                file,
+                query,
+                limit,
+                partial,
+            } => EvidenceResult::References(
+                references::replay(file, limit, partial, query, cancelled).map(Box::new),
             ),
             Self::Identity {
                 mut file,

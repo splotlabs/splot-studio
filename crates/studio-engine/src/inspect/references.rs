@@ -26,6 +26,7 @@ use crate::stream::{operating_point_selection, preview_decoder_settings};
 pub(super) fn replay(
     input: impl Read,
     limit: u64,
+    partial: bool,
     query: ReferenceQuery,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<ReferenceEvidence, Refusal> {
@@ -62,6 +63,12 @@ pub(super) fn replay(
             ));
         };
         let base = unit.offset.get();
+        if partial && unit.pts.is_none() && base.checked_add(unit.bytes.len() as u64) == Some(limit)
+        {
+            return Err(unavailable(
+                "The indexed prefix does not verify the end of the selected raw temporal unit.",
+            ));
+        }
         if base > query.coded_offset {
             break;
         }
@@ -258,4 +265,44 @@ fn decode_failed(error: DecodeError) -> Refusal {
 
 fn failure(code: AnalysisFailure, error: impl std::fmt::Display) -> Refusal {
     Refusal::new(code, format!("Cannot inspect references. {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use studio_domain::layers::LayerDecodeSelection;
+
+    #[test]
+    fn a_partial_raw_prefix_needs_the_next_temporal_delimiter()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let source =
+            include_bytes!("../../tests/preview/fixtures/syn-mlayer2-derived-sef-8bit.obu");
+        let mut reader = TemporalUnitReader::new(source.as_slice());
+        let first = reader
+            .next_temporal_unit()?
+            .ok_or("Expected the first unit.")?;
+        let end = first.offset.get() + first.bytes.len() as u64;
+        let query = ReferenceQuery {
+            coded_offset: 44,
+            selection: LayerDecodeSelection::Default,
+            generation: 1,
+        };
+
+        let Err(refused) = replay(source.as_slice(), end, true, query, &|| false) else {
+            return Err("A raw unit at a partial boundary must not reach the decoder.".into());
+        };
+        assert_eq!(refused.code, AnalysisFailure::Unsupported);
+        assert!(refused.message.contains("does not verify the end"));
+
+        let evidence = replay(
+            source.as_slice(),
+            source.len() as u64,
+            false,
+            query,
+            &|| false,
+        )
+        .map_err(|error| error.message)?;
+        assert_eq!(evidence.frame.coded_offset, query.coded_offset);
+        Ok(())
+    }
 }
