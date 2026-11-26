@@ -84,7 +84,7 @@ fn block_query_preserves_tile_intra_and_budget_coverage() -> TestResult {
         },
     )?;
     assert_eq!(budget.coverage, BlockCoverage::Truncated);
-    assert!(budget.records.is_empty());
+    assert_eq!(budget.records, []);
 
     let empty = capture(
         &mut inspect,
@@ -99,7 +99,7 @@ fn block_query_preserves_tile_intra_and_budget_coverage() -> TestResult {
         },
     )?;
     assert_eq!(empty.coverage, BlockCoverage::Complete);
-    assert!(empty.records.is_empty());
+    assert_eq!(empty.records, []);
 
     let invalid = inspect.ask(request(BlockQuery {
         max_events: 0,
@@ -195,6 +195,6 @@ fn block_query_preserves_compound_motion_and_stops_after_a_missing_target() -> T
     let absent = capture(&mut inspect, query(44, 0, 0))?;
     assert_eq!(absent.coverage, BlockCoverage::FrameNotFound);
     assert!(absent.replayed_through < 207);
-    assert!(absent.records.is_empty());
+    assert_eq!(absent.records, []);
     Ok(())
 }

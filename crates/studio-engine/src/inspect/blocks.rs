@@ -355,7 +355,7 @@ mod tests {
         .map_err(|error| error.message)?;
         assert_eq!(evidence.coverage, BlockCoverage::Cancelled);
         assert_eq!(evidence.replayed_through, 0);
-        assert!(evidence.records.is_empty());
+        assert_eq!(evidence.records, []);
         Ok(())
     }
 }
