@@ -107,6 +107,7 @@ fn collect(first: &JobSpec) -> Result<String, Box<dyn Error>> {
     assert_eq!(
         stages,
         [
+            Stage::Checking,
             Stage::FirstPass,
             Stage::Finalizing,
             Stage::Verifying,
@@ -206,6 +207,7 @@ fn both_depths_and_formats_use_the_verified_pass() -> TestResult {
             assert_eq!(report.pass_digest.as_deref(), Some(digest.as_str()));
             assert_eq!(report.frames, FRAMES as u64);
             assert_eq!(report.bytes, fs::metadata(output)?.len());
+            assert!(has_check(&report, CheckKind::PassArtifact));
             assert!(has_check(&report, CheckKind::Structure));
             assert!(has_check(&report, CheckKind::SplotDecode));
             assert_eq!(fs::read(artifact)?, before);
