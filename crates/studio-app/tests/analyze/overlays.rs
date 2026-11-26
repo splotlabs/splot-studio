@@ -20,6 +20,9 @@ const RECTANGLE: &[u8] =
 const CHROMA_TREE: &[u8] = include_bytes!(
     "../../../studio-engine/tests/inspect/fixtures/syn-lossless-sdp-nondc-chroma-v-intra-64x64-10bit.ivf"
 );
+const PADDED: &[u8] = include_bytes!(
+    "../../../studio-engine/tests/preview/fixtures/syn-mrl-padded-444-67x67-10bit-q120.ivf"
+);
 const DENSE: &[u8] = include_bytes!(
     "../../../studio-engine/tests/inspect/fixtures/syn-gdf-xtile-lr-512x256-q190.ivf"
 );
@@ -141,6 +144,7 @@ pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch) {
     );
 
     zoom_and_pan(rig, &settle);
+    inspect_edge(rig, scratch, &settle);
     inspect_chroma(rig, scratch, &settle);
     inspect_dense(rig, scratch, &settle);
 }
@@ -164,6 +168,17 @@ fn zoom_and_pan(rig: &mut Rig, settle: &impl Fn(&mut Rig, &str)) {
     assert!(view(rig).get_outlines().iter().any(|item| item.x < 0));
 }
 
+fn inspect_edge(rig: &mut Rig, scratch: &Scratch, settle: &impl Fn(&mut Rig, &str)) {
+    open(rig, scratch, "coded edge blocks.ivf", PADDED);
+    view(rig).invoke_choose(1);
+    settle(rig, "the cropped coded picture");
+    view(rig).invoke_pick(85, 156, 160, 160);
+    settle(rig, "the coded block at the bottom edge");
+    let picked = view(rig).get_picked();
+    assert!(picked.contains("Coded luma (32, 64) 16×8"), "{picked}");
+    assert!(picked.contains("Visible luma (32, 64) 16×3"), "{picked}");
+}
+
 fn inspect_chroma(rig: &mut Rig, scratch: &Scratch, settle: &impl Fn(&mut Rig, &str)) {
     open(rig, scratch, "overlapping trees.ivf", CHROMA_TREE);
     view(rig).invoke_choose(1);
@@ -178,6 +193,14 @@ fn inspect_chroma(rig: &mut Rig, scratch: &Scratch, settle: &impl Fn(&mut Rig, &
     settle(rig, "the overlapping chroma block");
     assert!(view(rig).get_picked().contains("chroma tree"));
     assert!(view(rig).get_picked().contains("Coded luma (0, 0) 64×64"));
+    view(rig).invoke_choose(5);
+    settle(rig, "observed prediction tool use");
+    assert!(
+        view(rig)
+            .get_rows()
+            .iter()
+            .any(|row| row.label.starts_with("Unused"))
+    );
 }
 
 fn inspect_dense(rig: &mut Rig, scratch: &Scratch, settle: &impl Fn(&mut Rig, &str)) {
@@ -204,7 +227,16 @@ fn inspect_dense(rig: &mut Rig, scratch: &Scratch, settle: &impl Fn(&mut Rig, &s
     eprintln!(
         "Dense overlay. {outlined} outlines. Capture {capture_elapsed:?}. Median software redraw off {redraw_without_evidence:?}, on {redraw_with_evidence:?}."
     );
+    view(rig).invoke_choose_plane(2);
+    settle(rig, "the dense chroma quantizer map");
+    let chroma_outlines = view(rig).get_outlines().row_count();
+    assert!((1..=max_records).contains(&chroma_outlines));
+    eprintln!(
+        "Dense chroma overlay. {chroma_outlines} outlines. Median software redraw {:?}.",
+        redraw_time(rig)
+    );
 
+    view(rig).invoke_choose_plane(1);
     view(rig).invoke_pick(172, 24, 200, 100);
     view(rig).invoke_choose_plane(2);
     settle(rig, "the plane change cancelled the old point");
