@@ -329,7 +329,7 @@ fn serve<W: Write>(
                 queue_validation(shared, requests, id, document, settings);
             }
             command => {
-                if let Some((document, request)) = queued_request(command) {
+                if let Some((document, request)) = queued_request(&command) {
                     if requests.try_send((id, document, request)).is_err() {
                         busy(shared, id, document);
                     }
@@ -347,8 +347,8 @@ fn serve<W: Write>(
     }
 }
 
-fn queued_request(command: Command) -> Option<(u64, Request)> {
-    Some(match command {
+fn queued_request(command: &Command) -> Option<(u64, Request)> {
+    Some(match *command {
         Command::AnalysisPage {
             document,
             filter,
