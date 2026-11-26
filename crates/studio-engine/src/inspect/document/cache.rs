@@ -450,6 +450,7 @@ impl Cache {
 
     #[cfg(not(unix))]
     fn open_regular(&self, path: &Path) -> io::Result<Option<File>> {
+        self.check_root()?;
         match fs::symlink_metadata(path) {
             Ok(metadata) if owned_regular(&metadata) => File::open(path).map(Some),
             Ok(_) => Ok(None),
