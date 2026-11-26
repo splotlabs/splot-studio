@@ -24,6 +24,7 @@ use thiserror::Error;
 
 use crate::analysis::{AnalysisFailure, DocumentSummary, Framing, LocateTarget, Row, RowFilter};
 use crate::job::{Failure, JobReport, JobSpec, Progress, SourceFacts, Stage, WirePath};
+use crate::options::{EffectiveOption, FieldError, OptionDescriptor, OptionRequest};
 use crate::preview::{
     MAX_PICTURE_BYTES, PictureBox, PictureFailure, PictureFrame, PictureHeader, PictureTarget,
     PictureView,
@@ -31,7 +32,7 @@ use crate::preview::{
 use crate::settings::OutputKind;
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -91,6 +92,17 @@ pub struct Capabilities {
     pub media_tool: Option<MediaTool>,
     /// The framings the inspect process reads.
     pub analysis_framings: Vec<Framing>,
+    /// The encoder option schema available from the job worker.
+    pub options: Option<OptionsIdentity>,
+}
+
+/// Identifies the job worker's encoder option metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionsIdentity {
+    /// The schema version used by the option commands.
+    pub schema: u32,
+    /// The full Git revision of the encoder in this engine.
+    pub codec_revision: String,
 }
 
 /// Where the engine found its `FFmpeg`.
@@ -120,6 +132,30 @@ pub enum Command {
     Hello {
         /// The app build.
         client: BuildIdentity,
+    },
+    /// Job worker only. Lists encoder option descriptors in schema order.
+    DescribeOptions {
+        /// The schema version from the handshake.
+        schema: u32,
+        /// The first descriptor index, starting at zero.
+        first: u32,
+        /// One through [`crate::options::MAX_OPTIONS_PAGE_ITEMS`] descriptors.
+        count: u32,
+    },
+    /// Job worker only. Validates settings and lists their effective values.
+    /// The reply can arrive after replies to later commands. The worker
+    /// returns [`ErrorCode::Busy`] if one request is already waiting.
+    ResolveOptions {
+        /// The schema version from the handshake.
+        schema: u32,
+        /// The source facts returned by a probe.
+        source: Box<SourceFacts>,
+        /// The requested encoder settings.
+        settings: OptionRequest,
+        /// The first effective value index, starting at zero.
+        first: u32,
+        /// One through [`crate::options::MAX_OPTIONS_PAGE_ITEMS`] values.
+        count: u32,
     },
     /// Reads a source's header and stream inventory. Answered by
     /// [`Event::Probed`] or [`Event::Failed`]. Nothing is decoded or written.
@@ -263,6 +299,10 @@ pub enum ErrorCode {
     IncompatibleVersion,
     /// The frame or its body could not be decoded.
     Malformed,
+    /// The reply exceeds the control message byte limit.
+    PayloadLimit,
+    /// The encoder option resolver's one waiting slot is full.
+    Busy,
     /// A job is already running, there is none to cancel, or this kind of
     /// engine process does not serve the command.
     WrongState,
@@ -285,6 +325,29 @@ pub enum Event {
         code: ErrorCode,
         /// A human-readable explanation.
         message: String,
+    },
+    /// Answers [`Command::DescribeOptions`].
+    OptionsDescribed {
+        /// The first descriptor index.
+        first: u32,
+        /// The total number of descriptors.
+        total: u32,
+        /// The descriptors in this page.
+        options: Vec<OptionDescriptor>,
+    },
+    /// Answers [`Command::ResolveOptions`].
+    OptionsResolved {
+        /// The first effective value index.
+        first: u32,
+        /// The total number of effective values.
+        total: u32,
+        /// The effective values in this page.
+        values: Vec<EffectiveOption>,
+    },
+    /// Refuses an encoder option query.
+    OptionsFailed {
+        /// The field and reason for refusal.
+        error: FieldError,
     },
     /// Answers [`Command::Probe`].
     Probed {

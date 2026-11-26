@@ -534,6 +534,7 @@ mod tests {
                 encode_outputs: vec![OutputKind::Ivf],
                 media_tool: None,
                 analysis_framings: Vec::new(),
+                options: None,
             },
         };
         assert!(capable.summary().ends_with("encodes AV2 IVF"));

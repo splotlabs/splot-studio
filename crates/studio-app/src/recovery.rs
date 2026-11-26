@@ -425,8 +425,8 @@ mod tests {
     use std::collections::HashMap;
 
     use studio_domain::job::{
-        ChromaLayout, Failure, FailureCode, JobReport, Omissions, Rational, SourceFacts,
-        SourceFingerprint, SourceReader,
+        ChromaLayout, Failure, FailureCode, JobReport, Omissions, Rational, SourceColor,
+        SourceFacts, SourceFingerprint, SourceReader,
     };
 
     use super::*;
@@ -481,6 +481,7 @@ mod tests {
             height: 36,
             frame_rate: Rational { num: 25, den: 1 },
             pixel_aspect: None,
+            color: SourceColor::default(),
             bit_depth: 8,
             chroma: ChromaLayout::Yuv420,
             frame_count: Some(3),

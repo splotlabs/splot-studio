@@ -18,10 +18,10 @@ use std::process::ChildStdout;
 use std::sync::atomic::AtomicBool;
 
 use splot_encode::y4m::{Y4mColorRange, Y4mError, Y4mHeader, Y4mReader};
-use splot_encode::{ContentDescription, MAX_FRAME_DIMENSION, PixelFormat};
+use splot_encode::{ChromaSamplePosition, ContentDescription, MAX_FRAME_DIMENSION, PixelFormat};
 use studio_domain::job::{
-    ChromaLayout, Disclosure, FailureCode, Omissions, Rational, SourceFacts, SourceFingerprint,
-    SourceReader, VideoTrack,
+    ChromaLayout, ChromaSiting, Disclosure, FailureCode, Omissions, Rational, SourceColor,
+    SourceFacts, SourceFingerprint, SourceReader, VideoTrack,
 };
 use studio_domain::preview::ColorMatrix;
 
@@ -211,6 +211,7 @@ pub fn open(path: &Path, selection: Selection) -> Result<Source, Stop> {
         line.len() as u64,
         frame_bytes,
     )?;
+    let content = header.content_description();
     let facts = SourceFacts {
         reader: SourceReader::Y4m,
         fingerprint,
@@ -235,6 +236,7 @@ pub fn open(path: &Path, selection: Selection) -> Result<Source, Stop> {
         },
         bit_depth: header.bit_depth,
         chroma: chroma(header.format),
+        color: source_color(&header, &content),
         frame_count,
         disclosures: disclosures(&header),
     };
@@ -249,12 +251,35 @@ pub fn open(path: &Path, selection: Selection) -> Result<Source, Stop> {
         facts,
         id,
         matrix: None,
-        content: header.content_description(),
+        content,
         path: path.to_path_buf(),
         frames: Frames::Y4m(reader),
         position: 0,
         seek: Some(seek),
     })
+}
+
+/// Describes the colour values that the probe can pass to the encoder.
+pub(crate) fn source_color(header: &Y4mHeader, content: &ContentDescription) -> SourceColor {
+    let stated = |value| (value != ContentDescription::UNSPECIFIED).then_some(value);
+    SourceColor {
+        primaries: stated(content.color_primaries),
+        transfer: stated(content.transfer_characteristics),
+        matrix: stated(content.matrix_coefficients),
+        full_range: header.color_range.map(|_| content.full_range),
+        chroma_siting: content.chroma_sample_position.map(chroma_siting),
+    }
+}
+
+const fn chroma_siting(position: ChromaSamplePosition) -> ChromaSiting {
+    match position {
+        ChromaSamplePosition::Left => ChromaSiting::Left,
+        ChromaSamplePosition::Center => ChromaSiting::Center,
+        ChromaSamplePosition::TopLeft => ChromaSiting::TopLeft,
+        ChromaSamplePosition::Top => ChromaSiting::Top,
+        ChromaSamplePosition::BottomLeft => ChromaSiting::BottomLeft,
+        ChromaSamplePosition::Bottom => ChromaSiting::Bottom,
+    }
 }
 
 /// Reads only what [`open`] reads and reports it.

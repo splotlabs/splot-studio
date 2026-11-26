@@ -28,6 +28,7 @@ pub mod inspect;
 pub mod job;
 pub mod live;
 pub mod media;
+mod options;
 pub mod output;
 pub mod picture;
 pub mod preview;
@@ -61,5 +62,6 @@ pub fn capabilities() -> Capabilities {
         encode_outputs: OutputKind::ALL.to_vec(),
         media_tool: media::identity(),
         analysis_framings: vec![Framing::Ivf, Framing::AnnexB],
+        options: None,
     }
 }

@@ -279,7 +279,8 @@ mod tests {
     use splot_encode::PixelFormat;
     use splot_encode::y4m::Y4mHeader;
     use studio_domain::job::{
-        ChromaLayout, Omissions, Rational, SourceFacts, SourceFingerprint, SourceReader,
+        ChromaLayout, Omissions, Rational, SourceColor, SourceFacts, SourceFingerprint,
+        SourceReader,
     };
 
     use super::*;
@@ -302,6 +303,7 @@ mod tests {
                     den: rate.1,
                 },
                 pixel_aspect: None,
+                color: SourceColor::default(),
                 bit_depth: 8,
                 chroma: ChromaLayout::Yuv420,
                 frame_count: None,

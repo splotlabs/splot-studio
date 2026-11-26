@@ -271,7 +271,9 @@ fn serve<W: Write>(
                 drop(ledger);
                 continue;
             }
-            Command::Probe { .. }
+            Command::DescribeOptions { .. }
+            | Command::ResolveOptions { .. }
+            | Command::Probe { .. }
             | Command::Start { .. }
             | Command::Cancel
             | Command::Picture { .. }

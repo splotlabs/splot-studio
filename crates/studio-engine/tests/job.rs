@@ -12,7 +12,8 @@ use std::sync::atomic::Ordering;
 use common::{Clip, TestResult, decode, leftovers, run_announced, run_job, settings, spec};
 use splot_encode::SourceFrame;
 use studio_domain::job::{
-    CheckKind, CheckOutcome, ChromaLayout, Disclosure, FailureCode, Rational, Stage,
+    CheckKind, CheckOutcome, ChromaLayout, Disclosure, FailureCode, Rational, SourceColor,
+    SourceFacts, Stage,
 };
 use studio_domain::protocol::Event;
 use studio_domain::settings::OutputKind;
@@ -246,6 +247,13 @@ fn probe_reports_header_facts() -> TestResult {
     );
     assert_eq!(facts.pixel_aspect, Some(Rational { num: 1, den: 1 }));
     assert_eq!(facts.frame_count, Some(3));
+    assert_eq!(facts.color, SourceColor::default());
+    let mut old_facts = serde_json::to_value(&facts)?;
+    let Some(fields) = old_facts.as_object_mut() else {
+        return Err("expected a source record".into());
+    };
+    fields.remove("color");
+    assert_eq!(serde_json::from_value::<SourceFacts>(old_facts)?, facts);
     assert_eq!(facts.disclosures, [Disclosure::ColorUnspecified]);
 
     // No I or A tag: scan unknown, aspect unknown.

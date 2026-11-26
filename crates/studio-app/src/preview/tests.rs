@@ -7,8 +7,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use studio_domain::job::{
-    ChromaLayout, JobReport, Omissions, Rational, SourceFacts, SourceFingerprint, SourceReader,
-    Stage, WirePath,
+    ChromaLayout, JobReport, Omissions, Rational, SourceColor, SourceFacts, SourceFingerprint,
+    SourceReader, Stage, WirePath,
 };
 use studio_domain::preview::{ColorBasis, ColorMatrix, MediaTime, PictureHeader};
 use studio_domain::protocol::Event;
@@ -686,6 +686,7 @@ fn facts() -> SourceFacts {
         height: 360,
         frame_rate: Rational { num: 25, den: 1 },
         pixel_aspect: None,
+        color: SourceColor::default(),
         bit_depth: 8,
         chroma: ChromaLayout::Yuv420,
         frame_count: Some(30),
@@ -704,6 +705,7 @@ fn the_scene_follows_the_file_from_source_to_live_to_result() {
             encode_outputs: studio_domain::settings::OutputKind::ALL.to_vec(),
             media_tool: None,
             analysis_framings: Vec::new(),
+            options: None,
         })),
     );
     let effects = apply(&mut state, Intent::FilesOpened(vec![abs("/videos/a.y4m")]));

@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use studio_domain::job::{
-    ChromaLayout, Failure, FailureCode, JobReport, JobSpec, Omissions, Rational, SourceFacts,
-    SourceFingerprint, SourceReader, Stage, VideoTrack, WirePath,
+    ChromaLayout, Failure, FailureCode, JobReport, JobSpec, Omissions, Rational, SourceColor,
+    SourceFacts, SourceFingerprint, SourceReader, Stage, VideoTrack, WirePath,
 };
 use studio_domain::protocol::{Capabilities, Event, MediaTool, MediaToolOrigin};
 use studio_domain::settings::{Crf, EncoderSettings, OutputKind, SpeedPreset};
@@ -66,6 +66,7 @@ fn facts(frame_count: Option<u64>) -> SourceFacts {
             den: 1001,
         },
         pixel_aspect: None,
+        color: SourceColor::default(),
         bit_depth: 10,
         chroma: ChromaLayout::Yuv420,
         frame_count,
@@ -100,6 +101,7 @@ fn capabilities(media_tool: bool) -> Capabilities {
             origin: MediaToolOrigin::System,
         }),
         analysis_framings: Vec::new(),
+        options: None,
     }
 }
 
@@ -408,6 +410,7 @@ fn encode_needs_a_probe_a_free_destination_and_engine_support() {
         encode_outputs: vec![OutputKind::Ivf],
         media_tool: None,
         analysis_framings: Vec::new(),
+        options: None,
     };
     app.apply(Intent::EngineAnswered(Ok(ivf_only)));
     app.apply(Intent::OutputSelected(1));
