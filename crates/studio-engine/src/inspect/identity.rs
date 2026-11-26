@@ -380,7 +380,7 @@ impl IdentityIndex {
         let ambiguous = unit.pts.is_some() && multiple_temporal_units(unit, cancelled);
         let pts = unit.pts.filter(|_| !ambiguous);
         let mut prefix = 0;
-        let mut access = false;
+        let mut temporal_prefix = None;
         self.state().timeline.start_unit(unit.offset.get());
         while !self.stopped(cancelled) {
             let Some(obu) = cursor.next_obu().map_err(|error| error.to_string())? else {
@@ -388,25 +388,28 @@ impl IdentityIndex {
             };
             let offset = obu.offset.get();
             let kind = obu.header.obu_type;
+            let bytes = u64::from(obu.size);
+            let end = usize::try_from(offset - unit.offset.get() + bytes)
+                .map_err(|_| "The OBU exceeds the supported input size.")?;
             let delimiter = kind == ObuType::TemporalDelimiter;
             if delimiter {
-                access = is_random_access_point(&unit.bytes[prefix..]);
+                temporal_prefix = Some(prefix);
             }
-            let marked = access
-                && matches!(
-                    kind,
-                    ObuType::ClosedLoopKey | ObuType::OpenLoopKey | ObuType::RasFrame
-                );
-            access &= !marked;
-            let bytes = u64::from(obu.size);
+            // Probe once per temporal unit. The prefix ends at this frame OBU,
+            // so a following delimiter cannot turn this unit into a candidate.
+            let marked = matches!(
+                kind,
+                ObuType::ClosedLoopKey | ObuType::OpenLoopKey | ObuType::RasFrame
+            ) && temporal_prefix
+                .take()
+                .is_some_and(|start| is_random_access_point(&unit.bytes[start..end]));
             let mut state = self.state();
             if delimiter {
                 state.append(IdentityKind::Temporal, [offset, 0, 0, 0]);
             }
             let result = state.timeline.obu(offset, bytes, pts, ambiguous, marked);
             state.timeline_result(result);
-            prefix = usize::try_from(offset - unit.offset.get() + bytes)
-                .map_err(|_| "The OBU exceeds the supported input size.")?;
+            prefix = end;
         }
         Ok(())
     }
