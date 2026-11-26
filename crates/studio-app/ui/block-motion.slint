@@ -124,6 +124,7 @@ export component MotionDrawing inherits Rectangle {
 }
 
 export component BlockMotionPane inherits VerticalLayout {
+    callback followed();
     spacing: Tokens.space-2;
 
     HorizontalLayout {
@@ -205,7 +206,10 @@ export component BlockMotionPane inherits VerticalLayout {
                 LinkButton {
                     text: "Follow";
                     description: "Follow. " + predictor.label;
-                    clicked => { BlockMotionView.follow-reference(predictor.position); }
+                    clicked => {
+                        BlockMotionView.follow-reference(predictor.position);
+                        root.followed();
+                    }
                 }
             }
         }

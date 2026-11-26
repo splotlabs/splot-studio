@@ -58,6 +58,7 @@ export component BlockOverlayMenu inherits ComboBox {
 }
 
 export component BlockOverlayPanel inherits VerticalLayout {
+    callback followed();
     spacing: Tokens.space-2;
 
     HorizontalLayout {
@@ -192,15 +193,15 @@ export component BlockOverlayPanel inherits VerticalLayout {
         }
     }
 
-    if BlockMotionView.active: BlockMotionPane { }
+    if BlockMotionView.active: BlockMotionPane {
+        followed => { root.followed(); }
+    }
 }
 
 // The stage and picture use the same physical rectangle and clip.
 export component BlockDrawing inherits Rectangle {
     clip: true;
     accessible-role: none;
-
-    if BlockMotionView.active && BlockMotionView.show-overlay: MotionDrawing { }
 
     // Rust supplies only records in the bounded query that meet this crop.
     for outline in BlockOverlay.outlines: Rectangle {
@@ -255,4 +256,6 @@ export component BlockDrawing inherits Rectangle {
             }
         }
     }
+
+    if BlockMotionView.active && BlockMotionView.show-overlay: MotionDrawing { }
 }

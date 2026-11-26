@@ -127,8 +127,8 @@ codec is young.
   If a capture reaches its limit, zoom in or select a point to read more.
 - Select a coding block to inspect its prediction and motion. Studio shows
   signaled vector differences and resolved base vectors in eighths of a luma
-  sample. **Show Motion** displays available vectors and outlines.
-  **Read References** locates coded pictures in the input slots. **Preview**
+  sample. **Show motion** displays available vectors and outlines.
+  **Read references** locates coded pictures in the input slots. **Preview**
   uses the indexed output when available. **Follow** opens the coded
   reference, and **Back** restores the selected block and viewer position.
 - In Analyze, use **Export Decoded Video** for a stream or range, **Export Frame** for

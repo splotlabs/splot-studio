@@ -61,7 +61,7 @@ fn translation(rig: &mut Rig, scratch: &Scratch) {
             session.state(),
             session.preview(),
             Dirty {
-                picture: false,
+                picture: true,
                 view: true,
                 thumbs: false,
             },
@@ -97,7 +97,8 @@ fn translation(rig: &mut Rig, scratch: &Scratch) {
     rig.settle("key follows the exact reference picture", |session| {
         picture(session.preview().view().output, 72) && !session.analysis().waiting()
     });
-    activate_analyze_key(rig, &Input::Back);
+    rig.press(Key::Return);
+    assert_eq!(rig.inputs.borrow().as_slice(), &[Input::Back]);
     rig.settle("Back restores the block and zoom", |session| {
         picture(session.preview().view().output, 11269) && !session.analysis().waiting()
     });
