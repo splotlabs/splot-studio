@@ -16,6 +16,7 @@
 //! (nothing is at its path any more). `analyze-playback` decodes an AV2 file
 //! from `STUDIO_PLAYBACK_FIXTURE` with the real preview engine. `analyze-sample`
 //! shows a decoded Y plane at 4× and an exact sample value.
+//! `analyze-export-setup` shows the export dialog for a real decoded frame.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -250,7 +251,7 @@ pub fn scenario(name: &str) -> Result<Option<Scenario>, String> {
         Instant::now(),
     );
     match name {
-        "analyze-empty" | "analyze-playback" | "analyze-sample" => {}
+        "analyze-empty" | "analyze-playback" | "analyze-sample" | "analyze-export-setup" => {}
         "analyze-opening" => {
             // Asked for, and never answered here.
             let path = scenario.file("park walk.ivf", &ivf())?;

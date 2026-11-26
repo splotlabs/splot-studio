@@ -754,13 +754,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             analyze.session.state().clone()
         };
         studio_app::render(&window, analyze.session.state(), now);
-        if matches!(name, "analyze-playback" | "analyze-sample") {
+        if matches!(
+            name,
+            "analyze-playback" | "analyze-sample" | "analyze-export-setup"
+        ) {
             window.show()?;
             let stage = PictureBox::clamped(
                 u32::try_from(window.get_stage_px_width()).unwrap_or(1),
                 u32::try_from(window.get_stage_px_height()).unwrap_or(1),
             );
             analyze.playback(stage, name == "analyze-sample")?;
+            if name == "analyze-export-setup" {
+                studio_app::export_setup::Draft::new(
+                    studio_app::ExportPurpose::Frame,
+                    analyze.session.export_sources(),
+                    analyze
+                        .session
+                        .analysis()
+                        .shown()
+                        .map(studio_app::analysis::Document::id),
+                    analyze.session.export_frame_source(),
+                )?
+                .render(&window);
+            }
             studio_app::render_preview(
                 &window,
                 analyze.session.state(),
@@ -778,7 +794,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &studio_app::jobs::list(&encode, analyze.session.analysis()),
         );
         window.show()?;
-        if jobs {
+        if name == "analyze-export-setup" {
+            window.invoke_show_export_setup();
+        } else if jobs {
             window.invoke_show_jobs();
         }
         return capture(&window, out);
