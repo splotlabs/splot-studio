@@ -41,8 +41,10 @@ fn reference_ivf(clip: Clip, config: Config) -> Result<Vec<u8>, Box<dyn std::err
     let handle = job::spawn(move || {
         let mut encoder = Encoder::new(config.clone())?;
         for frame in 0..clip.frames {
-            let mut planes = clip.samples(frame);
-            planes.resize(3, Vec::new());
+            let planes = clip
+                .samples(frame)
+                .try_into()
+                .map_err(|_| "expected three fixture planes")?;
             encoder.send_frame(SourceFrame::new(&config, frame as u64, planes)?)?;
         }
         encoder.flush()?;

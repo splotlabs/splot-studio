@@ -164,12 +164,9 @@ fn import_preserves_8_and_10_bit_samples() -> TestResult {
         clip.write(&src)?;
         let mut source =
             source::open(&src, source::Selection::default()).map_err(|e| e.to_string())?;
-        let config = studio_engine::job::config(
-            &source.header,
-            source.content,
-            settings(OutputKind::Ivf).base,
-        )
-        .map_err(|e| e.to_string())?;
+        let config =
+            studio_engine::job::config(&source.header, source.content, settings(OutputKind::Ivf))
+                .map_err(|e| e.to_string())?;
         for frame in 0..clip.frames {
             let planes = source
                 .read_frame()

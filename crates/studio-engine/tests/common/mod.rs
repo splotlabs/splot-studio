@@ -269,14 +269,11 @@ pub fn fingerprint(path: &Path) -> SourceFingerprint {
     )
 }
 
-pub fn settings(output: OutputKind) -> OptionRequest {
-    OptionRequest {
-        base: EncoderSettings {
-            output,
-            preset: SpeedPreset::new(10).unwrap_or_else(|_| unreachable!()),
-            crf: Crf::new(40).unwrap_or_else(|_| unreachable!()),
-        },
-        values: Default::default(),
+pub fn settings(output: OutputKind) -> EncoderSettings {
+    EncoderSettings {
+        output,
+        preset: SpeedPreset::new(10).unwrap_or_else(|_| unreachable!()),
+        crf: Crf::new(40).unwrap_or_else(|_| unreachable!()),
     }
 }
 
@@ -288,7 +285,10 @@ pub fn spec(source: &Path, destination: &Path, output: OutputKind) -> JobSpec {
         video_stream: 0,
         omissions_acknowledged: false,
         destination: WirePath::from_path(destination),
-        settings: settings(output),
+        settings: OptionRequest {
+            base: settings(output),
+            values: Default::default(),
+        },
         identity: None,
         pass_artifact: None,
     }
