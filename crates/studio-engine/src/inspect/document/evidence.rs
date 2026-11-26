@@ -3,6 +3,8 @@
 
 //! Evidence retained for one generation of an open source.
 
+use std::fs::File;
+
 use serde::Serialize;
 use studio_domain::analysis::{AnalysisFailure, Element, Framing, MAX_PAGE_ELEMENTS, SourceDigest};
 use studio_domain::syntax::{SyntaxEvent, SyntaxSummary};
@@ -11,7 +13,8 @@ use studio_domain::validation::{
 };
 
 use super::{Document, Item, PAGE_BUDGET, Refusal, Seek, SeekFrom, read_file_range};
-use crate::inspect::{syntax, validation};
+use crate::inspect::{ValidationResult, syntax, validation};
+use crate::output::FileId;
 
 #[derive(Debug, Default)]
 pub(super) struct Evidence {
@@ -87,12 +90,7 @@ impl Document {
         Ok((*element, page(events, first, count)?))
     }
 
-    pub(in crate::inspect) fn validate(
-        &mut self,
-        request: u64,
-        settings: &ValidationSettings,
-        cancelled: &dyn Fn() -> bool,
-    ) -> Result<(ValidationSummary, u64), Refusal> {
+    pub(in crate::inspect) fn prepare_validation(&self, request: u64) -> Result<File, Refusal> {
         self.check()?;
         if self
             .evidence
@@ -104,7 +102,37 @@ impl Document {
                 "Use a request ID greater than the last validation request ID.",
             ));
         }
-        let (report, _) = self.validate_source(settings, cancelled)?;
+        self.require_av2()?;
+        let opened = File::open(&self.path);
+        self.check()?;
+        let file = opened.map_err(|error| {
+            Refusal::new(
+                AnalysisFailure::Io,
+                format!("Cannot open the source. {error}"),
+            )
+        })?;
+        let id = FileId::of_file(&file, &self.path).map_err(|error| {
+            Refusal::new(
+                AnalysisFailure::Io,
+                format!("Cannot identify the source. {error}"),
+            )
+        })?;
+        if id != self.id {
+            return Err(Refusal::new(
+                AnalysisFailure::SourceChanged,
+                "The source changed before validation started.",
+            ));
+        }
+        Ok(file)
+    }
+
+    pub(in crate::inspect) fn complete_validation(
+        &mut self,
+        request: u64,
+        result: ValidationResult,
+    ) -> Result<(ValidationSummary, u64), Refusal> {
+        self.check()?;
+        let (report, _) = self.enrich_validation(result?)?;
         let total = report.findings.len() as u64;
         self.evidence.report = Some((request, report.findings));
         Ok((report.summary, total))
@@ -119,11 +147,7 @@ impl Document {
         self.validate_source(settings, cancelled)
     }
 
-    fn validate_source(
-        &mut self,
-        settings: &ValidationSettings,
-        cancelled: &dyn Fn() -> bool,
-    ) -> Result<(ValidationEvidence, SourceDigest), Refusal> {
+    fn require_av2(&self) -> Result<(), Refusal> {
         if self
             .summary
             .ivf_header
@@ -135,6 +159,15 @@ impl Document {
                 "Validation requires an AV2 source.",
             ));
         }
+        Ok(())
+    }
+
+    fn validate_source(
+        &mut self,
+        settings: &ValidationSettings,
+        cancelled: &dyn Fn() -> bool,
+    ) -> ValidationResult {
+        self.require_av2()?;
         let result = self
             .file
             .seek(SeekFrom::Start(0))
@@ -146,7 +179,13 @@ impl Document {
             })
             .and_then(|_| validation::validate(&mut self.file, settings, cancelled));
         self.check()?;
-        let (mut report, digest) = result?;
+        self.enrich_validation(result?)
+    }
+
+    fn enrich_validation(
+        &self,
+        (mut report, digest): (ValidationEvidence, SourceDigest),
+    ) -> ValidationResult {
         let Some(indexed) = self
             .summary
             .digest

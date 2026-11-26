@@ -10,7 +10,8 @@
 //! facts it has found if the reader requests cancellation.
 //!
 //! The [`Ledger`] serializes cancellation and terminal replies. Both threads
-//! write complete replies under one lock.
+//! write complete replies under one lock. One additional thread can collect
+//! document validation evidence while the work thread serves foreground queries.
 
 mod batch;
 pub mod document;
@@ -26,14 +27,14 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use studio_domain::analysis::{AnalysisFailure, LocateTarget, RowFilter};
+use studio_domain::analysis::{AnalysisFailure, LocateTarget, RowFilter, SourceDigest};
 use studio_domain::job::WirePath;
 use studio_domain::protocol::{
     AnalysisEvidenceIdentity, Command, Envelope, ErrorCode, Event, ProtocolError, decode,
     read_frame, write_message,
 };
 use studio_domain::syntax::SYNTAX_SCHEMA;
-use studio_domain::validation::{VALIDATION_SCHEMA, ValidationSettings};
+use studio_domain::validation::{VALIDATION_SCHEMA, ValidationEvidence, ValidationSettings};
 
 use self::document::{Document, Refusal};
 use crate::job::JOB_STACK_BYTES;
@@ -65,15 +66,19 @@ pub fn run(input: &mut impl Read, output: impl Write + Send) -> Result<(), Sessi
     let (requests, queue) = mpsc::sync_channel(REQUEST_BACKLOG);
     let shared = &shared;
     thread::scope(|scope| {
+        let replies = requests.clone();
         let work = thread::Builder::new()
             .name("studio-inspect".to_owned())
             .stack_size(JOB_STACK_BYTES)
-            .spawn_scoped(scope, move || work(&queue, shared));
+            .spawn_scoped(scope, move || {
+                thread::scope(|scope| work(&queue, &replies, shared, scope));
+            });
         let read = match work {
             Ok(work) => {
                 let read = serve(input, &requests, shared);
                 shared.stopped.store(true, Ordering::SeqCst);
-                drop(requests);
+                // The validation producer may still send a result through the queue.
+                let _ = requests.send((0, 0, Request::ReaderStopped));
                 // The work body has no panics to report.
                 let _ = work.join();
                 read
@@ -94,6 +99,8 @@ pub fn run(input: &mut impl Read, output: impl Write + Send) -> Result<(), Sessi
 enum Request {
     Open { source: WirePath, progressive: bool },
     Validate { settings: ValidationSettings },
+    ValidationDone(Box<ValidationResult>),
+    ReaderStopped,
     Inspect(Query),
     Batch(batch::Request),
     Close,
@@ -133,6 +140,7 @@ enum Query {
 
 /// A queued request: its `request_id`, its document and what it asks.
 type Queued = (u64, u64, Request);
+type ValidationResult = Result<(ValidationEvidence, SourceDigest), Refusal>;
 
 struct Shared<W> {
     out: Mutex<Out<W>>,
@@ -518,13 +526,31 @@ struct Scan {
     reported: Instant,
 }
 
-fn work<W: Write>(queue: &Receiver<Queued>, shared: &Shared<W>) {
+fn work<'scope, W: Write + Send>(
+    queue: &Receiver<Queued>,
+    replies: &'scope SyncSender<Queued>,
+    shared: &'scope Shared<W>,
+    scope: &'scope thread::Scope<'scope, '_>,
+) {
     let mut documents: Vec<(u64, Document)> = Vec::new();
     let mut batch = batch::Archive::default();
     let mut scans = VecDeque::<Scan>::new();
+    let mut validations = VecDeque::<Queued>::new();
+    let mut validation = None;
     let mut burst = 0;
+    let mut reader_stopped = false;
     loop {
-        let request = if scans.is_empty() {
+        let ready_validation = if validation.is_none() {
+            validations.pop_front()
+        } else {
+            None
+        };
+        let request = if ready_validation.is_some() {
+            ready_validation
+        } else if scans.is_empty() {
+            if reader_stopped && validation.is_none() {
+                break;
+            }
             queue.recv().ok()
         } else if burst < FOREGROUND_BURST && !shared.stopped() {
             queue.try_recv().ok()
@@ -568,31 +594,84 @@ fn work<W: Write>(queue: &Receiver<Queued>, shared: &Shared<W>) {
                 continue;
             }
             Request::Validate { settings } => {
-                let operation = Pending::Validation {
-                    document,
-                    validation: id,
-                };
-                let answer = match open {
+                let result = match open {
                     Some(_) if scans.iter().any(|scan| scan.document == document) => {
-                        failed(document, scan_pending())
+                        Err(scan_pending())
                     }
-                    Some(at) => match documents[at]
-                        .1
-                        .validate(id, &settings, &|| shared.cancelled(operation))
-                    {
+                    Some(_) if validation.is_some() => {
+                        if validations.len() < REQUEST_BACKLOG {
+                            validations.push_back((id, document, Request::Validate { settings }));
+                            continue;
+                        }
+                        Err(Refusal::new(
+                            AnalysisFailure::LimitReached,
+                            "The validation queue is full.",
+                        ))
+                    }
+                    Some(at) => documents[at].1.prepare_validation(id),
+                    None => Err(unknown()),
+                };
+                let answer = match result {
+                    Ok(mut file) => {
+                        let operation = Pending::Validation {
+                            document,
+                            validation: id,
+                        };
+                        let job = thread::Builder::new()
+                            .name("studio-inspect-validation".to_owned())
+                            .stack_size(JOB_STACK_BYTES)
+                            .spawn_scoped(scope, move || {
+                                let result = validation::validate(&mut file, &settings, &|| {
+                                    shared.cancelled(operation)
+                                });
+                                let _ = replies.send((
+                                    id,
+                                    document,
+                                    Request::ValidationDone(Box::new(result)),
+                                ));
+                            });
+                        match job {
+                            Ok(job) => {
+                                validation = Some((operation, job));
+                                continue;
+                            }
+                            Err(error) => failed(
+                                document,
+                                Refusal::new(
+                                    AnalysisFailure::Io,
+                                    format!("Cannot start validation. {error}"),
+                                ),
+                            ),
+                        }
+                    }
+                    Err(error) => match open {
+                        Some(at) => dropped(&mut documents, at, document, error),
+                        None => failed(document, error),
+                    },
+                };
+                settle_validation(shared, id, document, answer);
+                continue;
+            }
+            Request::ValidationDone(result) => {
+                if let Some((_, job)) = validation.take() {
+                    let _ = job.join();
+                }
+                let answer = match open {
+                    Some(at) => match documents[at].1.complete_validation(id, *result) {
                         Ok((summary, total)) => Event::AnalysisValidated {
                             document,
                             summary: Box::new(summary),
                             total,
                         },
-                        Err(refusal) => dropped(&mut documents, at, document, refusal),
+                        Err(error) => dropped(&mut documents, at, document, error),
                     },
                     None => failed(document, unknown()),
                 };
-                let mut ledger = shared.ledger();
-                ledger.settle(operation);
-                shared.send(id, answer);
-                drop(ledger);
+                settle_validation(shared, id, document, answer);
+                continue;
+            }
+            Request::ReaderStopped => {
+                reader_stopped = true;
                 continue;
             }
             Request::ClearCache => match document::clear_cache() {
@@ -602,6 +681,7 @@ fn work<W: Write>(queue: &Receiver<Queued>, shared: &Shared<W>) {
             Request::Close => match open {
                 Some(at) => {
                     documents.remove(at);
+                    cancel_validation(shared, document, validation.as_ref().map(|(op, _)| *op));
                     abandon_scan(
                         shared,
                         &mut scans,
@@ -618,6 +698,11 @@ fn work<W: Write>(queue: &Receiver<Queued>, shared: &Shared<W>) {
                     Ok(answer) => answer,
                     Err(refusal) => {
                         if refusal.code == AnalysisFailure::SourceChanged {
+                            cancel_validation(
+                                shared,
+                                document,
+                                validation.as_ref().map(|(op, _)| *op),
+                            );
                             abandon_scan(
                                 shared,
                                 &mut scans,
@@ -634,6 +719,28 @@ fn work<W: Write>(queue: &Receiver<Queued>, shared: &Shared<W>) {
         };
         shared.send(id, answer);
     }
+}
+
+fn cancel_validation<W: Write>(shared: &Shared<W>, document: u64, operation: Option<Pending>) {
+    if let Some(
+        op @ Pending::Validation {
+            document: active, ..
+        },
+    ) = operation
+        && active == document
+    {
+        shared.ledger().cancel(op);
+    }
+}
+
+fn settle_validation<W: Write>(shared: &Shared<W>, id: u64, document: u64, answer: Event) {
+    let mut ledger = shared.ledger();
+    ledger.settle(Pending::Validation {
+        document,
+        validation: id,
+    });
+    shared.send(id, answer);
+    drop(ledger);
 }
 
 fn serve_document(

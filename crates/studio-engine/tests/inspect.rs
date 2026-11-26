@@ -1040,6 +1040,44 @@ fn a_document_closed_while_read_frees_its_slot() -> TestResult {
 }
 
 #[test]
+fn validation_and_foreground_pages_share_one_inspector() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("long.obu");
+    long_stream(&path)?;
+    let mut inspect = Inspect::spawn()?;
+    let opened = inspect.open(1, &path)?;
+    let [validation, page] = inspect.send(vec![
+        Command::AnalysisValidate {
+            document: 1,
+            settings: ValidationSettings::default(),
+        },
+        Command::AnalysisPage {
+            document: 1,
+            filter: RowFilter::default(),
+            first: 0,
+            count: 1,
+        },
+    ])?[..] else {
+        return Err("Expected two request IDs.".into());
+    };
+
+    let response = inspect.next()?;
+    assert_eq!(response.request_id, page);
+    assert!(matches!(
+        response.body,
+        Event::AnalysisPage { document: 1, total, rows, .. }
+            if total == opened.elements && rows.len() == 1
+    ));
+    let response = inspect.next()?;
+    assert_eq!(response.request_id, validation);
+    assert!(matches!(
+        response.body,
+        Event::AnalysisValidated { document: 1, .. }
+    ));
+    Ok(())
+}
+
+#[test]
 fn cancellation_targets_one_validation_request() -> TestResult {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("long.obu");
