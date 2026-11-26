@@ -51,6 +51,12 @@ codec is young.
   and filters, and the workspace are restored at the next start, after each file is checked
   again: a file that changed or is missing is said so, and nothing about it is shown until
   you read it again or locate it.
+- You can inspect indexed rows, syntax, and bytes while Studio reads the rest of the
+  file. Jobs shows the scan and lets you cancel it. If a seek reaches the end of
+  the verified prefix, wait for more data and repeat the seek.
+- Studio can reuse a complete structural index after it checks the source content.
+  Use **Clear Index Cache** in Analyze to remove saved indexes. Opening the file again
+  builds a new index when no valid copy exists.
 - Use **File > Validate Files…** to validate several local IVF or Annex B files. The default
   policy treats errors as failures. Strict policy also treats warnings as failures and
   preserves their warning severity. You can supply local Annex B sequence headers and
@@ -98,8 +104,7 @@ rotation or cropping, RGB or alpha, encrypted streams, network and playlist inpu
 
 - Compare, and more of Analyze. The approved direction is one AV2 workbench with three
   workspaces (Encode, Analyze and Compare) and shared Jobs; see the
-  [roadmap](https://github.com/splotlabs/splot-studio/issues/33). A structural scan reports
-  its result when it ends.
+  [roadmap](https://github.com/splotlabs/splot-studio/issues/33).
 - Audio, subtitles and chapters are not carried over; the app lists what a file would lose
   and asks before converting. Container output with audio is planned in
   [#12](https://github.com/splotlabs/splot-studio/issues/12).
