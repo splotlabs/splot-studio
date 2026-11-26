@@ -62,6 +62,7 @@ fn stream(n: u64) -> Vec<Row> {
 
 fn summary(elements: u64) -> DocumentSummary {
     DocumentSummary {
+        digest: None,
         fingerprint: SourceFingerprint {
             len: elements * 9,
             modified: Some((1_800_000_000, 0)),

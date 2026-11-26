@@ -577,6 +577,7 @@ mod tests {
 
     fn summary(outcome: ScanOutcome, header: Option<IvfHeaderFact>) -> DocumentSummary {
         DocumentSummary {
+            digest: None,
             fingerprint: SourceFingerprint {
                 len: 82,
                 modified: None,

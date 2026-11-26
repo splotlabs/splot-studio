@@ -16,6 +16,7 @@ import { FocusRing, KeyboardFocus } from "focus.slint";
 import { Caption, Label, LinkButton, SectionTitle, WorkspaceSwitch } from "controls.slint";
 import { IconButton, Scrubber, Stage, StageState, ToggleChip } from "stage.slint";
 import { AnalyzeView } from "analyze.slint";
+import { ValidationSetup } from "validation-setup.slint";
 import { AdvancedEditor, AdvancedOptionRow, FieldRow } from "advanced.slint";
 
 export { AdvancedOptionRow, FieldRow }
@@ -71,7 +72,7 @@ export struct Fact {
     value: string,
 }
 
-// One job of the Jobs list: a conversion or a stream read. `state` says it
+// One job of the Jobs list. `state` says it
 // in words; the tone only repeats it. The bar shows only when the share is
 // known (`progress-known`); an operation without progress shows none.
 export enum JobAction { clone-settings, reencode, final-pass }
@@ -85,6 +86,9 @@ export struct JobRow {
     progress-known: bool,
     progress: float,
     can-cancel: bool,
+    can-show: bool,
+    can-export: bool,
+    can-remove: bool,
     can-clone-settings: bool,
     can-reencode: bool,
     can-encode-with-pass: bool,
@@ -386,6 +390,8 @@ component JobList inherits VerticalLayout {
     in property <bool> actions-enabled;
     callback show(int);
     callback cancel(int);
+    callback export-report(int, bool);
+    callback remove(int);
     callback action(int, JobAction);
 
     spacing: Tokens.space-3;
@@ -442,11 +448,11 @@ component JobList inherits VerticalLayout {
             alignment: start;
             spacing: Tokens.space-4;
 
-            LinkButton {
+            if job.can-show: LinkButton {
                 min-height: 0;
-                text: "Show";
+                text: job.kind == "Validate" ? "Open in Analyze" : "Show";
                 quiet: true;
-                description: "Show " + job.name + " in its workspace";
+                description: job.kind == "Validate" ? "Open validation for " + job.name + " in Analyze" : "Show " + job.name + " in its workspace";
                 clicked => {
                     root.show(i);
                 }
@@ -460,6 +466,33 @@ component JobList inherits VerticalLayout {
                 clicked => {
                     root.cancel(i);
                 }
+            }
+
+            if job.can-remove: LinkButton {
+                min-height: 0;
+                text: "Remove";
+                quiet: true;
+                description: "Remove the validation result for " + job.name;
+                clicked => { root.remove(i); }
+            }
+        }
+
+        if job.can-export: HorizontalLayout {
+            alignment: start;
+            spacing: Tokens.space-4;
+
+            LinkButton {
+                text: "Full report JSON…";
+                quiet: true;
+                description: "Save the full validation report for " + job.name + " as JSON";
+                clicked => { root.export-report(i, true); }
+            }
+
+            LinkButton {
+                text: "Full report text…";
+                quiet: true;
+                description: "Save the full validation report for " + job.name + " as text";
+                clicked => { root.export-report(i, false); }
             }
         }
 
@@ -903,6 +936,16 @@ export component AppWindow inherits Window {
     in property <string> job-related-detail;
     in property <bool> job-related-ready;
     in property <bool> job-related-failed;
+    in property <string> report-dialog-error;
+    in property <bool> validation-active;
+    in property <string> validation-job-notice;
+
+    // Temporary options for the next Validate Files action.
+    out property <bool> validation-open;
+    in-out property <bool> validation-strict;
+    in property <bool> validation-busy;
+    in property <string> validation-context;
+    in property <string> validation-notice;
 
     // Source. Paths are display strings; Rust keeps the real paths.
     in property <SourceView> source-view;
@@ -1136,6 +1179,14 @@ export component AppWindow inherits Window {
     callback workspace-chosen(int);
     callback job-show(int);
     callback job-cancel(int);
+    callback job-export(int, bool);
+    callback job-remove(int);
+    callback stop-validation-batch();
+    callback validate-files-requested();
+    callback validation-cancel();
+    callback validation-choose-files();
+    callback validation-pick-context();
+    callback validation-clear-context();
     callback job-action(int, JobAction);
     callback job-generate-pass();
     callback job-related-approve();
@@ -1182,6 +1233,16 @@ export component AppWindow inherits Window {
     // Also used by the renderer snapshots and UI tests.
     public function show-jobs() {
         jobs-popup.show();
+    }
+
+    public function show-validation-setup() {
+        root.validation-open = true;
+        validation-setup.show();
+    }
+
+    public function close-validation-setup() {
+        root.validation-open = false;
+        validation-setup.close();
     }
 
     public function show-sheet() {
@@ -1263,7 +1324,7 @@ export component AppWindow inherits Window {
             MenuItem {
                 title: "Open to Convert…";
                 shortcut: root.open-keys;
-                enabled: root.can-add && !root.sheet-open;
+                enabled: root.can-add && !root.sheet-open && !root.validation-open;
                 activated => {
                     root.open-requested();
                 }
@@ -1271,10 +1332,15 @@ export component AppWindow inherits Window {
             MenuItem {
                 title: "Open to Analyze…";
                 shortcut: root.analyze-keys;
-                enabled: !root.sheet-open;
+                enabled: !root.sheet-open && !root.validation-open;
                 activated => {
                     root.analyze-open-requested();
                 }
+            }
+            MenuItem {
+                title: "Validate Files…";
+                enabled: !root.sheet-open && !root.validation-open && !root.validation-active;
+                activated => { root.validate-files-requested(); }
             }
             MenuSeparator { }
             MenuItem {
@@ -1293,7 +1359,7 @@ export component AppWindow inherits Window {
                 title: label;
                 checkable: true;
                 checked: i == root.workspace-index;
-                enabled: !root.sheet-open;
+                enabled: !root.sheet-open && !root.validation-open;
                 activated => {
                     root.workspace-chosen(i);
                 }
@@ -2575,6 +2641,25 @@ export component AppWindow inherits Window {
         }
     }
 
+    validation-setup := PopupWindow {
+        close-policy: no-auto-close;
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+
+        ValidationSetup {
+            strict <=> root.validation-strict;
+            busy: root.validation-busy;
+            context: root.validation-context;
+            notice: root.validation-notice;
+            cancel => { root.validation-cancel(); }
+            choose-files => { root.validation-choose-files(); }
+            pick-context => { root.validation-pick-context(); }
+            clear-context => { root.validation-clear-context(); }
+        }
+    }
+
     jobs-popup := PopupWindow {
         close-policy: close-on-click-outside;
         width: min(420px, root.width - 2 * Tokens.space-3);
@@ -2628,8 +2713,31 @@ export component AppWindow inherits Window {
 
                     Caption {
                         text: root.jobs.length == 0
-                            ? "Encodes, first passes and stream reads appear here."
-                            : "Encodes, first passes and stream reads run while the window is open.";
+                            ? "Encodes, first passes, stream reads and validations appear here."
+                            : "Jobs run while the window is open.";
+                    }
+
+                    if root.validation-job-notice != "": Caption {
+                        text: root.validation-job-notice;
+                        wrap: word-wrap;
+                    }
+
+                    if root.validation-active: HorizontalLayout {
+                        alignment: start;
+                        LinkButton {
+                            text: "Stop Validation Batch";
+                            description: "Cancel the remaining validation files and keep completed results";
+                            clicked => {
+                                root.stop-validation-batch();
+                                jobs-close.focus();
+                            }
+                        }
+                    }
+
+                    if root.report-dialog-error != "": Caption {
+                        text: root.report-dialog-error;
+                        color: Tokens.error;
+                        wrap: word-wrap;
                     }
 
                     ScrollView {
@@ -2699,6 +2807,13 @@ export component AppWindow inherits Window {
                                 }
                                 action(i, action) => {
                                     root.job-action(i, action);
+                                }
+                                export-report(i, json) => {
+                                    root.job-export(i, json);
+                                }
+                                remove(i) => {
+                                    root.job-remove(i);
+                                    jobs-close.focus();
                                 }
                             }
                         }

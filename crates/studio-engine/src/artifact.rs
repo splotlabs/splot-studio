@@ -342,7 +342,7 @@ fn write_hashed(writer: &mut impl Write, bytes: &[u8], hash: &mut Sha256) -> io:
     Ok(())
 }
 
-fn hex(digest: &[u8]) -> String {
+pub(crate) fn hex(digest: &[u8]) -> String {
     let mut text = String::with_capacity(2 * digest.len());
     for byte in digest {
         let _ = write!(text, "{byte:02x}");

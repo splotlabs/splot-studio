@@ -6,7 +6,9 @@
 use serde::Serialize;
 use studio_domain::analysis::{AnalysisFailure, Element, Framing, MAX_PAGE_ELEMENTS};
 use studio_domain::syntax::{SyntaxEvent, SyntaxSummary};
-use studio_domain::validation::{Finding, ValidationSettings, ValidationSummary};
+use studio_domain::validation::{
+    Finding, ValidationEvidence, ValidationSettings, ValidationSummary,
+};
 
 use super::{Document, Item, PAGE_BUDGET, Refusal, Seek, SeekFrom, read_file_range};
 use crate::inspect::{syntax, validation};
@@ -102,6 +104,26 @@ impl Document {
                 "Use a request ID greater than the last validation request ID.",
             ));
         }
+        let report = self.validate_source(settings, cancelled)?;
+        let total = report.findings.len() as u64;
+        self.evidence.report = Some((request, report.findings));
+        Ok((report.summary, total))
+    }
+
+    pub(in crate::inspect) fn collect_validation(
+        &mut self,
+        settings: &ValidationSettings,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<ValidationEvidence, Refusal> {
+        self.check()?;
+        self.validate_source(settings, cancelled)
+    }
+
+    fn validate_source(
+        &mut self,
+        settings: &ValidationSettings,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<ValidationEvidence, Refusal> {
         if self
             .summary
             .ivf_header
@@ -136,9 +158,7 @@ impl Document {
                 finding.extended_layer_id = layer;
             }
         }
-        let total = report.findings.len() as u64;
-        self.evidence.report = Some((request, report.findings));
-        Ok((report.summary, total))
+        Ok(report)
     }
 
     pub(in crate::inspect) fn findings(
@@ -189,7 +209,7 @@ fn invalid(message: impl Into<String>) -> Refusal {
     Refusal::new(AnalysisFailure::InvalidRequest, message)
 }
 
-fn page<T: Clone + Serialize>(
+pub(in crate::inspect) fn page<T: Clone + Serialize>(
     entries: &[T],
     first: u64,
     count: u32,

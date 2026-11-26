@@ -42,6 +42,7 @@ use crate::state::{AppState, Effect, Intent, JournalProblem};
 use crate::workspace::Workspace;
 
 mod advanced;
+mod batch;
 mod preflight;
 mod related;
 
@@ -67,6 +68,8 @@ pub enum Route {
     Preview(u64),
     /// The inspect process, by how many were started before it.
     Inspect(u64),
+    /// The batch validation process, by spawn number.
+    Batch(u64),
 }
 
 /// How worker deliveries leave their reader threads.
@@ -160,6 +163,9 @@ pub struct Session {
     previewer: Option<(u64, Worker)>,
     previewers_started: u64,
     analysis: Analysis,
+    batch: crate::batch::Batch,
+    batch_worker: Option<(u64, Worker)>,
+    batch_workers_started: u64,
     /// The inspect process, started on first need, with its spawn number.
     inspector: Option<(u64, Worker)>,
     inspectors_started: u64,
@@ -205,6 +211,9 @@ impl Session {
             previewer: None,
             previewers_started: 0,
             analysis: Analysis::restored(view),
+            batch: crate::batch::Batch::default(),
+            batch_worker: None,
+            batch_workers_started: 0,
             inspector: None,
             inspectors_started: 0,
             analyze_dialog: false,
@@ -429,16 +438,25 @@ impl Session {
     /// Every job of both workspaces; see [`jobs::list`].
     #[must_use]
     pub fn jobs(&self) -> Vec<jobs::Job<'_>> {
-        jobs::list(&self.state, &self.analysis)
+        let mut jobs = jobs::list(&self.state, &self.analysis);
+        jobs.extend(self.batch.files.iter().map(jobs::validation));
+        jobs
     }
 
     /// Shows the job at `index` of [`Self::jobs`] where it belongs: its
     /// file in Encode, or its document in Analyze.
     pub fn show_job(&mut self, index: usize, now: Instant) -> Outcome {
-        let target = self.jobs().get(index).map(|job| match job.work {
-            Work::Convert(item) => (Workspace::Encode, self.index_of_item(item.id())),
-            Work::Inspect(at, _) => (Workspace::Analyze, Some(at)),
-        });
+        let jobs = self.jobs();
+        let target = jobs
+            .get(index)
+            .filter(|job| job.can_show())
+            .map(|job| job.work);
+        let target = match target {
+            Some(Work::Validate(file)) => return self.show_batch(file.id, now),
+            Some(Work::Convert(item)) => Some((Workspace::Encode, self.index_of_item(item.id()))),
+            Some(Work::Inspect(at, _)) => Some((Workspace::Analyze, Some(at))),
+            None => None,
+        };
         let mut outcome = Outcome::nothing();
         match target {
             Some((Workspace::Analyze, Some(at))) => {
@@ -468,6 +486,7 @@ impl Session {
             Some(Work::Inspect(at, _)) => {
                 self.analysis_input(analysis::Input::CancelDocument(int(at)))
             }
+            Some(Work::Validate(file)) => self.cancel_batch_file(file.id, now),
             None => Outcome::nothing(),
         }
     }
@@ -644,6 +663,7 @@ impl Session {
             },
             Route::Preview(spawn) => self.deliver_preview(spawn, delivery),
             Route::Inspect(spawn) => self.deliver_inspect(spawn, delivery),
+            Route::Batch(spawn) => self.deliver_batch(spawn, delivery, now),
         }
     }
 
@@ -960,10 +980,12 @@ impl Session {
             self.hello.take(),
             self.previewer.take().map(|(_, w)| w),
             self.inspector.take().map(|(_, w)| w),
+            self.batch_worker.take().map(|(_, w)| w),
         ];
         for worker in workers.into_iter().flatten() {
             worker.shutdown(engine::EXIT_GRACE);
         }
+        let _ = self.cleanup_batch_partial();
     }
 }
 

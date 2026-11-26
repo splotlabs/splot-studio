@@ -202,6 +202,8 @@ pub struct Document {
     pub(super) selected: Option<Selected>,
     pub(super) history: Vec<Place>,
     pub(crate) evidence: Evidence,
+    /// Report awaiting source fingerprint verification at open.
+    pub(super) pending_batch: Option<Box<crate::batch::Report>>,
     pub(super) at: usize,
     pub(super) bytes: Bytes,
     /// The newest locate that may select; older ones are dropped.
@@ -234,6 +236,7 @@ impl Document {
             selected: None,
             history: Vec::new(),
             evidence: Evidence::default(),
+            pending_batch: None,
             at: 0,
             bytes: Bytes {
                 offset: 0,
@@ -312,6 +315,7 @@ impl Document {
 
     /// The read ended without facts: keeps the view for the next read.
     pub(super) fn fail(&mut self, message: String, by: ReadEnd) {
+        self.pending_batch = None;
         self.restore = self.restore();
         self.phase = Phase::Failed { message, by };
     }

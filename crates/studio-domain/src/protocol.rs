@@ -31,10 +31,12 @@ use crate::preview::{
 };
 use crate::settings::OutputKind;
 use crate::syntax::{SyntaxEvent, SyntaxSummary};
-use crate::validation::{Finding, ValidationSettings, ValidationSummary};
+use crate::validation::{
+    BatchOutcome, Finding, ReportFormat, ValidationSettings, ValidationSummary,
+};
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -355,6 +357,46 @@ pub enum Command {
         /// The maximum number of findings, in `1..=MAX_PAGE_ELEMENTS`.
         count: u32,
     },
+    /// Inspect process only. Checks validation options before starting a batch.
+    BatchCheckSettings {
+        /// The options to check.
+        settings: ValidationSettings,
+    },
+    /// Inspect process only. Validates one file and retains its report.
+    BatchValidate {
+        /// The read-only source.
+        source: WirePath,
+        /// The immutable validation options for this file.
+        settings: ValidationSettings,
+    },
+    /// Inspect process only. Cancels one pending file validation.
+    BatchCancel {
+        /// The request ID of the pending file validation.
+        validation: u64,
+    },
+    /// Inspect process only. Reads findings from a retained batch report.
+    BatchFindings {
+        /// The request ID that identifies the report.
+        validation: u64,
+        /// The first finding, or zero for an empty report.
+        first: u64,
+        /// The maximum number of findings, in `1..=MAX_PAGE_ELEMENTS`.
+        count: u32,
+    },
+    /// Inspect process only. Publishes a complete retained report without overwriting a file.
+    BatchExport {
+        /// The request ID that identifies the report.
+        validation: u64,
+        /// The new local report file.
+        destination: WirePath,
+        /// The output representation.
+        format: ReportFormat,
+    },
+    /// Inspect process only. Removes one retained report.
+    BatchForget {
+        /// The request ID that identifies the report.
+        validation: u64,
+    },
     /// Inspect process only. Closes a document. Answered by
     /// [`Event::AnalysisClosed`] or [`Event::AnalysisFailed`].
     AnalysisClose {
@@ -578,6 +620,48 @@ pub enum Event {
         total: u64,
         /// The findings from `first`.
         findings: Vec<Finding>,
+    },
+    /// Answers [`Command::BatchCheckSettings`] when the options are valid.
+    BatchSettingsChecked,
+    /// The file is open. Native validation is starting.
+    BatchValidating {
+        /// The request ID of the file validation.
+        validation: u64,
+    },
+    /// Terminal answer to [`Command::BatchValidate`].
+    BatchValidated {
+        /// The execution evidence or the source failure. The request ID identifies the report.
+        outcome: Box<BatchOutcome>,
+    },
+    /// Answers [`Command::BatchFindings`].
+    BatchFindings {
+        /// The request ID that identifies the report.
+        validation: u64,
+        /// The first finding.
+        first: u64,
+        /// The total number of retained findings.
+        total: u64,
+        /// The findings from `first`.
+        findings: Vec<Finding>,
+    },
+    /// The worker allocated the temporary file for a report export.
+    BatchExportPrepared {
+        /// The request ID that identifies the report.
+        validation: u64,
+        /// The precise temporary file the app can recover if the worker stops.
+        partial: WirePath,
+    },
+    /// Answers [`Command::BatchExport`] after publication.
+    BatchExported {
+        /// The request ID that identifies the report.
+        validation: u64,
+        /// The report size.
+        bytes: u64,
+    },
+    /// Answers [`Command::BatchForget`].
+    BatchForgotten {
+        /// The request ID of the report the worker removed.
+        validation: u64,
     },
     /// Answers [`Command::AnalysisClose`].
     AnalysisClosed {

@@ -21,6 +21,12 @@ use super::document::{Checked, MAX_RETAINED_ELEMENTS, MAX_UNIT_BYTES, Refusal};
 
 const MAX_FINDINGS: u32 = 4096;
 
+pub(super) fn check_settings(
+    settings: &ValidationSettings,
+) -> Result<Option<studio_domain::validation::ContextIdentity>, Refusal> {
+    context::options(settings.external_hls.as_deref()).map(|(_, identity)| identity)
+}
+
 pub(super) fn validate(
     file: &mut File,
     settings: &ValidationSettings,

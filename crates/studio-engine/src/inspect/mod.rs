@@ -23,7 +23,9 @@
 //! Validation also keeps completed evidence when cancelled. A cancel targets
 //! the document generation and the request ID of the pending validation.
 
+mod batch;
 pub mod document;
+mod report;
 mod syntax;
 mod validation;
 
@@ -56,7 +58,8 @@ pub const MAX_DOCUMENTS: usize = 4;
 pub const REQUEST_BACKLOG: usize = 64;
 
 /// Serves the inspect protocol on `input` and `output` until the input ends.
-/// Every frame gets exactly one reply, with its `request_id`.
+/// Every frame gets a terminal reply with its `request_id`.
+/// Batch validation and report export can also report progress.
 ///
 /// # Errors
 /// [`SessionError::Read`] on an unrecoverable input frame or failure,
@@ -105,6 +108,7 @@ enum Request {
     Open { source: WirePath },
     Validate { settings: ValidationSettings },
     Inspect(Query),
+    Batch(batch::Request),
     Close,
 }
 
@@ -158,6 +162,7 @@ struct Out<W> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pending {
     Open(u64),
+    BatchValidation(u64),
     Validation { document: u64, validation: u64 },
 }
 
@@ -328,8 +333,13 @@ fn serve<W: Write>(
             Command::AnalysisValidate { document, settings } => {
                 queue_validation(shared, requests, id, document, settings);
             }
+            Command::BatchCancel { validation } => {
+                shared.cancel(id, Pending::BatchValidation(validation));
+            }
             command => {
-                if let Some((document, request)) = queued_request(&command) {
+                if let Some(request) = batch::Request::from_command(&command) {
+                    batch::queue(shared, requests, id, request);
+                } else if let Some((document, request)) = queued_request(&command) {
                     if requests.try_send((id, document, request)).is_err() {
                         busy(shared, id, document);
                     }
@@ -493,6 +503,7 @@ fn busy<W: Write>(shared: &Shared<W>, id: u64, document: u64) {
 
 fn work<W: Write>(queue: &Receiver<Queued>, shared: &Shared<W>) {
     let mut documents: Vec<(u64, Document)> = Vec::new();
+    let mut batch = batch::Archive::default();
     while let Ok((id, document, request)) = queue.recv() {
         let open = documents.iter().position(|(d, _)| *d == document);
         let unknown = || {
@@ -502,6 +513,10 @@ fn work<W: Write>(queue: &Receiver<Queued>, shared: &Shared<W>) {
             )
         };
         let answer = match request {
+            Request::Batch(request) => {
+                batch.work(shared, id, request);
+                continue;
+            }
             Request::Open { source } => {
                 open_document(shared, &mut documents, id, document, &source);
                 continue;

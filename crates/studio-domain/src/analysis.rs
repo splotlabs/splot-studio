@@ -356,12 +356,23 @@ pub enum ScanOutcome {
     },
 }
 
+/// SHA-256 of a contiguous prefix read from the source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceDigest {
+    /// Lowercase hexadecimal SHA-256 of the bytes read.
+    pub sha256: String,
+    /// Number of bytes hashed, starting at offset zero.
+    pub bytes: u64,
+}
+
 /// What opening a document found.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentSummary {
     /// The file that was read. Every later request is refused once the file
     /// no longer matches it.
     pub fingerprint: SourceFingerprint,
+    /// The source bytes read during the scan. A stopped scan can hash only a prefix.
+    pub digest: Option<Box<SourceDigest>>,
     /// How the file wraps its OBUs.
     pub framing: Framing,
     /// The IVF file header, when one was read.

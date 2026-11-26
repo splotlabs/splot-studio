@@ -5,6 +5,46 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::analysis::{AnalysisFailure, SourceDigest};
+use crate::job::SourceFingerprint;
+
+/// Maximum validation files retained or queued in one session.
+pub const MAX_BATCH_FILES: usize = 32;
+
+/// Output representation for an individual validation report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportFormat {
+    /// Versioned JSON with structured findings.
+    Json,
+    /// Plain text for people to read.
+    Text,
+}
+
+/// Terminal outcome of one file in a validation batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BatchOutcome {
+    /// Validation returned execution evidence, which may be partial.
+    Validated {
+        /// Identity of the validated input.
+        fingerprint: SourceFingerprint,
+        /// SHA-256 and byte count from the source scan before validation.
+        digest: SourceDigest,
+        /// Execution evidence and requested policy.
+        summary: Box<ValidationSummary>,
+        /// Retained finding count, independent of paging.
+        total: u64,
+    },
+    /// The worker could not start or retain evidence for this file.
+    Failed {
+        /// Machine-readable reason.
+        code: AnalysisFailure,
+        /// Explanation for the local user.
+        message: String,
+    },
+}
+
 /// Version of the validation evidence format.
 pub const VALIDATION_SCHEMA: u16 = 2;
 /// Largest external Annex B context accepted in a request.

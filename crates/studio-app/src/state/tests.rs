@@ -1606,7 +1606,7 @@ fn jobs_list_each_conversion_with_its_own_state() {
             .iter()
             .map(|job| match job.work {
                 Work::Convert(item) => (item.source().to_path_buf(), job.state),
-                Work::Inspect(..) => unreachable!("no documents"),
+                Work::Inspect(..) | Work::Validate(_) => unreachable!("only conversion jobs"),
             })
             .collect()
     };

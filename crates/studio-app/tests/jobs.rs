@@ -38,6 +38,7 @@ use studio_app::workspace::Workspace;
 use studio_app::{AnalysisState, AppWindow, Opening, Prepared};
 use studio_domain::analysis::{ProblemKind, ScanOutcome};
 use studio_domain::protocol::BuildIdentity;
+use studio_domain::validation::{ReportFormat, ValidationSettings};
 
 /// Long enough for a debug-build encode of a small clip.
 const JOB_TIMEOUT: Duration = Duration::from_secs(600);
@@ -359,6 +360,8 @@ fn reading(session: &Session) -> bool {
 fn jobs_and_documents_survive_cancel_close_worker_death_and_restart() {
     let mut rig = Rig::new();
     let scratch = Scratch::new("lifecycle");
+    validation_setup_keyboard(&rig);
+    batch_reports_in_jobs_and_analyze(&mut rig);
     concurrent_encode_and_inspection(&mut rig, &scratch);
     cancel_and_close(&mut rig, &scratch);
     #[cfg(unix)]
@@ -367,6 +370,142 @@ fn jobs_and_documents_survive_cancel_close_worker_death_and_restart() {
     corrupt_storage(&mut rig, &scratch);
     #[cfg(unix)]
     read_only_storage(&mut rig);
+}
+
+fn validation_setup_keyboard(rig: &Rig) {
+    let weak = rig.window.as_weak();
+    rig.window.on_validation_cancel(move || {
+        if let Some(window) = weak.upgrade() {
+            window.invoke_close_validation_setup();
+        }
+    });
+    assert!(!rig.window.get_validation_strict());
+    rig.window.invoke_show_validation_setup();
+    assert!(rig.window.get_validation_open());
+    rig.pixels();
+    rig.press(Key::Escape);
+    assert!(!rig.window.get_validation_open());
+
+    rig.window.invoke_show_validation_setup();
+    // Cancel takes focus when the dialog opens.
+    rig.pixels();
+    rig.press(" ");
+    assert!(!rig.window.get_validation_open());
+}
+
+fn batch_reports_in_jobs_and_analyze(rig: &mut Rig) {
+    let scratch = Scratch::new("batch-validation");
+    let source = scratch.media("delimiter.obu");
+    let absent = scratch.media("absent.obu");
+    let unsupported = scratch.media("unknown.obu");
+    fs::write(&source, [0x01, 0x08]).unwrap_or_else(|error| unreachable!("{error}"));
+    fs::write(&unsupported, b"unknown type").unwrap_or_else(|error| unreachable!("{error}"));
+    rig.start(&scratch);
+
+    rig.session().batch_start(
+        vec![source.clone(), absent, unsupported],
+        ValidationSettings::default(),
+    );
+    assert_eq!(rig.states(), [State::Queued; 3]);
+    rig.settle("all three independent validations ended", |session| {
+        !session.batch_active()
+    });
+    assert_eq!(
+        rig.states(),
+        [State::Completed, State::Failed, State::Failed]
+    );
+    assert_eq!(
+        rig.rows()[0],
+        (
+            "Validate".into(),
+            "delimiter.obu".into(),
+            "Completed".into()
+        )
+    );
+
+    let (report, _) = rig
+        .session()
+        .batch_export_target(0)
+        .unwrap_or_else(|| unreachable!("report"));
+    assert!(
+        rig.session().batch_export_target(1).is_some(),
+        "failed inputs also have reports"
+    );
+    let destination = scratch.media("report.json");
+    rig.session()
+        .batch_export(report, &destination, ReportFormat::Json);
+    rig.settle("the report was published", |session| {
+        session
+            .batch_notice()
+            .is_some_and(|notice| notice.contains("was exported"))
+    });
+    let exported = fs::read_to_string(destination).unwrap_or_else(|error| unreachable!("{error}"));
+    assert!(exported.contains("delimiter.obu"));
+    assert!(!exported.contains(&scratch.0.display().to_string()));
+
+    rig.session()
+        .batch_start(vec![source.clone()], ValidationSettings::default());
+    rig.session().batch_cancel_remaining();
+    assert_eq!(
+        rig.states(),
+        [
+            State::Completed,
+            State::Failed,
+            State::Failed,
+            State::Cancelled
+        ]
+    );
+    assert!(rig.session().batch_export_target(0).is_some());
+
+    rig.window.invoke_job_show(0);
+    rig.settle("the batch report is in Analyze", |session| {
+        session.state().workspace() == Workspace::Analyze
+            && matches!(phase(session, 0), Some(Phase::Open(_)))
+    });
+    let analysis = rig.window.global::<studio_app::Analysis>();
+    assert_eq!(analysis.get_evidence_tab(), 2);
+    assert!(analysis.get_findings_status().contains("OBUs checked"));
+    assert_eq!(rig.session().analysis().documents()[0].path(), source);
+    batch_report_refuses_rewritten_source(rig, &source);
+
+    let last = rig.session().jobs().len() - 1;
+    rig.session().batch_remove(last);
+    assert_eq!(
+        rig.states(),
+        [
+            State::Completed,
+            State::Completed,
+            State::Failed,
+            State::Failed
+        ]
+    );
+    rig.stop();
+}
+
+fn batch_report_refuses_rewritten_source(rig: &mut Rig, source: &Path) {
+    let previous = rig.session().analysis().documents()[0].id();
+    let modified = fs::metadata(source)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or_else(|error| unreachable!("{error}"));
+    fs::write(source, [0x01, 0x09]).unwrap_or_else(|error| unreachable!("{error}"));
+    fs::File::options()
+        .write(true)
+        .open(source)
+        .and_then(|file| file.set_times(fs::FileTimes::new().set_modified(modified)))
+        .unwrap_or_else(|error| unreachable!("{error}"));
+    rig.window.invoke_job_show(1);
+    rig.settle(
+        "the source is checked again without revalidating it",
+        |session| {
+            session
+                .analysis()
+                .documents()
+                .first()
+                .is_some_and(|doc| doc.id() > previous && matches!(doc.phase(), Phase::Open(_)))
+        },
+    );
+    let analysis = rig.window.global::<studio_app::Analysis>();
+    assert_ne!(analysis.get_evidence_tab(), 2);
 }
 
 /// Two files convert in one run; while the second converts, the first
