@@ -14,7 +14,9 @@ use std::rc::Rc;
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::platform::{Key, Platform, PointerEventButton, WindowAdapter, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, LogicalSize, PlatformError, SharedString};
-use studio_app::{AppWindow, StageState, ViewMode};
+use studio_app::{
+    Analysis, AnalysisState, AppWindow, NavStep, StageState, ViewMode, WorkspaceView,
+};
 
 struct Headless(Rc<MinimalSoftwareWindow>);
 
@@ -159,4 +161,50 @@ fn the_picture_area_answers_hold_keys_and_tab() {
     press(&window, " ");
     press(&window, Key::LeftArrow);
     assert_eq!(take(), [] as [String; 0]);
+
+    an_output_byte_link_moves_keyboard_focus(&window);
+}
+
+fn an_output_byte_link_moves_keyboard_focus(window: &AppWindow) {
+    window.set_workspace(WorkspaceView::Analyze);
+    window.window().set_size(LogicalSize::new(800.0, 680.0));
+    let analysis = window.global::<Analysis>();
+    analysis.set_state(AnalysisState::Open);
+    analysis.set_can_playback(true);
+    analysis.set_bytes_shown(false);
+    let playback = window.global::<studio_app::Playback>();
+    playback.set_state(StageState::Picture);
+    playback.set_navigable(true);
+    playback.set_output_unit("byte 0x20".into());
+    let link = Rc::new(RefCell::new(None));
+    playback.on_show_bytes({
+        let weak = window.as_weak();
+        let link = link.clone();
+        move |index| {
+            *link.borrow_mut() = Some(index);
+            if let Some(window) = weak.upgrade() {
+                window.global::<Analysis>().set_bytes_shown(true);
+            }
+        }
+    });
+    let cursor_move = Rc::new(RefCell::new(None));
+    analysis.on_cursor({
+        let cursor_move = cursor_move.clone();
+        move |step| *cursor_move.borrow_mut() = Some(step)
+    });
+
+    // Start on the picture. Tab to the temporal unit link and open its bytes.
+    pointer(window, 400.0, 160.0, true);
+    pointer(window, 400.0, 160.0, false);
+    for _ in 0..16 {
+        press(window, Key::Tab);
+        press(window, Key::Return);
+        if link.borrow().is_some() {
+            break;
+        }
+    }
+    assert_eq!(*link.borrow(), Some(0));
+    assert!(analysis.get_bytes_shown());
+    press(window, Key::RightArrow);
+    assert_eq!(*cursor_move.borrow(), Some(NavStep::Right));
 }

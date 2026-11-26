@@ -133,6 +133,7 @@ impl Preview {
     pub(super) fn fail_document(&mut self, message: String) {
         self.playing = false;
         self.replay = false;
+        self.before_next = None;
         self.shown = None;
         self.document_progress.clear();
         self.stage_failure = Some(message);

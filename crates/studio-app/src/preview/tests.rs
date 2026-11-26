@@ -924,3 +924,22 @@ fn invalid_output_number_preserves_the_assumed_playback_rate() {
     assert_eq!(view.seek_error, "");
     assert!(view.play_note.contains("assumes 30 fps"));
 }
+
+#[test]
+fn next_at_the_end_restores_the_last_output_and_confirms_the_count() {
+    let (mut preview, opening) = shown(document_subject(7));
+    let first = only(&opening).request_id;
+    preview.picture(output_picture(first, 0, None));
+
+    let next = only(&preview.input(Input::Step(1))).request_id;
+    let view = preview.view();
+    assert_eq!(view.frame_text, "Output 2");
+    assert!(view.picture.is_none());
+
+    none(preview.unavailable(next, PictureFailure::OutOfRange, "end of file"));
+    let view = preview.view();
+    assert_eq!(view.frame_text, "Output 1 / 1");
+    assert_eq!(view.picture.map(|picture| picture.header.frame), Some(0));
+    assert_eq!(preview.output_byte(1), Some((7, 15)));
+    none(preview.input(Input::Step(1)));
+}

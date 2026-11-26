@@ -1103,6 +1103,9 @@ export component AnalyzeView inherits VerticalLayout {
                     clicked => {
                         Playback.show-bytes(index);
                         root.reveal-bytes();
+                        if Analysis.bytes-shown {
+                            byte-view.focus();
+                        }
                     }
                 }
             }
@@ -1289,7 +1292,7 @@ export component AnalyzeView inherits VerticalLayout {
         }
 
         VerticalLayout {
-            spacing: Tokens.space-1;
+            spacing: Analysis.bytes-shown ? Tokens.space-1 : 0px;
 
             HorizontalLayout {
                 spacing: Tokens.space-2;
@@ -1315,11 +1318,16 @@ export component AnalyzeView inherits VerticalLayout {
                 }
             }
 
-            if Analysis.bytes-shown: HorizontalLayout {
+            HorizontalLayout {
                 spacing: Tokens.space-4;
                 alignment: start;
+                visible: Analysis.bytes-shown;
+                min-height: Analysis.bytes-shown ? self.preferred-height : 0px;
+                max-height: self.min-height;
 
-                ByteView { }
+                byte-view := ByteView {
+                    enabled: Analysis.bytes-shown;
+                }
 
                 // Which part each tint is, and the byte under the cursor in
                 // words: the parts do not rest on the tints alone.

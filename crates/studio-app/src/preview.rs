@@ -276,6 +276,8 @@ pub struct Preview {
     stage_failure: Option<String>,
     document_progress: String,
     document_notice: String,
+    /// The last output while Next checks for the end of a stream with an unknown count.
+    before_next: Option<Shown>,
     /// The stage request that failed, not asked again.
     failed: Option<Key>,
     /// The newest live picture of the subject's job.
@@ -323,6 +325,7 @@ impl Preview {
             stage_failure: None,
             document_progress: String::new(),
             document_notice: String::new(),
+            before_next: None,
             failed: None,
             live: None,
             live_note: None,
@@ -376,6 +379,7 @@ impl Preview {
             self.play_note = None;
             self.document_progress.clear();
             self.document_notice.clear();
+            self.before_next = None;
             self.stage_failure = None;
             self.failed = None;
             self.live = None;
@@ -432,7 +436,14 @@ impl Preview {
                     } else {
                         frame.saturating_add(delta.unsigned_abs())
                     };
+                    let before_next =
+                        if delta == 1 && self.document_id().is_some() && self.frames.is_none() {
+                            self.shown.clone()
+                        } else {
+                            None
+                        };
                     self.seek(to);
+                    self.before_next = before_next;
                 }
             }
             Input::Seek(frame) => self.seek(frame),
@@ -450,6 +461,7 @@ impl Preview {
                     }
                     self.playing = false;
                 } else if self.can_play() {
+                    self.before_next = None;
                     if let (Some(frame), Some(count)) = (self.current_frame(), self.frames)
                         && frame.saturating_add(1) >= count
                     {
@@ -596,7 +608,17 @@ impl Preview {
     }
 
     fn stage_failed(&mut self, key: Key, code: PictureFailure, message: &str) {
-        // Past the end: now the frame count is known; show the last frame.
+        if let (PictureFailure::OutOfRange, PictureFrame::Index { index }) = (code, key.frame)
+            && let Some(previous) = self.before_next.take()
+            && previous.picture.header.frame.checked_add(1) == Some(index)
+        {
+            self.position = Some(previous.picture.header.frame);
+            self.frames = Some(index);
+            self.show(previous);
+            return;
+        }
+        self.before_next = None;
+        // Encode keeps its existing fallback to the preceding index.
         if let (PictureFailure::OutOfRange, PictureFrame::Index { index }) = (code, key.frame)
             && index > 0
             && !matches!(key.target, PictureTarget::Document { .. })
@@ -793,6 +815,7 @@ impl Preview {
             .frames
             .map_or(frame, |count| frame.min(count.saturating_sub(1)));
         if self.document_id().is_some() {
+            self.before_next = None;
             self.stage_failure = None;
             self.failed = None;
             self.document_notice.clear();
@@ -815,6 +838,7 @@ impl Preview {
     }
 
     fn show(&mut self, shown: Shown) {
+        self.before_next = None;
         self.shown = Some(shown);
         self.stage_failure = None;
         self.failed = None;
