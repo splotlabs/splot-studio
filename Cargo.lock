@@ -4358,6 +4358,7 @@ dependencies = [
  "slint",
  "slint-build",
  "studio-domain",
+ "winapi-util",
 ]
 
 [[package]]
@@ -4384,6 +4385,7 @@ dependencies = [
  "studio-domain",
  "tempfile",
  "thiserror 2.0.21",
+ "winapi-util",
 ]
 
 [[package]]
