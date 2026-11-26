@@ -248,11 +248,18 @@ fn finding_detail(
         finding.rule_id,
         finding.message
     );
-    let location = match (finding.file_offset, finding.bit_offset) {
+    let mut location = match (finding.file_offset, finding.bit_offset) {
         (Some(byte), Some(bit)) => format!("File byte {byte}, bit {bit}."),
         (Some(byte), None) => format!("File byte {byte}. Field-level evidence is unavailable."),
         (None, _) => "The validator supplied no location.".to_owned(),
     };
+    if let Some(stream) = finding.stream_offset {
+        if let Some(bit) = finding.bit_offset {
+            let _ = write!(location, " Stream byte {stream}, bit {bit}.");
+        } else {
+            let _ = write!(location, " Stream byte {stream}.");
+        }
+    }
     let location = if let Some((name, span)) = evidence.matched_field() {
         if finding.file_offset == Some(span.start.file_bit / 8)
             && finding.bit_offset.map(u64::from) == Some(span.start.file_bit % 8)
