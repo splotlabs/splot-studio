@@ -518,6 +518,22 @@ impl Controller {
                         },
                     );
                 }
+                UiEffect::ExportCancelTimer(id) => {
+                    let weak = Rc::downgrade(self);
+                    self.cancel_deadline.start(
+                        TimerMode::SingleShot,
+                        activity::CANCEL_TIMEOUT,
+                        move || {
+                            with(&weak, |ctl| {
+                                let outcome = ctl
+                                    .session
+                                    .borrow_mut()
+                                    .export_cancel_timed_out(id, Instant::now());
+                                ctl.handle(outcome);
+                            });
+                        },
+                    );
+                }
                 UiEffect::Reveal(path) => self.reveal(path),
                 UiEffect::Engine(status) => show_engine(&window, &status),
             }
@@ -534,7 +550,9 @@ impl Controller {
             }
         } else {
             self.clock.stop();
-            self.cancel_deadline.stop();
+            if !session.export_active() {
+                self.cancel_deadline.stop();
+            }
         }
         let now = Instant::now();
         match outcome.changed {

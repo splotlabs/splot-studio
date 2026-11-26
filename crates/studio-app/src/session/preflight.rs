@@ -306,12 +306,7 @@ impl Session {
         let Some(writer) = &self.journal else {
             return self.start_prepared(id, now);
         };
-        let journal = journal::snapshot(
-            self.state.next_id(),
-            self.state.option_request().clone(),
-            self.state.items(),
-            self.view(),
-        );
+        let journal = self.journal_snapshot(self.view());
         let bytes = match journal::encode(&journal) {
             Ok(bytes) => bytes,
             Err(error) => return self.journal_failed(id, &error.to_string(), now),
@@ -416,9 +411,16 @@ impl Session {
         worker.send(id, command).map_err(|error| error.to_string())
     }
 
+    pub(super) fn stop_preflight_worker(&mut self, id: u64) {
+        if let Some((_, worker)) = self.job.as_mut().filter(|(current, _)| *current == id) {
+            worker.close_input();
+            worker.kill();
+        }
+    }
+
     fn preflight_failed(&mut self, id: u64, failure: Failure, now: Instant) -> Outcome {
         self.clear_preflight();
-        self.job.take();
+        self.stop_preflight_worker(id);
         self.dispatch(
             Intent::Job {
                 id,

@@ -86,7 +86,7 @@ impl Controller {
                     return;
                 };
                 with(&ctl, |ctl| {
-                    let outcome = ctl.session.borrow_mut().batch_remove(index);
+                    let outcome = ctl.session.borrow_mut().remove_job(index);
                     ctl.handle(outcome);
                 });
             }

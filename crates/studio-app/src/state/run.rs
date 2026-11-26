@@ -152,7 +152,7 @@ impl AppState {
 
     /// Starts the next file of the run, waits for files still being read,
     /// asks about files that joined the run unacknowledged, or ends the run.
-    pub(super) fn advance(&mut self, now: Instant, update: &mut Update) {
+    pub(super) fn advance(&mut self, now: Instant, update: &mut Update, worker_available: bool) {
         if self.run.is_none() {
             return;
         }
@@ -178,7 +178,9 @@ impl AppState {
             .find(|i| fresh(i) && self.runnable(i))
             .map(|i| i.id)
         {
-            self.start(id, now, update);
+            if worker_available {
+                self.start(id, now, update);
+            }
             return;
         }
         if self

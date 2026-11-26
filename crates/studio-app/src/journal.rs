@@ -51,7 +51,7 @@ use crate::queue::{
 use crate::workspace::Workspace;
 
 /// The journal format this build writes.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 /// The oldest journal format this build reads and migrates.
 pub const OLDEST_VERSION: u32 = 1;
@@ -73,6 +73,9 @@ pub struct Journal {
     /// The workspace and the Analyze documents; absent before version 2.
     #[serde(default)]
     pub view: JournalView,
+    /// Queued and completed exports, absent before version 5.
+    #[serde(default)]
+    pub exports: crate::export_jobs::ExportJobs,
 }
 
 /// What the window showed: the workspace and the Analyze documents.
@@ -307,6 +310,7 @@ pub fn snapshot(
         settings,
         items: items.iter().map(item).collect(),
         view,
+        exports: crate::export_jobs::ExportJobs::default(),
     }
 }
 
@@ -978,6 +982,7 @@ mod tests {
         Journal {
             version: VERSION,
             next_id: 9,
+            exports: crate::export_jobs::ExportJobs::default(),
             settings: INITIAL_SETTINGS.into(),
             view: JournalView {
                 workspace: JournalWorkspace::Analyze,
@@ -1210,7 +1215,7 @@ mod tests {
         with_color["id"] = json!(7);
         with_color["facts"]["color"] = json!({});
         legacy["items"] = json!([waiting, with_color]);
-        for version in [1, 2, 3, VERSION] {
+        for version in [1, 2, 3, 4, VERSION] {
             legacy["version"] = json!(version);
             assert!(fs::write(&path, serde_json::to_vec(&legacy)?).is_ok());
             let Loaded::Found(loaded) = load(&path) else {
@@ -1307,10 +1312,10 @@ mod tests {
     fn a_newer_version_is_left_untouched_and_not_saved_over() {
         let dir = Scratch::new("too-new");
         let path = dir.path(FILE_NAME);
-        let future = br#"{"version": 5, "items": "renamed", "view": {"tabs": []}}"#;
+        let future = br#"{"version": 6, "items": "renamed", "view": {"tabs": []}}"#;
         assert!(fs::write(&path, future).is_ok());
         let loaded = load(&path);
-        assert_eq!(loaded, Loaded::TooNew { version: 5 });
+        assert_eq!(loaded, Loaded::TooNew { version: 6 });
         assert!(!loaded.may_save());
         assert_eq!(fs::read(&path).ok().as_deref(), Some(&future[..]));
     }

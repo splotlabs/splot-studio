@@ -33,6 +33,7 @@ mod batch;
 mod controller;
 pub mod cpu;
 pub mod engine;
+pub mod export_jobs;
 pub mod instance;
 pub mod jobs;
 pub mod journal;

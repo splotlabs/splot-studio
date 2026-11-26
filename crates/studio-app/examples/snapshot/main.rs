@@ -467,6 +467,7 @@ fn restored_scenario(now: Instant) -> AppState {
         pass_artifact: None,
     };
     let journal = Journal {
+        exports: studio_app::export_jobs::ExportJobs::default(),
         view: studio_app::journal::JournalView::default(),
         version: studio_app::journal::VERSION,
         next_id: 4,

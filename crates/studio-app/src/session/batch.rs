@@ -62,21 +62,21 @@ impl Session {
         self.perform_batch(effect, Instant::now())
     }
 
-    /// Removes one terminal job and releases its retained report.
-    pub fn batch_remove(&mut self, index: usize) -> Outcome {
-        let id = self
+    /// Removes a terminal row from Jobs.
+    pub fn remove_job(&mut self, index: usize) -> Outcome {
+        let work = self
             .jobs()
             .get(index)
             .filter(|job| job.can_remove())
-            .and_then(|job| match job.work {
-                Work::Validate(file) => Some(file.id),
-                _ => None,
-            });
-        let Some(id) = id else {
-            return Outcome::nothing();
-        };
-        let effect = self.batch.remove(id);
-        self.perform_batch(effect, Instant::now())
+            .map(|job| job.work);
+        match work {
+            Some(Work::Validate(file)) => {
+                let effect = self.batch.remove(file.id);
+                self.perform_batch(effect, Instant::now())
+            }
+            Some(Work::Export(job)) => self.remove_export(job.id),
+            _ => Outcome::nothing(),
+        }
     }
 
     pub(super) fn show_batch(&mut self, id: u64, now: Instant) -> Outcome {

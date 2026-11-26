@@ -195,6 +195,7 @@ fn restored(path: PathBuf) -> AppState {
     };
     AppState::new(Startup {
         recovered: Some(Recovered {
+            exports: studio_app::export_jobs::ExportJobs::default(),
             items: Vec::new(),
             next_id: 1,
             settings: INITIAL_SETTINGS.into(),
