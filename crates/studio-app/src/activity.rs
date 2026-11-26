@@ -301,6 +301,8 @@ impl Activity {
             | Event::AnalysisSyntaxPage { .. }
             | Event::AnalysisValidated { .. }
             | Event::AnalysisFindings { .. }
+            | Event::AnalysisIdentityScanned { .. }
+            | Event::AnalysisIdentityPage { .. }
             | Event::BatchSettingsChecked
             | Event::BatchValidating { .. }
             | Event::BatchValidated { .. }

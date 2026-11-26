@@ -60,6 +60,14 @@ pub(crate) fn preview_decoder(
     limits: DecodeLimits,
     grain: GrainPolicy,
 ) -> splot_decode::Result<Decoder> {
+    Decoder::new(preview_decoder_settings(threads, limits, grain))
+}
+
+pub(crate) fn preview_decoder_settings(
+    threads: usize,
+    limits: DecodeLimits,
+    grain: GrainPolicy,
+) -> DecoderSettings {
     let largest = MEMORY_BUDGET_BYTES / (2 * FRAMES_IN_FLIGHT);
     let limits = limits
         .with_limit(
@@ -72,12 +80,11 @@ pub(crate) fn preview_decoder(
         );
     let threads =
         std::num::NonZeroUsize::new(threads).map_or(ThreadCount::Auto, ThreadCount::Fixed);
-    let settings = DecoderSettings::default()
+    DecoderSettings::default()
         .with_threads(threads)
         .with_frame_delay(FrameDelay::Fixed(std::num::NonZeroUsize::MIN))
         .with_limits(limits)
-        .with_skip_film_grain(grain == GrainPolicy::Skip);
-    Decoder::new(settings)
+        .with_skip_film_grain(grain == GrainPolicy::Skip)
 }
 
 /// The planes of a decoded picture, without a copy.

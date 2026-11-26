@@ -26,6 +26,7 @@ use crate::analysis::{AnalysisFailure, DocumentSummary, Framing, LocateTarget, R
 use crate::export::{
     ExportArtifact, ExportOutcome, ExportProgress, ExportRequest, ExportStage, ExportTemp,
 };
+use crate::identity::{IdentityKind, IdentityPage, IdentitySummary};
 use crate::job::{Failure, JobReport, JobSpec, Progress, SourceFacts, Stage, WirePath};
 use crate::options::{EffectiveOption, FieldError, OptionDescriptor, OptionRequest};
 use crate::preview::{
@@ -410,6 +411,33 @@ pub enum Command {
         /// The maximum number of findings, in `1..=MAX_PAGE_ELEMENTS`.
         count: u32,
     },
+    /// Inspect process only. Decode and index frame identities for an open document.
+    AnalysisIdentityScan {
+        /// The document generation.
+        document: u64,
+        /// The decoder's film grain policy.
+        grain: GrainPolicy,
+    },
+    /// Inspect process only. Stop a pending identity scan.
+    AnalysisCancelIdentity {
+        /// The document generation.
+        document: u64,
+        /// The request ID of the scan to stop.
+        scan: u64,
+    },
+    /// Inspect process only. Page the current identity scan while it runs or after it stops.
+    AnalysisIdentityPage {
+        /// The document generation.
+        document: u64,
+        /// The request ID of the scan.
+        scan: u64,
+        /// The table to page.
+        kind: IdentityKind,
+        /// The first row.
+        first: u64,
+        /// The maximum number of rows, in `1..=MAX_IDENTITY_PAGE`.
+        count: u32,
+    },
     /// Inspect process only. Checks validation options before starting a batch.
     BatchCheckSettings {
         /// The options to check.
@@ -741,6 +769,22 @@ pub enum Event {
         total: u64,
         /// The findings from `first`.
         findings: Vec<Finding>,
+    },
+    /// Terminal answer to [`Command::AnalysisIdentityScan`].
+    AnalysisIdentityScanned {
+        /// The document generation.
+        document: u64,
+        /// Coverage for the finished scan.
+        summary: Box<IdentitySummary>,
+    },
+    /// Answers [`Command::AnalysisIdentityPage`].
+    AnalysisIdentityPage {
+        /// The document generation.
+        document: u64,
+        /// The request ID of the scan.
+        scan: u64,
+        /// The requested records and their coverage.
+        page: Box<IdentityPage>,
     },
     /// Answers [`Command::BatchCheckSettings`] when the options are valid.
     BatchSettingsChecked,
