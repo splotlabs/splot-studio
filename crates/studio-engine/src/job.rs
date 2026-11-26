@@ -184,9 +184,15 @@ fn execute(
     let (config, policy) = prepare_job(job, &source)?;
     output::check_destination(&destination, &source.id)?;
     match job.purpose {
-        JobPurpose::FirstPass => {
-            pass::generate(job, source, &destination, config, policy, control, report)
-        }
+        JobPurpose::FirstPass => pass::generate(
+            job,
+            &mut source,
+            &destination,
+            &config,
+            policy,
+            control,
+            report,
+        ),
         JobPurpose::Encode => {
             execute_encode(job, source, &destination, config, policy, control, report)
         }
