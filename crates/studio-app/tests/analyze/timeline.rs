@@ -11,6 +11,7 @@ pub(super) fn controls(rig: &mut Rig, scratch: &Scratch) {
     while rig.session.analysis().shown().is_some() {
         rig.session.analysis_input(Input::Close);
     }
+    check_lossless_quantizer(rig, scratch);
     let ivf = scratch.0.join("three timed pictures.ivf");
     fs::write(
         &ivf,
@@ -94,6 +95,31 @@ pub(super) fn controls(rig: &mut Rig, scratch: &Scratch) {
     check_output_order(rig);
 }
 
+fn check_lossless_quantizer(rig: &mut Rig, scratch: &Scratch) {
+    use studio_app::TimelineUi;
+
+    let source = scratch.0.join("lossless monochrome.ivf");
+    fs::write(
+        &source,
+        include_bytes!(
+            "../../../studio-engine/tests/preview/fixtures/syn-luma-palette2-row-mono-16x16-q0.ivf"
+        ),
+    )
+    .unwrap_or_else(|error| unreachable!("{error}"));
+    rig.session.analysis_input(Input::Open(vec![source]));
+    rig.idle("the lossless source structure");
+    rig.window.global::<TimelineUi>().invoke_build();
+    rig.idle("the lossless source timeline");
+    assert_eq!(rig.window.global::<TimelineUi>().get_bars().row_count(), 1);
+    assert!(
+        rig.window
+            .global::<TimelineUi>()
+            .get_exact_statistics()
+            .contains("Header base quantizer 0 (signaled)")
+    );
+    rig.session.analysis_input(Input::Close);
+}
+
 fn check_table(rig: &mut Rig) {
     use slint::language::ColorScheme;
     use studio_app::TimelineUi;
@@ -141,11 +167,19 @@ fn check_output_order(rig: &mut Rig) {
             .contains("bit/s")
     );
     assert!(rig.window.global::<TimelineUi>().get_can_go_to_time());
+    use studio_domain::preview::PictureBox;
+    let size = PictureBox::clamped(320, 180);
+    rig.session
+        .preview_input(studio_app::preview::Input::Resized {
+            stage: size,
+            thumb: size,
+        });
     rig.window
         .global::<TimelineUi>()
         .invoke_go_to(2, "1/100".into());
     rig.idle("a picture selected from exact time");
-    assert_ne!(rig.window.global::<TimelineUi>().get_selected_index(), "0");
+    assert_eq!(rig.window.global::<TimelineUi>().get_selected_index(), "1");
+    check_picture_and_byte(rig, 1);
     assert!(
         rig.window
             .global::<TimelineUi>()
@@ -155,6 +189,33 @@ fn check_output_order(rig: &mut Rig) {
     rig.window.global::<TimelineUi>().invoke_findings();
     rig.idle("the linked findings tab");
     assert_eq!(rig.global().get_evidence_tab(), 2);
+
+    rig.global().invoke_back();
+    rig.idle("the previous linked selection");
+    check_picture_and_byte(rig, 0);
+    rig.global().invoke_forward();
+    rig.idle("the restored linked selection");
+    check_picture_and_byte(rig, 1);
+}
+
+fn check_picture_and_byte(rig: &mut Rig, expected: u64) {
+    rig.settle("the linked picture", |session| {
+        let view = session.preview().view();
+        view.picture.is_some() && view.output.is_some_and(|output| output.ordinal == expected)
+    });
+    let doc = rig
+        .session
+        .analysis()
+        .shown()
+        .unwrap_or_else(|| unreachable!("the open source"));
+    let selection = doc
+        .timeline()
+        .selection()
+        .unwrap_or_else(|| unreachable!("the linked row"));
+    let offset = selection.showing_offset.unwrap_or(selection.coded_offset);
+    assert_eq!(selection.output_ordinal, Some(expected));
+    assert_eq!(doc.bytes().cursor, offset);
+    assert!(rig.byte(usize::try_from(offset).unwrap_or(0)).2);
 }
 
 fn timeline_snapshot(rig: &Rig, scheme: slint::language::ColorScheme, scale: f32, file_name: &str) {
