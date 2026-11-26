@@ -158,7 +158,7 @@ fn findings_status(evidence: &Evidence) -> String {
         return if evidence.cancelling {
             "Stopping validation…"
         } else {
-            "Running validation…"
+            "Waiting for the validation result…"
         }
         .to_owned();
     }
@@ -254,7 +254,13 @@ fn finding_detail(
         (None, _) => "The validator supplied no location.".to_owned(),
     };
     let location = if let Some((name, span)) = evidence.matched_field() {
-        format!("{location}\n{name}. {}", span_text(span))
+        if finding.file_offset == Some(span.start.file_bit / 8)
+            && finding.bit_offset.map(u64::from) == Some(span.start.file_bit % 8)
+        {
+            format!("{name}. {}", span_text(span))
+        } else {
+            format!("{location}\n{name}. {}", span_text(span))
+        }
     } else if finding.file_offset.is_some() && finding.bit_offset.is_some() {
         let status = if evidence.syntax_loading {
             "Reading field evidence…"

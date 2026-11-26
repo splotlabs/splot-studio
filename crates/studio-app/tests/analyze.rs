@@ -620,6 +620,7 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
     offsets_are_never_cut(&rig);
     line_offsets_are_never_cut(&rig);
     linked_validation_evidence(&mut rig, &scratch, &clipboard);
+    a_large_findings_view_pages_retained_rows(&mut rig, &scratch);
 
     eprintln!("Tab stops: navigator after {tabs}, byte view {byte_tabs} later");
 }
@@ -724,6 +725,34 @@ fn linked_validation_evidence(rig: &mut Rig, scratch: &Scratch, clipboard: &RefC
     assert_eq!(rig.global().get_evidence_rows().row_count(), 0);
     assert_eq!(rig.global().get_findings_status(), status);
     assert!(rig.global().get_evidence_note().contains("filters hide"));
+}
+
+/// The worker sends multiple finding pages. The displayed page still has
+/// only eight rows and selection keeps the native position.
+fn a_large_findings_view_pages_retained_rows(rig: &mut Rig, scratch: &Scratch) {
+    let path = scratch.0.join("many bad trailing bits.obu");
+    fs::write(&path, [0x02, 0x08, 0x00].repeat(160)).unwrap_or_else(|e| unreachable!("{e}"));
+    rig.session.analysis_input(Input::Close);
+    rig.session.analysis_input(Input::Open(vec![path]));
+    rig.idle("the large findings fixture");
+    rig.global().invoke_validate_stream();
+    rig.idle("the complete retained findings");
+    rig.global()
+        .invoke_evidence_rule("trailing-bits/missing-one-bit".into());
+    rig.idle("the filtered findings");
+    assert_eq!(rig.global().get_evidence_page_label(), "1–8 of 160");
+    assert_eq!(rig.global().get_evidence_rows().row_count(), 8);
+    rig.global().invoke_evidence_page(1);
+    rig.idle("the second findings page");
+    assert_eq!(rig.global().get_evidence_page_label(), "9–16 of 160");
+    rig.global().invoke_evidence_pick(0);
+    rig.idle("the ninth finding");
+    assert_eq!(rig.selected(), Some((8, Position::Row(8))));
+    assert!(
+        rig.global()
+            .get_evidence_note()
+            .contains("File byte 26, bit 0")
+    );
 }
 
 /// An offset of 16 hex digits, the most a `u64` has, is drawn whole in the
