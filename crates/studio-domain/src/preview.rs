@@ -408,6 +408,8 @@ pub enum PictureFailure {
     Unsupported,
     /// There is no such frame.
     OutOfRange,
+    /// The request needs bytes beyond the verified prefix.
+    PartialCoverage,
     /// Playback was asked for a stream whose frame timing is not known.
     NoTiming,
     /// Reading this file needs `FFmpeg` and none is available.

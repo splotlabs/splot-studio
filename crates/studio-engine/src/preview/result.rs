@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
-//! Finished encoder output and independent AV2 documents share one decoder
-//! session and a bounded temporal-unit index. Only Studio encoder output
-//! can use its one-picture-per-unit contract for random-access seeks.
-//! Documents count the decoder's emitted pictures and replay valid state.
+//! Studio encoder output uses a bounded random-access index and emits one
+//! picture per temporal unit. Documents stream framed units in order and
+//! replay from the start when no session can continue to the requested ordinal.
+
+mod replay;
 
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
@@ -12,16 +13,20 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use splot_core::annexb::AnnexBObuCursor;
+use splot_core::ivf::{IvfError, is_ivf, parse_ivf_header};
 use splot_core::span::ByteOffset;
 use splot_core::stream_reader::{ReaderError, TemporalUnitReader, is_random_access_point};
 use splot_core::types::ObuType;
-use splot_decode::{DataProps, DecodeError, Decoder, ObuLocation, Picture, SendStatus};
+use splot_decode::{
+    DataProps, DecodeError, DecodeLimits, Decoder, ObuLocation, Picture, SendStatus,
+};
 use studio_domain::analysis::SourceDigest;
 use studio_domain::job::{SourceFingerprint, WirePath};
 use studio_domain::preview::{
     ColorMatrix, GrainPolicy, MediaTime, OutputEvent, PictureFailure, PictureStage, SourceRef,
 };
 
+use self::replay::DocumentInput;
 use super::document::DocumentPicture;
 use super::{Context, Decoded, Outcome, Stopped};
 use crate::inspect::document::HashReader;
@@ -53,6 +58,7 @@ struct Session {
     /// The display index of the next picture.
     next_out: u64,
     drained: bool,
+    document: Option<DocumentInput>,
 }
 
 /// An open output file.
@@ -61,6 +67,7 @@ pub struct ResultPictures {
     fingerprint: SourceFingerprint,
     /// Present for a document, whose identity must match analysis.
     document_id: Option<FileId>,
+    verified_bytes: u64,
     file: File,
     units: Vec<Unit>,
     /// Why the index stopped early.
@@ -118,7 +125,7 @@ impl ResultPictures {
         let reader = file
             .try_clone()
             .map_err(|e| unreadable(format!("Cannot read the preview file. {e}")))?;
-        let (indexed, document_id) = if let Some((expected, digest)) = document {
+        let (indexed, document_id, verified_bytes) = if let Some((expected, digest)) = document {
             if fingerprint != expected || digest.bytes > fingerprint.len {
                 return Err(changed());
             }
@@ -130,23 +137,46 @@ impl ResultPictures {
                 completed: 0,
                 total: digest.bytes,
             };
+            // Any legal IVF file header fits within this buffer. Hash these
+            // bytes with the rest of the verified scope before exposing them.
             let mut reader = HashReader::new(reader);
-            let prefix_end = (digest.bytes < fingerprint.len).then_some(digest.bytes);
-            let indexed = index(&mut reader, Some(context), prefix_end)?;
-            // The index may stop before the end of the prefix. Verify the rest.
-            io::copy(&mut reader, &mut io::sink()).map_err(|e| {
+            let verify_error = |e| {
                 context
                     .check()
                     .err()
                     .unwrap_or_else(|| unreadable(format!("Cannot verify the document bytes. {e}")))
-            })?;
+            };
+            let mut header = Vec::new();
+            reader
+                .by_ref()
+                .take(u64::from(u16::MAX))
+                .read_to_end(&mut header)
+                .map_err(verify_error)?;
+            let header = is_ivf(&header).then(|| parse_ivf_header(&header));
+            io::copy(&mut reader, &mut io::sink()).map_err(verify_error)?;
             if &reader.finish() != digest {
                 return Err(changed());
             }
             source::still_the_same(&path, &id, fingerprint).map_err(Stopped::from_stop)?;
-            (indexed, Some(id))
+            let header = match header.transpose() {
+                Ok(header) => header,
+                Err(IvfError::TruncatedHeader { .. }) if digest.bytes < fingerprint.len => {
+                    return Err(partial_coverage(digest.bytes));
+                }
+                Err(e) => return Err(unreadable(format!("Cannot parse the preview file. {e}"))),
+            };
+            if header.is_some_and(|header| header.fourcc != *b"AV02") {
+                return Err(Stopped::unavailable(
+                    PictureFailure::Unsupported,
+                    "Preview supports only AV02 IVF files.",
+                ));
+            }
+            let time_base = header
+                .map(|header| (header.timebase_numerator, header.timebase_denominator))
+                .filter(|(num, den)| *num != 0 && *den != 0);
+            ((Vec::new(), None, time_base), Some(id), digest.bytes)
         } else {
-            (index(reader, None, None)?, None)
+            (index(reader)?, None, fingerprint.len)
         };
         let (units, damaged, ivf_time_base) = indexed;
         let (matrix, source_rate) = reference.map_or((None, None), facts_of);
@@ -154,6 +184,7 @@ impl ResultPictures {
             path,
             fingerprint,
             document_id,
+            verified_bytes,
             file,
             units,
             damaged,
@@ -255,12 +286,6 @@ impl ResultPictures {
             if self.count.is_some_and(|count| index >= count) {
                 return Err(super::out_of_range(index, self.count));
             }
-            if index >= MAX_UNITS as u64 {
-                return Err(Stopped::unavailable(
-                    PictureFailure::Unsupported,
-                    format!("Preview can decode at most {MAX_UNITS} output pictures."),
-                ));
-            }
             // An arbitrary access point need not restore the sequence, layer,
             // or external-header state. Start at byte zero for a fresh session.
             0
@@ -274,13 +299,23 @@ impl ResultPictures {
                 && session.next_out >= start as u64
         });
         if !reusable {
+            let input = if document {
+                Some(DocumentInput::open(
+                    &self.file,
+                    self.verified_bytes,
+                    self.fingerprint.len,
+                    context,
+                )?)
+            } else {
+                None
+            };
             let reuse = self.session.take().filter(|session| session.grain == grain);
             let decoder = if let Some(mut session) = reuse {
                 session.decoder.flush();
                 session.decoder
             } else {
                 let decoder = if document {
-                    stream::document_decoder(PREVIEW_DECODE_THREADS, grain)
+                    stream::preview_decoder(PREVIEW_DECODE_THREADS, DecodeLimits::DEFAULT, grain)
                 } else {
                     stream::decoder(PREVIEW_DECODE_THREADS)
                 };
@@ -292,6 +327,7 @@ impl ResultPictures {
                 next_send: start,
                 next_out: start as u64,
                 drained: false,
+                document: input,
             });
         }
         while let Some(at) = self
@@ -339,32 +375,33 @@ impl ResultPictures {
         Ok(Some((index, decoded)))
     }
 
-    fn unit(&self, token: u64) -> Outcome<&Unit> {
-        usize::try_from(token)
-            .ok()
-            .and_then(|token| self.units.get(token))
-            .ok_or_else(|| unreadable("The decoder returned an unknown temporal unit."))
-    }
-
     fn file_offset(&self, location: ObuLocation) -> Outcome<u64> {
-        let unit = self.unit(location.user_data)?;
-        let offset = location.offset.get();
-        if offset < unit.len as u64
-            && let Some(absolute) = unit.offset.checked_add(offset)
-        {
-            return Ok(absolute);
-        }
-        Err(unreadable(
-            "The decoder returned an OBU location outside its temporal unit.",
-        ))
+        location
+            .user_data
+            .checked_add(location.offset.get())
+            .filter(|absolute| *absolute < self.verified_bytes)
+            .ok_or_else(|| unreadable("The decoder returned an OBU outside the verified bytes."))
     }
 
     fn document_picture(&self, index: u64, picture: Picture) -> Outcome<DocumentPicture> {
         let provenance = picture.provenance();
-        let unit = self.unit(provenance.display.user_data)?;
+        let props = picture.props();
+        let unit_len = props.duration.unsigned_abs();
+        if props.user_data != provenance.display.user_data
+            || provenance.display.offset.get() >= unit_len
+            || props
+                .user_data
+                .checked_add(unit_len)
+                .is_none_or(|end| end > self.verified_bytes)
+        {
+            return Err(unreadable(
+                "The decoder returned an invalid display location.",
+            ));
+        }
         let time = self.ivf_time_base.and_then(|(num, den)| {
+            let pts = u64::from_ne_bytes(props.pts.to_ne_bytes());
             Some(MediaTime {
-                num: unit.pts.checked_mul(u64::from(num))?,
+                num: pts.checked_mul(u64::from(num))?,
                 den: u64::from(den),
             })
         });
@@ -382,8 +419,8 @@ impl ResultPictures {
             });
         let output = OutputEvent {
             ordinal: index,
-            unit_offset: unit.offset,
-            unit_len: unit.len as u64,
+            unit_offset: provenance.display.user_data,
+            unit_len,
             coded_offset: Some(self.file_offset(provenance.coded)?),
             showing_offset: Some(self.file_offset(provenance.display)?),
             sequence_offset: Some(self.file_offset(provenance.sequence_header)?),
@@ -415,13 +452,12 @@ impl ResultPictures {
         };
         loop {
             context.check()?;
-            let damage = self
-                .damaged
+            let next = if session
+                .document
                 .as_ref()
-                .filter(|_| document && session.next_send >= self.units.len());
-            let next = if damage.is_some() {
-                // A partial index cannot establish end-of-stream. Take only
-                // the outputs already scheduled by the submitted units.
+                .is_some_and(|input| input.damage().is_some())
+            {
+                // An incomplete framing scan does not establish end of stream.
                 session.decoder.wait_picture()
             } else {
                 session.decoder.get_picture()
@@ -440,14 +476,34 @@ impl ResultPictures {
                 session.next_out += 1;
                 return Ok(Some((index, picture)));
             }
-            let Some(unit) = self.units.get(session.next_send).copied() else {
-                if let Some(damage) = damage {
+            if let Some(input) = session.document.as_mut() {
+                let decoder = &mut session.decoder;
+                if let Some(damage) = input.damage() {
                     return Err(Stopped::unavailable(damage.code, damage.message.clone()));
                 }
                 if session.drained {
-                    if document {
-                        self.count = Some(session.next_out);
+                    self.count = Some(session.next_out);
+                    return Ok(None);
+                }
+                match input.feed(decoder, context) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if input.damage().is_none() {
+                            decoder.drain();
+                            session.drained = true;
+                        }
                     }
+                    Err(stopped) => {
+                        // Cancellation during a read can leave framing midway
+                        // through a unit. A new session must replay it.
+                        self.session = None;
+                        return Err(stopped);
+                    }
+                }
+                continue;
+            }
+            let Some(unit) = self.units.get(session.next_send).copied() else {
+                if session.drained {
                     return Ok(None);
                 }
                 session.decoder.drain();
@@ -583,18 +639,10 @@ fn annex_b_fault(unit: &[u8]) -> Result<(), String> {
 
 /// Reads the file's framing: the temporal units, why reading stopped early
 /// (if it did), and the IVF time base.
-fn index(
-    file: impl Read,
-    context: Option<&Context<'_>>,
-    prefix_end: Option<u64>,
-) -> Outcome<Index> {
+fn index(file: impl Read) -> Outcome<Index> {
     let mut reader = TemporalUnitReader::with_max_unit_bytes(BufReader::new(file), MAX_UNIT_BYTES);
     let mut units: Vec<Unit> = Vec::new();
-    let document = context.is_some();
     let damaged = loop {
-        if let Some(context) = context {
-            context.check()?;
-        }
         if units.len() >= MAX_UNITS {
             break Some(Damage {
                 code: PictureFailure::Unsupported,
@@ -603,28 +651,10 @@ fn index(
         }
         let unit = match reader.next_temporal_unit() {
             Ok(Some(unit)) => unit,
-            Ok(None) => {
-                break reader.ivf_warning().map(|warning| Damage {
-                    code: PictureFailure::Unreadable,
-                    message: format!("The IVF file is damaged ({}).", warning.rule_id()),
-                });
-            }
-            Err(e) => {
-                if let Some(context) = context {
-                    context.check()?;
-                }
-                let code = match e {
-                    ReaderError::UnitTooLarge { .. } => PictureFailure::Unsupported,
-                    _ => PictureFailure::Unreadable,
-                };
-                break Some(Damage {
-                    code,
-                    message: format!("Cannot parse the preview file. {e}"),
-                });
-            }
+            Ok(None) => break ivf_damage(&reader),
+            Err(e) => break Some(framing_damage(e)),
         };
-        if !document
-            && unit.pts.is_none()
+        if unit.pts.is_none()
             && let Err(fault) = annex_b_fault(unit.bytes)
         {
             break Some(Damage {
@@ -636,67 +666,46 @@ fn index(
             offset: unit.offset.get(),
             len: unit.bytes.len(),
             pts: unit.pts.unwrap_or(0),
-            random_access: !document && is_random_access_point(unit.bytes),
+            random_access: is_random_access_point(unit.bytes),
         });
-        if document
-            && reader
-                .ivf_header()
-                .is_some_and(|header| header.fourcc != *b"AV02")
-        {
-            break None;
-        }
     };
-    let ivf_header = reader.ivf_header();
-    if let Some(end) = prefix_end
-        && ivf_header.is_none()
-        && units
-            .last()
-            .is_some_and(|last| last.offset.saturating_add(last.len as u64) == end)
-    {
-        // The final raw unit has no verified next delimiter.
-        units.pop();
-    }
-    let damaged = if document && ivf_header.is_some_and(|header| header.fourcc != *b"AV02") {
-        units.clear();
-        Some(Damage {
-            code: PictureFailure::Unsupported,
-            message: "Preview supports only AV02 IVF files.".into(),
-        })
-    } else {
-        damaged
-    };
-    let time_base = ivf_header
-        .map(|header| (header.timebase_numerator, header.timebase_denominator))
-        .filter(|(num, den)| !document || (*num != 0 && *den != 0));
-    let damaged = if let Some(end) = prefix_end {
-        Some(partial_index(end, damaged))
-    } else {
-        damaged.or_else(|| {
-            units.is_empty().then(|| Damage {
-                code: PictureFailure::Unreadable,
-                message: "The preview file contains no temporal units.".into(),
-            })
-        })
-    };
+    let time_base = reader
+        .ivf_header()
+        .map(|header| (header.timebase_numerator, header.timebase_denominator));
+    let damaged = damaged.or_else(|| units.is_empty().then(empty_stream));
     Ok((units, damaged, time_base))
 }
 
-/// Preserve the first framing error when the verified prefix ends within a unit.
-fn partial_index(end: u64, damage: Option<Damage>) -> Damage {
-    let message =
-        format!("Analyze verified only the first {end} bytes. Preview stops at that boundary.");
-    match damage {
-        Some(mut damage) => {
-            if damage.code == PictureFailure::Unreadable {
-                damage.message = format!("{message} {}", damage.message);
-            }
-            damage
-        }
-        None => Damage {
-            code: PictureFailure::Unreadable,
-            message,
-        },
+fn empty_stream() -> Damage {
+    Damage {
+        code: PictureFailure::Unreadable,
+        message: "The preview file contains no temporal units.".into(),
     }
+}
+
+fn ivf_damage(reader: &TemporalUnitReader<impl Read>) -> Option<Damage> {
+    reader.ivf_warning().map(|warning| Damage {
+        code: PictureFailure::Unreadable,
+        message: format!("The IVF file is damaged ({}).", warning.rule_id()),
+    })
+}
+
+fn framing_damage(error: ReaderError) -> Damage {
+    Damage {
+        code: match error {
+            ReaderError::UnitTooLarge { .. } => PictureFailure::Unsupported,
+            _ => PictureFailure::Unreadable,
+        },
+        message: format!("Cannot parse the preview file. {error}"),
+    }
+}
+
+fn partial_message(end: u64) -> String {
+    format!("Analyze verified only the first {end} bytes. Preview stops at that boundary.")
+}
+
+fn partial_coverage(end: u64) -> Stopped {
+    Stopped::unavailable(PictureFailure::PartialCoverage, partial_message(end))
 }
 
 #[cfg(test)]
@@ -777,15 +786,16 @@ mod tests {
     }
 
     #[test]
-    fn preview_stops_at_the_verified_prefix() -> Result<(), Box<dyn std::error::Error>> {
+    fn preview_stops_at_the_verified_prefix_of_a_sparse_three_gib_file()
+    -> Result<(), Box<dyn std::error::Error>> {
         for kind in [OutputKind::Ivf, OutputKind::Av2AnnexB] {
             let (bytes, _) = encoded(kind);
-            let (units, _, _) =
-                index(bytes.as_slice(), None, None).map_err(|e| format!("{e:?}"))?;
+            let (units, _, _) = index(bytes.as_slice()).map_err(|e| format!("{e:?}"))?;
             let fourth = units.get(3).ok_or("Missing fourth temporal unit.")?;
             let end = usize::try_from(fourth.offset)? + fourth.len;
             let mut source = tempfile::NamedTempFile::new()?;
             source.write_all(&bytes)?;
+            source.as_file().set_len(3 << 30)?;
             let path = WirePath::from_path(source.path());
             let fingerprint = SourceFingerprint::of(&source.as_file().metadata()?);
             let mut hash = HashReader::new(&bytes[..end]);
@@ -799,6 +809,12 @@ mod tests {
                 serial: 0,
                 last_progress: std::cell::Cell::default(),
             };
+            let mut wrong_digest = digest.clone();
+            wrong_digest.sha256 = "0".repeat(64);
+            assert!(matches!(
+                ResultPictures::open(&path, None, Some((fingerprint, &wrong_digest)), &context),
+                Err(Stopped::Unavailable(PictureFailure::SourceChanged, _))
+            ));
             let mut pictures =
                 ResultPictures::open(&path, None, Some((fingerprint, &digest)), &context)
                     .map_err(|e| format!("{e:?}"))?;
@@ -809,7 +825,6 @@ mod tests {
             // The fourth IVF unit has a complete record. For Annex B the
             // prefix does not establish the boundary of its last unit.
             let covered = if kind == OutputKind::Ivf { 4 } else { 3 };
-            assert_eq!(pictures.units.len(), covered);
             for ordinal in 0..covered as u64 {
                 let output = pictures
                     .decode_next(&context)
@@ -818,7 +833,7 @@ mod tests {
             }
             assert!(matches!(
                 pictures.decode_next(&context),
-                Err(Stopped::Unavailable(PictureFailure::Unreadable, message))
+                Err(Stopped::Unavailable(PictureFailure::PartialCoverage, message))
                     if message.contains("Analyze verified only")
             ));
             assert!(
@@ -833,6 +848,59 @@ mod tests {
     }
 
     #[test]
+    fn document_replay_crosses_the_encoded_result_index_limit()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use splot_core::ivf::{IVF_FRAME_HEADER_SIZE, parse_ivf_header, write_ivf_header};
+
+        let (bytes, _) = encoded(OutputKind::Ivf);
+        let mut header = parse_ivf_header(&bytes)?;
+        let start = usize::from(header.header_len);
+        header.frame_count += u32::try_from(MAX_UNITS)?;
+        let mut source = tempfile::NamedTempFile::new()?;
+        write_ivf_header(&mut source, &header)?;
+        for _ in 0..(MAX_UNITS / 1024) {
+            source.write_all(&[0; IVF_FRAME_HEADER_SIZE * 1024])?;
+        }
+        source.write_all(&bytes[start..])?;
+        let mut hash = HashReader::new(File::open(source.path())?);
+        io::copy(&mut hash, &mut io::sink())?;
+        let digest = hash.finish();
+        let path = WirePath::from_path(source.path());
+        let fingerprint = SourceFingerprint::of(&source.as_file().metadata()?);
+        let shared = super::super::Shared::default();
+        let context = Context {
+            shared: &shared,
+            request_id: 1,
+            generation: 1,
+            serial: 0,
+            last_progress: std::cell::Cell::default(),
+        };
+        let mut pictures =
+            ResultPictures::open(&path, None, Some((fingerprint, &digest)), &context)
+                .map_err(|e| format!("{e:?}"))?;
+        assert!(pictures.units.is_empty());
+        for ordinal in [0, 8, 0] {
+            pictures
+                .seek(&context, ordinal, GrainPolicy::Apply)
+                .map_err(|e| format!("{e:?}"))?;
+            let Some((index, Decoded::Document(decoded))) =
+                pictures.next(&context).map_err(|e| format!("{e:?}"))?
+            else {
+                return Err("Missing document picture.".into());
+            };
+            assert_eq!(index, ordinal);
+            assert_eq!(decoded.output.ordinal, ordinal);
+            if ordinal == 0 {
+                assert_eq!(
+                    decoded.output.unit_offset,
+                    (start + (MAX_UNITS + 1) * IVF_FRAME_HEADER_SIZE) as u64
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn the_index_finds_every_key_frame() -> Result<(), Box<dyn std::error::Error>> {
         for kind in [OutputKind::Ivf, OutputKind::Av2AnnexB] {
             let (bytes, keys) = encoded(kind);
@@ -840,8 +908,7 @@ mod tests {
             let mut file = tempfile::tempfile()?;
             file.write_all(&bytes)?;
             file.seek(SeekFrom::Start(0))?;
-            let (units, damaged, time_base) =
-                index(file, None, None).map_err(|e| format!("{e:?}"))?;
+            let (units, damaged, time_base) = index(file).map_err(|e| format!("{e:?}"))?;
             assert!(damaged.is_none());
             assert_eq!(units.len(), 9);
             let found: Vec<u64> = (0_u64..)

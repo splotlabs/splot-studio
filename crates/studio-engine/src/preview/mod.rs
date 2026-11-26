@@ -26,7 +26,7 @@
 //! Idle, nothing runs: every thread waits on a condition variable or a
 //! pipe. The process ends at the end of its input.
 //!
-//! Opening an analysis document checks cancellation during its framing scan.
+//! Document verification and replay check cancellation between bounded reads.
 //! A media source runs `ffprobe` with a timeout.
 
 mod cache;
@@ -39,7 +39,7 @@ use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -308,7 +308,7 @@ struct Shared {
     changed: Condvar,
     /// Bumped by every request and by the end of input; work started under
     /// an older value is superseded.
-    serial: AtomicU64,
+    serial: Arc<AtomicU64>,
 }
 
 /// One frame for the writer.
