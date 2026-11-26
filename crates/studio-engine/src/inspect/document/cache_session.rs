@@ -34,7 +34,7 @@ enum Verification {
 pub(super) enum Progress {
     Cold,
     Reading,
-    Warm(Index, DocumentSummary),
+    Warm(Box<(Index, DocumentSummary)>),
 }
 
 impl fmt::Debug for CacheSession {
@@ -115,7 +115,7 @@ impl CacheSession {
                 VerifiedEntry::Complete(file, mut cached, end) => {
                     cached.fingerprint = summary.fingerprint;
                     let index = Index::open_cache(file, &cached, end)?;
-                    return Ok(Progress::Warm(index, cached));
+                    return Ok(Progress::Warm(Box::new((index, *cached))));
                 }
             },
         };

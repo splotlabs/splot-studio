@@ -253,7 +253,8 @@ impl Document {
         let mut cache_cancelled = false;
         if let Some(cache) = &mut self.cache {
             match cache.advance(&self.summary, cancelled) {
-                Ok(Progress::Warm(index, summary)) => {
+                Ok(Progress::Warm(entry)) => {
+                    let (index, summary) = *entry;
                     self.check()?;
                     self.index = index;
                     self.summary = summary;
