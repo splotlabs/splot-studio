@@ -3,6 +3,8 @@
 
 //! Decoded sample export requests and publication results.
 
+use std::time::SystemTime;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -202,13 +204,15 @@ pub enum ExportArtifactKind {
     Hashes,
 }
 
-/// A Unix file identity for safe recovery of a temporary output.
+/// A native file identity for safe recovery of a temporary output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportTempIdentity {
-    /// Device number.
+    /// Unix device number or Windows volume serial number.
     pub device: u64,
-    /// Inode number.
+    /// Unix inode number or Windows file index.
     pub inode: u64,
+    /// The file creation time, when the filesystem provides it.
+    pub created: Option<SystemTime>,
 }
 
 /// An exclusively created temporary file and its intended destination.
