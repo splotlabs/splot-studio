@@ -461,3 +461,118 @@ fn entropy_replay_keeps_the_coded_frame_and_exact_transform_scope() -> TestResul
     }
     Ok(())
 }
+
+/// Coded frame offsets of the first `count` coded frames, in decode order.
+fn coded_offsets(
+    inspect: &mut Inspect,
+    count: u64,
+) -> Result<Vec<u64>, Box<dyn std::error::Error>> {
+    let scan = inspect.next_id;
+    let scanned = inspect.ask(Command::AnalysisIdentityScan {
+        document: 1,
+        grain: GrainPolicy::Skip,
+        selection: LayerDecodeSelection::Default,
+    })?;
+    assert!(matches!(scanned, Event::AnalysisIdentityScanned { .. }));
+    (0..count)
+        .map(|index| {
+            Ok(
+                super::timeline_location(inspect, scan, TimelineTarget::Coded { index })?
+                    .coded_offset,
+            )
+        })
+        .collect()
+}
+
+/// The first coding block that covers the top-left sample of the frame at `offset`.
+fn top_left_block(
+    inspect: &mut Inspect,
+    offset: u64,
+) -> Result<BlockId, Box<dyn std::error::Error>> {
+    let evidence = capture(inspect, query(offset, 0, 0))?;
+    assert_eq!(evidence.coverage, BlockCoverage::Complete);
+    evidence
+        .records
+        .iter()
+        .find_map(|record| matches!(record.data, BlockData::Coding { .. }).then_some(record.id))
+        .ok_or_else(|| format!("Expected a coding block at offset {offset}.").into())
+}
+
+fn entropy_capture(
+    inspect: &mut Inspect,
+    offset: u64,
+    block: BlockId,
+) -> Result<BlockEvidence, Box<dyn std::error::Error>> {
+    use studio_domain::blocks::{EntropyScope, MAX_ENTROPY_BYTES, MAX_ENTROPY_EVENTS};
+
+    let evidence = capture(
+        inspect,
+        BlockQuery {
+            kind: BlockEvidenceKind::Entropy(EntropyScope::Block(block)),
+            region: None,
+            max_events: MAX_ENTROPY_EVENTS,
+            max_bytes: MAX_ENTROPY_BYTES,
+            ..query(offset, 0, 0)
+        },
+    )?;
+    assert_eq!(
+        evidence.frame.map(|frame| frame.coded_offset),
+        Some(offset),
+        "each reply names the coded frame it replayed"
+    );
+    Ok(evidence)
+}
+
+#[test]
+fn entropy_replay_never_aliases_a_block_across_coded_frames() -> TestResult {
+    use studio_domain::blocks::EntropyScope;
+
+    const FILTERS: &[u8] =
+        include_bytes!("../preview/fixtures/syn-3frame-padded-filters-422-134x69-10bit-q150.ivf");
+    let dir = tempfile::tempdir()?;
+
+    // The first two frames both code a shared 64 × 64 block at (0, 0).
+    let path = dir.path().join("same block.ivf");
+    fs::write(&path, FILTERS)?;
+    let mut inspect = Inspect::spawn()?;
+    inspect.open(1, &path)?;
+    let [first, second] = coded_offsets(&mut inspect, 2)?[..] else {
+        return Err("Expected two coded frames.".into());
+    };
+    let block = top_left_block(&mut inspect, first)?;
+    assert_eq!(top_left_block(&mut inspect, second)?, block);
+    let [first, second] = [first, second].map(|offset| {
+        entropy_capture(&mut inspect, offset, block).map(|evidence| evidence.entropy)
+    });
+    let (first, second) = (
+        first?.ok_or("Expected entropy in the first frame.")?,
+        second?.ok_or("Expected entropy in the second frame.")?,
+    );
+    assert_eq!(first.scope, EntropyScope::Block(block));
+    assert_eq!(second.scope, EntropyScope::Block(block));
+    // The frames code this block with different syntax, so the parses end at different ordinals.
+    assert_ne!(first.end_ordinal, second.end_ordinal);
+
+    // The intra frame splits luma and chroma trees. The inter frame codes one shared tree.
+    let path = dir.path().join("different blocks.ivf");
+    fs::write(&path, COMPOUND)?;
+    let mut inspect = Inspect::spawn()?;
+    inspect.open(1, &path)?;
+    let [intra, inter] = coded_offsets(&mut inspect, 2)?[..] else {
+        return Err("Expected two coded frames.".into());
+    };
+    let intra_block = top_left_block(&mut inspect, intra)?;
+    let inter_block = top_left_block(&mut inspect, inter)?;
+    assert_ne!(intra_block, inter_block);
+    for (offset, absent) in [(inter, intra_block), (intra, inter_block)] {
+        let evidence = entropy_capture(&mut inspect, offset, absent)?;
+        assert_eq!(evidence.coverage, BlockCoverage::Unavailable);
+        assert!(evidence.entropy.is_none(), "{absent:?} at {offset}");
+    }
+    let own = entropy_capture(&mut inspect, inter, inter_block)?;
+    assert!(
+        own.entropy
+            .is_some_and(|entropy| !entropy.symbols.is_empty())
+    );
+    Ok(())
+}
