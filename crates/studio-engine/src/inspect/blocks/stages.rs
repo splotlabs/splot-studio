@@ -8,7 +8,7 @@ use splot_decode::{Picture, PictureSamples, PlaneId, PlaneRect, PlaneRef, ReconS
 use studio_domain::preview::{SamplePlane, SampleRect};
 use studio_domain::stages::{DecodeStage, StageSamples, StageScope, StageStatus};
 
-use super::{Refusal, unsupported};
+use super::{Refusal, decode_failed, unsupported};
 
 pub(super) fn region(r: SampleRect) -> Result<PlaneRect, Refusal> {
     PlaneRect::new(
@@ -110,9 +110,9 @@ pub(super) fn grain(
     if bytes > remaining {
         return Ok(value);
     }
-    let Ok(display) = picture.apply_film_grain() else {
-        return Ok(value);
-    };
+    let display = picture
+        .apply_film_grain()
+        .map_err(|error| decode_failed(&error))?;
     value.samples = match display.plane(id) {
         Some(PictureSamples::Eight(plane)) => crop(region, extent, plane),
         Some(PictureSamples::Ten(plane)) => crop(region, extent, plane),
