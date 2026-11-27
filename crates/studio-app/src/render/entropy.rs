@@ -142,13 +142,8 @@ pub(super) fn render(window: &AppWindow, analysis: &Analysis) {
 fn report_status(report: &BlockEvidence, nothing_shown: bool) -> String {
     let entropy = report.entropy.as_ref();
     let count = entropy.map_or(0, |entropy| entropy.symbols.len());
-    let mut status = coverage_status(report.coverage, count);
-    if let Some(start) = entropy
-        .map(|entropy| entropy.start)
-        .filter(|&start| start > 0)
-    {
-        status = format!("Symbols from ordinal {start}. {status}");
-    }
+    let start = entropy.map_or(0, |entropy| entropy.start);
+    let mut status = coverage_status(report.coverage, count, start);
     if count > 0 && nothing_shown {
         status.push_str(" No symbols match the filters.");
     }
@@ -192,7 +187,18 @@ fn scope_text(scope: EntropyScope) -> String {
     }
 }
 
-fn coverage_status(coverage: BlockCoverage, count: usize) -> String {
+/// States the coverage of the shown part. A part that starts after ordinal 0
+/// names its start, so that its count does not read as the count of the scope.
+fn coverage_status(coverage: BlockCoverage, count: usize, start: u64) -> String {
+    if start > 0 {
+        let part = match coverage {
+            BlockCoverage::Complete => {
+                format!("{count} captured symbols to the end of this scope.")
+            }
+            _ => coverage_status(coverage, count, 0),
+        };
+        return format!("Symbols from ordinal {start}. {part}");
+    }
     match coverage {
         BlockCoverage::Complete => format!("{count} captured symbols in this scope."),
         BlockCoverage::Truncated => {
@@ -369,7 +375,7 @@ fn copy_header(report: &BlockEvidence, evidence: &EntropyEvidence, digest: Optio
         evidence.codec_revision,
         scope_text(evidence.scope),
         evidence.start,
-        coverage_status(report.coverage, evidence.symbols.len()),
+        coverage_status(report.coverage, evidence.symbols.len(), evidence.start),
     );
     if let Some(digest) = digest {
         let _ = writeln!(text, "Source SHA-256\t{digest}");
@@ -614,6 +620,16 @@ mod tests {
         );
         assert!(partial.contains("this sum is a lower bound for this owner"));
         assert!(partial.contains("Captured syntax counts. The capture is partial."));
+
+        // The count of a later part must not read as the count of the scope.
+        assert_eq!(
+            coverage_status(BlockCoverage::Complete, 3, 96),
+            "Symbols from ordinal 96. 3 captured symbols to the end of this scope."
+        );
+        assert_eq!(
+            coverage_status(BlockCoverage::Complete, 3, 0),
+            "3 captured symbols in this scope."
+        );
 
         let mut later = evidence(vec![symbol(5, Some(1_000_000))]);
         later.start = 5;
