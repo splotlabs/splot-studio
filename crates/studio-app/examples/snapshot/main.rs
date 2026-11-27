@@ -769,6 +769,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         window.show()?;
         if name == "analyze-export-setup" {
             window.invoke_show_export_setup();
+        } else if name == "analyze-entropy" {
+            // The entropy pane is below the first screen. Scroll the page to its end.
+            let w = window.window();
+            let size = w.size().to_logical(w.scale_factor());
+            let position = slint::LogicalPosition::new(size.width - 20.0, size.height - 24.0);
+            w.dispatch_event(slint::platform::WindowEvent::PointerMoved { position });
+            w.dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+                position,
+                delta_x: 0.0,
+                delta_y: -size.height,
+            });
         } else if jobs {
             window.invoke_show_jobs();
         }

@@ -347,6 +347,16 @@ fn assert_coefficient_values(
     Ok(values)
 }
 
+/// The cost unit is one millionth of a bit of log2(range / interval).
+fn assert_cost_unit(symbol: &studio_domain::blocks::EntropySymbol) {
+    let bits = (f64::from(symbol.range) / f64::from(symbol.interval)).log2();
+    let cost = symbol.estimated_microbits.map(f64::from);
+    assert!(
+        cost.is_some_and(|cost| (cost - bits * 1e6).abs() <= 1.0),
+        "{cost:?} microbits is not {bits} bits"
+    );
+}
+
 #[test]
 fn entropy_replay_keeps_the_coded_frame_and_exact_transform_scope() -> TestResult {
     use studio_domain::blocks::{EntropyScope, MAX_ENTROPY_BYTES, MAX_ENTROPY_EVENTS};
@@ -354,6 +364,8 @@ fn entropy_replay_keeps_the_coded_frame_and_exact_transform_scope() -> TestResul
     const FILTERS: &[u8] =
         include_bytes!("../preview/fixtures/syn-3frame-padded-filters-422-134x69-10bit-q150.ivf");
     // AVM a1ec4594d97028ebc34083ec8346616d697c2fc9, before the first coefficient read.
+    // AVM stores inverse CDF entries. Each expected cutoff is 32768 minus the AVM entry,
+    // which is the ascending Q15 form of the Splot entropy schema.
     for (name, bytes, offset, x, skip_context, skip_cutoff) in [
         ("eight.ivf", MULTI_TILE, 60, 64, 0, 32683),
         // The first packet starts after the 32-byte IVF and 12-byte packet headers.
@@ -418,7 +430,7 @@ fn entropy_replay_keeps_the_coded_frame_and_exact_transform_scope() -> TestResul
             first.cdf.as_ref().map(|cdf| cdf.cutoffs_q15.as_slice()),
             Some([skip_cutoff].as_slice())
         );
-        assert!(first.estimated_microbits.is_some());
+        assert_cost_unit(first);
 
         let partial = capture(
             &mut inspect,

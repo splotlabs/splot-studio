@@ -5,8 +5,8 @@
 
 use studio_domain::analysis::AnalysisFailure;
 use studio_domain::blocks::{
-    BlockEvidence, BlockEvidenceKind, BlockFrame, BlockQuery, EntropyScope, EntropySymbol,
-    MAX_ENTROPY_BYTES, MAX_ENTROPY_EVENTS,
+    BlockEvidence, BlockEvidenceKind, BlockFrame, BlockQuery, EntropyCoding, EntropyScope,
+    EntropySymbol, MAX_ENTROPY_BYTES, MAX_ENTROPY_EVENTS,
 };
 use studio_domain::layers::LayerDecodeSelection;
 use studio_domain::protocol::{Command, Event};
@@ -15,6 +15,22 @@ use super::{Analysis, Asked, Effect, block_overlay::Key, fail_or_notice};
 
 pub(crate) const TAB: i32 = 7;
 pub(crate) const PAGE_ROWS: usize = 5;
+
+pub(crate) const fn coding_name(kind: EntropyCoding) -> &'static str {
+    match kind {
+        EntropyCoding::Cdf => "CDF-coded",
+        EntropyCoding::Bypass => "Bypass",
+        EntropyCoding::Unary => "Unary",
+    }
+}
+
+/// Operation text of one symbol. The table shows it and the search matches it.
+pub(crate) fn operation(symbol: &EntropySymbol) -> &str {
+    symbol
+        .syntax
+        .as_deref()
+        .unwrap_or_else(|| coding_name(symbol.coding))
+}
 
 /// An action in the entropy inspector.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,7 +92,6 @@ impl Entropy {
             .symbols
             .iter()
             .filter(|symbol| {
-                use studio_domain::blocks::EntropyCoding;
                 let kind = match symbol.coding {
                     EntropyCoding::Cdf => 1,
                     EntropyCoding::Bypass => 2,
@@ -84,12 +99,7 @@ impl Entropy {
                 };
                 (self.kind == 0 || kind == self.kind)
                     && (query.is_empty()
-                        || symbol
-                            .syntax
-                            .as_deref()
-                            .unwrap_or("Unavailable")
-                            .to_ascii_lowercase()
-                            .contains(&query)
+                        || operation(symbol).to_ascii_lowercase().contains(&query)
                         || symbol.ordinal.to_string().contains(&query)
                         || symbol.value.to_string().contains(&query))
             })

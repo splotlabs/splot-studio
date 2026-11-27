@@ -154,11 +154,6 @@ export component EntropyPane inherits ScrollView {
             }
         }
 
-        if EntropyView.accounting != "": Caption {
-            text: EntropyView.accounting;
-            wrap: word-wrap;
-        }
-
         if EntropyView.copied-capture != "": HorizontalLayout {
             spacing: Tokens.space-2;
             LineEdit {
@@ -236,6 +231,11 @@ export component EntropyPane inherits ScrollView {
                 description: "Copy all captured symbols with scope and coverage.";
                 clicked => { root.copy(EntropyView.copied-capture); }
             }
+        }
+
+        if EntropyView.accounting != "": Caption {
+            text: EntropyView.accounting;
+            wrap: word-wrap;
         }
 
         if EntropyView.statistics != "": Caption {

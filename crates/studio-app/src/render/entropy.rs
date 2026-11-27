@@ -13,7 +13,9 @@ use studio_domain::blocks::{
 };
 
 use super::{blocks::rect, model};
-use crate::analysis::entropy::{Entropy, EntropyInput, PAGE_ROWS};
+use crate::analysis::entropy::{
+    Entropy, EntropyInput, PAGE_ROWS, coding_name as coding, operation,
+};
 use crate::analysis::{Analysis, Input};
 use crate::ui::{AppWindow, EntropyTableRow, EntropyView};
 
@@ -82,7 +84,14 @@ pub(super) fn render(window: &AppWindow, analysis: &Analysis) {
     };
     view.set_status(status.into());
     view.set_scope(scope.map_or_else(String::new, scope_text).into());
-    view.set_accounting(entropy.map_or_else(String::new, totals).into());
+    view.set_accounting(
+        report
+            .zip(entropy)
+            .map_or_else(String::new, |(report, entropy)| {
+                totals(entropy, report.coverage == BlockCoverage::Complete)
+            })
+            .into(),
+    );
     view.set_statistics(
         if scope.is_some() {
             tool_stats.as_str()
@@ -134,10 +143,7 @@ pub(super) fn render(window: &AppWindow, analysis: &Analysis) {
 }
 
 fn symbol_row(symbol: &EntropySymbol, selected: bool) -> EntropyTableRow {
-    let operation = symbol
-        .syntax
-        .as_deref()
-        .unwrap_or_else(|| coding(symbol.coding));
+    let operation = operation(symbol);
     let cost = cost_text(symbol.estimated_microbits);
     EntropyTableRow {
         ordinal: symbol.ordinal.to_string().into(),
@@ -153,20 +159,12 @@ fn symbol_row(symbol: &EntropySymbol, selected: bool) -> EntropyTableRow {
     }
 }
 
-fn coding(kind: EntropyCoding) -> &'static str {
-    match kind {
-        EntropyCoding::Cdf => "CDF-coded",
-        EntropyCoding::Bypass => "Bypass",
-        EntropyCoding::Unary => "Unary",
-    }
-}
-
 fn scope_text(scope: EntropyScope) -> String {
     let block = scope.block();
     let tree = match block.tree {
-        studio_domain::blocks::BlockTree::Shared => "shared",
-        studio_domain::blocks::BlockTree::Luma => "luma",
-        studio_domain::blocks::BlockTree::Chroma => "chroma",
+        studio_domain::blocks::BlockTree::Shared => "Shared",
+        studio_domain::blocks::BlockTree::Luma => "Luma",
+        studio_domain::blocks::BlockTree::Chroma => "Chroma",
     };
     let block = format!(
         "Tile {}. {tree} tree. Coding block {}.",
@@ -215,7 +213,7 @@ fn format_bits(microbits: u64) -> String {
     format!("{}.{:06}", microbits / unit, microbits % unit)
 }
 
-fn totals(evidence: &EntropyEvidence) -> String {
+fn totals(evidence: &EntropyEvidence, complete: bool) -> String {
     let symbols = &evidence.symbols;
     let mut kinds = BTreeMap::<&str, (usize, usize, u64)>::new();
     let mut syntax = BTreeMap::<&str, usize>::new();
@@ -255,11 +253,17 @@ fn totals(evidence: &EntropyEvidence) -> String {
         "Captured scope ordinals [0, {captured_end}). Observed end ordinal {}.",
         evidence.end_ordinal,
     );
+    // A stopped capture holds only the first symbols of the owner. Its sum is a lower bound.
+    let owner = if complete {
+        "symbols for this owner."
+    } else {
+        "captured symbols. The capture is partial, so this sum is a lower bound for this owner."
+    };
     let mut text = if known == 0 {
         format!("Estimated cost for this owner is unavailable. {span}\n")
     } else {
         format!(
-            "{} estimated bits from {known} of {} symbols for this owner. {span}\n",
+            "{} estimated bits from {known} of {} {owner} {span}\n",
             format_bits(total),
             symbols.len() - shared
         )
@@ -284,12 +288,19 @@ fn totals(evidence: &EntropyEvidence) -> String {
         let cost = if known == 0 {
             "cost unavailable".to_owned()
         } else {
-            format!("{} estimated bits from {known} symbols", format_bits(cost))
+            format!(
+                "{} estimated bits from the {known} with a known cost",
+                format_bits(cost)
+            )
         };
         let _ = write!(text, "\n{kind}. {count} captured, {cost}.");
     }
     if !syntax.is_empty() {
-        text.push_str("\nCaptured syntax counts");
+        text.push_str(if complete {
+            "\nCaptured syntax counts"
+        } else {
+            "\nCaptured syntax counts. The capture is partial."
+        });
         for (name, count) in syntax {
             let _ = write!(text, "\n{name}  {count}");
         }
@@ -311,8 +322,8 @@ fn symbol_detail(symbol: &EntropySymbol) -> String {
         for (name, value) in context.names.split(',').zip(context.values) {
             let _ = write!(detail, " {name} = {value}.");
         }
-    } else if symbol.syntax.is_none() {
-        detail.push_str(" Context selectors are unavailable.");
+    } else if symbol.coding == EntropyCoding::Cdf {
+        detail.push_str(" The decoder supplied no context selectors for this read.");
     }
     if let Some(bits) = symbol.bypass_bits {
         let _ = write!(detail, " {bits} equiprobable bits.");
@@ -513,4 +524,79 @@ fn prediction_stats(report: &BlockEvidence) -> Option<String> {
         "{coverage} overlay capture for {region}. Observed prediction tools in {count} captured blocks. Some prediction details are unavailable for {unknown} of those blocks.\nPalette {}. Data-driven intra {}. Chroma from luma {}. Intra block copy {}. Inter-intra {}. Block-adaptive weighted prediction {}. Adaptive motion-vector differences {}.",
         tools[0], tools[1], tools[2], tools[3], tools[4], tools[5], tools[6],
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use studio_domain::blocks::{BlockId, BlockRect, BlockTree};
+
+    use super::*;
+
+    fn symbol(ordinal: u64, estimated_microbits: Option<u32>) -> EntropySymbol {
+        EntropySymbol {
+            ordinal,
+            transform: None,
+            syntax: None,
+            context: None,
+            coding: EntropyCoding::Cdf,
+            value: 0,
+            bypass_bits: None,
+            cdf: None,
+            estimated_microbits,
+            range: 32768,
+            interval: 16384,
+        }
+    }
+
+    fn evidence(symbols: Vec<EntropySymbol>) -> EntropyEvidence {
+        EntropyEvidence {
+            schema: 1,
+            spec: "1.0.0".to_owned(),
+            codec_revision: "test".to_owned(),
+            scope: EntropyScope::Block(BlockId {
+                tile: 0,
+                tree: BlockTree::Shared,
+                coded: BlockRect {
+                    x: 0,
+                    y: 0,
+                    width: 8,
+                    height: 8,
+                },
+            }),
+            tile_payload_bytes: 77,
+            end_ordinal: 9,
+            symbols,
+        }
+    }
+
+    #[test]
+    fn cost_sums_are_exact_in_microbits_and_name_their_coverage() {
+        assert_eq!(format_bits(1_500_000), "1.500000");
+        assert_eq!(format_bits(999_999), "0.999999");
+
+        // 1 + 0.25 bits. The third symbol has no estimate and adds nothing.
+        let capture = evidence(vec![
+            symbol(0, Some(1_000_000)),
+            symbol(1, Some(250_000)),
+            symbol(2, None),
+        ]);
+        let complete = totals(&capture, true);
+        assert!(
+            complete.starts_with("1.250000 estimated bits from 2 of 3 symbols for this owner."),
+            "{complete}"
+        );
+        assert!(complete.contains("Captured scope ordinals [0, 3). Observed end ordinal 9."));
+        assert!(
+            complete.contains("Tile payload 77 bytes. This exact count covers the whole tile.")
+        );
+        assert!(!complete.contains("partial"));
+
+        let partial = totals(&capture, false);
+        assert!(
+            partial.starts_with("1.250000 estimated bits from 2 of 3 captured symbols."),
+            "{partial}"
+        );
+        assert!(partial.contains("this sum is a lower bound for this owner"));
+        assert!(partial.contains("Captured syntax counts. The capture is partial."));
+    }
 }
