@@ -86,7 +86,7 @@ pub(super) fn controls(rig: &mut Rig, scratch: &Scratch) {
             "timeline-coded-keyboard-dark-2x.ppm",
         ),
     ] {
-        timeline_snapshot(rig, scheme, scale, file_name);
+        rig.snapshot(scheme, scale, file_name);
     }
 
     check_table(rig);
@@ -162,8 +162,7 @@ fn check_table(rig: &mut Rig) {
         .retain(|input| matches!(input, Input::TimelineSelect(_)));
     rig.idle("an exact row selected from the table");
     assert!(rig.window.global::<TimelineUi>().get_selected());
-    timeline_snapshot(
-        rig,
+    rig.snapshot(
         ColorScheme::Light,
         1.0,
         "timeline-table-keyboard-light-1x.ppm",
@@ -241,41 +240,4 @@ fn check_picture_and_byte(rig: &mut Rig, expected: u64) {
     assert_eq!(selection.output_ordinal, Some(expected));
     assert_eq!(doc.bytes().cursor, offset);
     assert!(rig.byte(usize::try_from(offset).unwrap_or(0)).2);
-}
-
-fn timeline_snapshot(rig: &Rig, scheme: slint::language::ColorScheme, scale: f32, file_name: &str) {
-    use std::io::Write;
-    let Some(folder) = std::env::var_os("SPLOT_STUDIO_TEST_SNAPSHOTS").map(PathBuf::from) else {
-        return;
-    };
-    fs::create_dir_all(&folder).unwrap_or_else(|e| unreachable!("{e}"));
-    let native = rig.window.window();
-    let size = native.size();
-    let palette = rig.window.global::<studio_app::Palette>();
-    palette.set_color_scheme(scheme);
-    native.dispatch_event(WindowEvent::ScaleFactorChanged {
-        scale_factor: scale,
-    });
-    native.set_size(slint::LogicalSize::new(920.0, 1080.0));
-    native.request_redraw();
-    let width = native.size().width;
-    let height = native.size().height;
-    let mut pixels = vec![Rgb8Pixel::default(); (width * height) as usize];
-    assert!(rig.platform.draw_if_needed(|renderer| {
-        renderer.render(&mut pixels, width as usize);
-    }));
-    let mut out = fs::File::create(folder.join(file_name)).unwrap_or_else(|e| unreachable!("{e}"));
-    write!(
-        out,
-        "P6
-{width} {height}
-255
-"
-    )
-    .unwrap_or_else(|e| unreachable!("{e}"));
-    let rgb: Vec<_> = pixels.iter().flat_map(|p| [p.r, p.g, p.b]).collect();
-    out.write_all(&rgb).unwrap_or_else(|e| unreachable!("{e}"));
-    native.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: 1.0 });
-    native.set_size(size);
-    palette.set_color_scheme(slint::language::ColorScheme::Light);
 }

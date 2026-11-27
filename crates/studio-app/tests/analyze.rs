@@ -215,6 +215,38 @@ impl Rig {
         buffer
     }
 
+    fn snapshot(&self, scheme: slint::language::ColorScheme, scale: f32, file_name: &str) {
+        use std::io::Write;
+        let Some(folder) = std::env::var_os("SPLOT_STUDIO_TEST_SNAPSHOTS").map(PathBuf::from)
+        else {
+            return;
+        };
+        fs::create_dir_all(&folder).unwrap_or_else(|e| unreachable!("{e}"));
+        let native = self.window.window();
+        let size = native.size();
+        let palette = self.window.global::<studio_app::Palette>();
+        palette.set_color_scheme(scheme);
+        native.dispatch_event(WindowEvent::ScaleFactorChanged {
+            scale_factor: scale,
+        });
+        native.set_size(slint::LogicalSize::new(920.0, 1080.0));
+        native.request_redraw();
+        let width = native.size().width;
+        let height = native.size().height;
+        let mut pixels = vec![Rgb8Pixel::default(); (width * height) as usize];
+        assert!(self.platform.draw_if_needed(|renderer| {
+            renderer.render(&mut pixels, width as usize);
+        }));
+        let mut out =
+            fs::File::create(folder.join(file_name)).unwrap_or_else(|e| unreachable!("{e}"));
+        write!(out, "P6\n{width} {height}\n255\n").unwrap_or_else(|e| unreachable!("{e}"));
+        let rgb: Vec<_> = pixels.iter().flat_map(|p| [p.r, p.g, p.b]).collect();
+        out.write_all(&rgb).unwrap_or_else(|e| unreachable!("{e}"));
+        native.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: 1.0 });
+        native.set_size(size);
+        palette.set_color_scheme(slint::language::ColorScheme::Light);
+    }
+
     /// The top-left pixel of the first vertical run of `color` at least
     /// `tall` pixels high: the selected row's bar, not text or a tab mark.
     fn find_bar(&self, color: (u8, u8, u8), tall: usize) -> Option<(usize, usize)> {
@@ -639,7 +671,7 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
     eprintln!("Tab stops: navigator after {tabs}, byte view {byte_tabs} later");
     timeline::controls(&mut rig, &scratch);
     blocks::inspect(&mut rig, &scratch);
-    overlays::inspect(&mut rig, &scratch);
+    overlays::inspect(&mut rig, &scratch, &clipboard);
     motion::inspect(&mut rig, &scratch);
 }
 

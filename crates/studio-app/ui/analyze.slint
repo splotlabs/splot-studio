@@ -1141,6 +1141,7 @@ export component AnalyzeView inherits VerticalLayout {
             }
 
             if BlockOverlay.mode != 0: BlockOverlayPanel {
+                copy(text) => { root.copy(text); }
                 followed => { history-back.focus(); }
             }
 

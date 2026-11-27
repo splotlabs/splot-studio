@@ -71,9 +71,9 @@ pub use render::block_motion::render_reference as render_block_reference;
 pub use render::{render, render_analysis, render_counters, render_jobs, render_preview};
 pub use ui::{
     Analysis, AnalysisState, AppWindow, BlockMotionView, BlockOverlay, Blocks, ByteRegion,
-    CheckRow, DecodeExport, ExportForm, ExportPurpose, ExportSourceRow, Fact, JobAction, JobRow,
-    JobView, NavStep, Notice, NoticeWindow, Palette, Playback, QueueRow, References, RowState,
-    SourceView, StageState, TimelineUi, Tone, ViewMode, WorkspaceView,
+    CheckRow, CoefficientView, DecodeExport, ExportForm, ExportPurpose, ExportSourceRow, Fact,
+    JobAction, JobRow, JobView, NavStep, Notice, NoticeWindow, Palette, Playback, QueueRow,
+    References, RowState, SourceView, StageState, TimelineUi, Tone, ViewMode, WorkspaceView,
 };
 pub use ui::{LayerDetail, Layers};
 
@@ -338,6 +338,11 @@ pub fn bind_block_overlay(
     overlay.on_choose_tool(action(Input::Tool));
     overlay.on_select(action(Input::Select));
     overlay.on_move(action(Input::Move));
+    let coefficients = window.global::<crate::ui::CoefficientView>();
+    coefficients.on_select(action(Input::SelectCoefficient));
+    coefficients.on_move(action(Input::MoveCoefficient));
+    let read = send.clone();
+    coefficients.on_read(move || read(Input::ReadCoefficients));
     let pick = send.clone();
     overlay.on_pick(move |x, y, width, height| {
         pick(Input::Pick {

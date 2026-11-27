@@ -10,7 +10,9 @@ use studio_domain::blocks::{
     IntraPredictor, MAX_BLOCK_BYTES, MAX_BLOCK_RECORDS,
 };
 use studio_domain::layers::LayerDecodeSelection;
+use studio_domain::preview::{GrainPolicy, SamplePlane};
 use studio_domain::protocol::{Command, Event};
+use studio_domain::timeline::TimelineTarget;
 
 use super::{Inspect, TestResult, failure};
 
@@ -198,4 +200,149 @@ fn block_query_preserves_compound_motion_and_stops_after_a_missing_target() -> T
     assert!(absent.replayed_through < 207);
     assert_eq!(absent.records, []);
     Ok(())
+}
+
+#[test]
+fn coefficient_replay_preserves_avm_levels_scan_and_depth() -> TestResult {
+    const CHROMA: &[u8] =
+        include_bytes!("../preview/fixtures/syn-3frame-padded-filters-422-134x69-10bit-q150.ivf");
+    let dir = tempfile::tempdir()?;
+
+    // AVM a1ec4594d97028ebc34083ec8346616d697c2fc9, before inverse transforms.
+    for (fixture, source, ordinal, plane, x, depth, extent, qindex, quant, dc, raster, ac) in [
+        (
+            1,
+            MULTI_TILE,
+            0,
+            SamplePlane::Y,
+            64,
+            8,
+            10,
+            192,
+            9984,
+            (-1, -312),
+            1,
+            (-11, -3432),
+        ),
+        (
+            2,
+            CHROMA,
+            1,
+            SamplePlane::U,
+            128,
+            10,
+            17,
+            198,
+            12032,
+            (-18, -27072),
+            4,
+            (1, 1504),
+        ),
+    ] {
+        let path = dir.path().join(format!("source-{fixture}.ivf"));
+        fs::write(&path, source)?;
+        let mut inspect = Inspect::spawn()?;
+        inspect.open(1, &path)?;
+        let coefficients = coefficient_query(&mut inspect, ordinal, plane, x, 64)?;
+        let result = capture(&mut inspect, coefficients)?;
+        let values = assert_coefficient_values(result, extent, dc, raster, ac)?;
+        let metadata = values
+            .quantization
+            .ok_or("The dequantizer inputs are missing.")?;
+        assert_eq!(
+            (
+                metadata.bit_depth,
+                metadata.qindex,
+                metadata.dc_quant,
+                metadata.ac_quant
+            ),
+            (depth, qindex, quant, quant)
+        );
+        if depth == 8 {
+            assert_eq!((values.width, values.height), (32, 32));
+            assert_eq!(
+                values.scan.as_deref().and_then(|scan| scan.get(..6)),
+                Some([0, 32, 1, 64, 33, 2].as_slice())
+            );
+            let limited = capture(
+                &mut inspect,
+                BlockQuery {
+                    max_bytes: 1,
+                    ..coefficients
+                },
+            )?;
+            assert_eq!(limited.coverage, BlockCoverage::Truncated);
+            assert!(limited.coefficients.is_none());
+        } else {
+            assert_eq!((values.width, values.height), (4, 16));
+        }
+    }
+    Ok(())
+}
+
+fn coefficient_query(
+    inspect: &mut Inspect,
+    ordinal: u64,
+    plane: SamplePlane,
+    x: u32,
+    plane_x: u32,
+) -> Result<BlockQuery, Box<dyn std::error::Error>> {
+    let scan = inspect.next_id;
+    let scanned = inspect.ask(Command::AnalysisIdentityScan {
+        document: 1,
+        grain: GrainPolicy::Skip,
+        selection: LayerDecodeSelection::Default,
+    })?;
+    assert!(matches!(scanned, Event::AnalysisIdentityScanned { .. }));
+    let output =
+        super::timeline_location(inspect, scan, TimelineTarget::Output { index: ordinal })?;
+    let request = BlockQuery {
+        kind: BlockEvidenceKind::Transforms,
+        ..query(output.coded_offset, x, 0)
+    };
+    let geometry = capture(inspect, request)?;
+    let id = geometry
+        .records
+        .iter()
+        .find_map(|record| match &record.data {
+            BlockData::Transform { transform }
+                if transform.id.plane == plane
+                    && transform.id.coded.x == plane_x
+                    && transform.id.coded.y == 0 =>
+            {
+                Some(transform.id)
+            }
+            _ => None,
+        })
+        .ok_or("The decoder did not return the expected transform.")?;
+    assert!(geometry.coefficients.is_none());
+    Ok(BlockQuery {
+        kind: BlockEvidenceKind::Coefficients,
+        region: None,
+        detail: Some(id),
+        max_events: 1,
+        ..request
+    })
+}
+
+// Checks the exact signed pairs after the response crosses the worker protocol.
+fn assert_coefficient_values(
+    evidence: BlockEvidence,
+    extent: u16,
+    dc: (i32, i32),
+    raster: usize,
+    ac: (i32, i32),
+) -> Result<Box<studio_domain::blocks::BlockCoefficients>, Box<dyn std::error::Error>> {
+    assert_eq!(evidence.coverage, BlockCoverage::Complete);
+    let values = evidence
+        .coefficients
+        .ok_or("The decoder did not return coefficients.")?;
+    assert_eq!(
+        values.domain,
+        studio_domain::blocks::BlockCoefficientDomain::Plane
+    );
+    assert_eq!(values.eob, extent);
+    assert_eq!((values.quantized[0], values.dequantized[0]), dc);
+    assert_eq!((values.quantized[raster], values.dequantized[raster]), ac);
+    Ok(values)
 }

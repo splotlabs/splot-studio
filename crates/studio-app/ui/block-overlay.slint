@@ -3,6 +3,7 @@
 
 import { ComboBox } from "std-widgets.slint";
 import { BlockMotionPane, BlockMotionView, MotionDrawing } from "block-motion.slint";
+import { CoefficientsPane, CoefficientView } from "coefficients.slint";
 import { Caption, LinkButton } from "controls.slint";
 import { FocusRing, KeyboardFocus } from "focus.slint";
 import { Tokens } from "tokens.slint";
@@ -59,6 +60,7 @@ export component BlockOverlayMenu inherits ComboBox {
 
 export component BlockOverlayPanel inherits VerticalLayout {
     callback followed();
+    callback copy(string);
     spacing: Tokens.space-2;
 
     HorizontalLayout {
@@ -193,6 +195,10 @@ export component BlockOverlayPanel inherits VerticalLayout {
             wrap: word-wrap;
             accessible-live-region: polite;
         }
+    }
+
+    if BlockOverlay.mode == 2 && CoefficientView.has-transform: CoefficientsPane {
+        copy(text) => { root.copy(text); }
     }
 
     if BlockMotionView.active: BlockMotionPane {

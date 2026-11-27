@@ -1,19 +1,35 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
-//! Writes the exact text the user has selected in the timeline view.
+//! Saves bounded Analyze reports selected by the user.
 
+use std::cell::RefCell;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
+use std::thread::{self, JoinHandle};
 
 use slint::ComponentHandle;
 
-use crate::ui::{AppWindow, TimelineUi};
+use crate::ui::{AppWindow, CoefficientView, TimelineUi};
 
-pub(super) fn bind(window: &AppWindow) {
+#[derive(Default)]
+pub(super) struct ReportWriters {
+    tasks: RefCell<Vec<JoinHandle<()>>>,
+}
+
+impl ReportWriters {
+    pub(super) fn finish(&self) {
+        for task in self.tasks.take() {
+            let _ = task.join();
+        }
+    }
+}
+
+pub(super) fn bind(window: &AppWindow, writers: &Rc<ReportWriters>) {
+    let timeline_writers = Rc::downgrade(writers);
     let weak = window.as_weak();
     window.global::<TimelineUi>().on_save_statistics(move || {
         let Some(window) = weak.upgrade() else { return };
@@ -24,60 +40,117 @@ pub(super) fn bind(window: &AppWindow) {
         }
         timeline.set_exporting(true);
         timeline.set_export_status("".into());
-        let dialog = rfd::AsyncFileDialog::new()
-            .set_parent(&window.window().window_handle())
-            .set_title("Save Timeline Statistics")
-            .set_file_name("timeline-statistics.txt")
-            .add_filter("Text report", &["txt"])
-            .save_file();
-        let weak = weak.clone();
-        if slint::spawn_local(async move {
-            let Some(chosen) = dialog.await else {
-                if let Some(window) = weak.upgrade() {
-                    window.global::<TimelineUi>().set_exporting(false);
-                }
-                return;
-            };
-            let path = chosen.path().to_path_buf();
-            let completion = weak.clone();
-            let result = thread::Builder::new()
-                .name("timeline-statistics".into())
-                .spawn(move || {
-                    let outcome = write_report(&path, snapshot.as_bytes());
-                    let _ = completion.upgrade_in_event_loop(move |window| {
-                        finish(&window, outcome);
-                    });
-                });
-            if let Err(error) = result
-                && let Some(window) = weak.upgrade()
-            {
-                finish(&window, Err(error));
-            }
-        })
-        .is_err()
-        {
-            timeline.set_exporting(false);
-            timeline.set_export_status("Cannot open the save dialog.".into());
+        save_report(
+            &window,
+            timeline_writers.clone(),
+            snapshot,
+            "Save Timeline Statistics",
+            "timeline-statistics.txt",
+            ("Text report", "txt"),
+            |window, status| {
+                let view = window.global::<TimelineUi>();
+                view.set_exporting(false);
+                view.set_export_status(status);
+            },
+        );
+    });
+
+    let weak = window.as_weak();
+    let coefficient_writers = Rc::downgrade(writers);
+    window.global::<CoefficientView>().on_save(move || {
+        let Some(window) = weak.upgrade() else { return };
+        let view = window.global::<CoefficientView>();
+        let snapshot = view.get_report().to_string();
+        if snapshot.is_empty() || view.get_exporting() {
+            return;
         }
+        view.set_exporting(true);
+        view.set_export_status("".into());
+        save_report(
+            &window,
+            coefficient_writers.clone(),
+            snapshot,
+            "Save Transform Coefficients",
+            "transform-coefficients.json",
+            ("JSON report", "json"),
+            |window, status| {
+                let view = window.global::<CoefficientView>();
+                view.set_exporting(false);
+                view.set_export_status(status);
+            },
+        );
     });
 }
 
-fn finish(window: &AppWindow, outcome: io::Result<()>) {
-    let timeline = window.global::<TimelineUi>();
-    timeline.set_exporting(false);
-    timeline.set_export_status(match outcome {
-        Ok(()) => "Statistics saved.".into(),
+fn save_report(
+    window: &AppWindow,
+    writers: Weak<ReportWriters>,
+    snapshot: String,
+    title: &str,
+    file_name: &str,
+    filter: (&str, &str),
+    finish: fn(&AppWindow, slint::SharedString),
+) {
+    let dialog = rfd::AsyncFileDialog::new()
+        .set_parent(&window.window().window_handle())
+        .set_title(title)
+        .set_file_name(file_name)
+        .add_filter(filter.0, &[filter.1])
+        .save_file();
+    let weak = window.as_weak();
+    if slint::spawn_local(async move {
+        let Some(chosen) = dialog.await else {
+            if let Some(window) = weak.upgrade() {
+                finish(&window, "".into());
+            }
+            return;
+        };
+        let Some(writers) = writers.upgrade() else {
+            return;
+        };
+        let path = chosen.path().to_path_buf();
+        let completion = weak.clone();
+        let result = thread::Builder::new()
+            .name("analysis-report".into())
+            .spawn(move || {
+                let outcome = write_report(&path, snapshot.as_bytes());
+                let _ = completion.upgrade_in_event_loop(move |window| {
+                    finish(&window, save_status(outcome));
+                });
+            });
+        match result {
+            Ok(task) => {
+                let mut tasks = writers.tasks.borrow_mut();
+                tasks.retain(|task| !task.is_finished());
+                tasks.push(task);
+            }
+            Err(error) => {
+                if let Some(window) = weak.upgrade() {
+                    finish(&window, save_status(Err(error)));
+                }
+            }
+        }
+    })
+    .is_err()
+    {
+        finish(window, "Cannot open the save dialog.".into());
+    }
+}
+
+fn save_status(outcome: io::Result<()>) -> slint::SharedString {
+    match outcome {
+        Ok(()) => "Report saved.".into(),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             "Choose a new file name. The destination already exists.".into()
         }
-        Err(error) => format!("Cannot save the statistics. {error}").into(),
-    });
+        Err(error) => format!("Cannot save the report. {error}").into(),
+    }
 }
 
 fn write_report(path: &Path, contents: &[u8]) -> io::Result<()> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let stage = path.with_file_name(format!(
-        ".splot-timeline-{}-{}.tmp",
+        ".splot-report-{}-{}.tmp",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));

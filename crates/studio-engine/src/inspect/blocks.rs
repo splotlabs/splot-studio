@@ -7,17 +7,20 @@ use std::io::{BufReader, Read};
 
 use splot_core::stream_reader::{ReaderError, TemporalUnitReader};
 use splot_decode::block_evidence::{
-    BlockEvidenceCapture, BlockEvidenceData, BlockEvidenceId, BlockEvidenceKind as NativeKind,
-    BlockEvidenceRecord, BlockEvidenceRequest, BlockEvidenceStatus, BlockEvidenceTree,
-    BlockPartition, BlockTransformId as NativeTransformId,
+    BlockCoefficientDomain as NativeDomain, BlockEvidenceCapture, BlockEvidenceData,
+    BlockEvidenceId, BlockEvidenceKind as NativeKind, BlockEvidenceRecord, BlockEvidenceReport,
+    BlockEvidenceRequest, BlockEvidenceStatus, BlockEvidenceTree, BlockPartition,
+    BlockTransformCoefficients, BlockTransformId as NativeTransformId,
 };
 use splot_decode::{
     DataProps, DecodeError, DecodeLimits, Decoder, ObuLocation, PlaneId, PlaneRect, SendStatus,
 };
 use studio_domain::analysis::AnalysisFailure;
 use studio_domain::blocks::{
-    BlockCoverage, BlockData, BlockEvidence, BlockEvidenceKind, BlockFrame, BlockId, BlockQuery,
-    BlockRecord, BlockRect, BlockTransform, BlockTransformDetails, BlockTransformId, BlockTree,
+    BlockCoefficientDomain, BlockCoefficientMatrix, BlockCoefficientQuantization,
+    BlockCoefficients, BlockCoverage, BlockData, BlockEvidence, BlockEvidenceKind, BlockFrame,
+    BlockId, BlockQuery, BlockRecord, BlockRect, BlockSecondaryTransform, BlockTransform,
+    BlockTransformDetails, BlockTransformId, BlockTree,
 };
 use studio_domain::identity::DecodeLayers;
 use studio_domain::preview::{GrainPolicy, SamplePlane};
@@ -51,13 +54,15 @@ pub(super) fn replay(
         BlockEvidenceKind::Structure => NativeKind::PartitionsAndBlocks,
         BlockEvidenceKind::Partitions => NativeKind::Partitions,
         BlockEvidenceKind::Coding => NativeKind::Blocks,
-        BlockEvidenceKind::Transforms => NativeKind::Transforms,
+        BlockEvidenceKind::Transforms | BlockEvidenceKind::Coefficients => NativeKind::Transforms,
     })
     .with_cancellation(move || cancellation.is_set());
-    let request = if let Some(id) = query.detail {
-        request.with_transform_details(native_transform(id)?)
-    } else {
-        request
+    let request = match query.detail {
+        Some(id) if query.kind == BlockEvidenceKind::Coefficients => {
+            request.with_transform_coefficients(native_transform(id)?)
+        }
+        Some(id) => request.with_transform_details(native_transform(id)?),
+        None => request,
     };
     let (mut decoder, capture) = Decoder::new_with_block_evidence(settings, request)
         .map_err(|error| decode_failed(&error))?;
@@ -89,6 +94,14 @@ pub(super) fn replay(
     {
         outcome?;
     }
+    wire_report(report, query, progress.replayed_through)
+}
+
+fn wire_report(
+    report: BlockEvidenceReport,
+    query: BlockQuery,
+    replayed_through: u64,
+) -> Result<BlockEvidence, Refusal> {
     let coverage = match report.status {
         BlockEvidenceStatus::Complete => BlockCoverage::Complete,
         BlockEvidenceStatus::Truncated => BlockCoverage::Truncated,
@@ -126,8 +139,17 @@ pub(super) fn replay(
         query,
         frame,
         coverage,
-        replayed_through: progress.replayed_through,
+        replayed_through,
         records,
+        coefficients: if coverage == BlockCoverage::Complete {
+            report
+                .coefficients
+                .map(coefficients)
+                .transpose()?
+                .map(Box::new)
+        } else {
+            None
+        },
     };
     if !evidence.matches(query) {
         return Err(unsupported("The decoder returned invalid block evidence."));
@@ -267,6 +289,79 @@ fn native_transform(id: BlockTransformId) -> Result<NativeTransformId, Refusal> 
     Ok(NativeTransformId::new(block, plane, native_rect(id.coded)?))
 }
 
+fn transform_id(id: NativeTransformId) -> Result<BlockTransformId, Refusal> {
+    Ok(BlockTransformId {
+        block: block_id(id.block)?,
+        plane: match id.plane {
+            PlaneId::Y => SamplePlane::Y,
+            PlaneId::U => SamplePlane::U,
+            PlaneId::V => SamplePlane::V,
+        },
+        coded: wire_rect(id.coded)?,
+    })
+}
+
+fn coefficients(values: BlockTransformCoefficients) -> Result<BlockCoefficients, Refusal> {
+    let domain = match values.domain {
+        NativeDomain::Plane => BlockCoefficientDomain::Plane,
+        NativeDomain::CrossComponent { mode, .. } => {
+            BlockCoefficientDomain::CrossComponent { mode }
+        }
+        _ => {
+            return Err(unsupported(
+                "The decoder returned an unknown coefficient domain.",
+            ));
+        }
+    };
+    let quantization = values
+        .quantization
+        .map(|q| {
+            Ok::<_, Refusal>(BlockCoefficientQuantization {
+                qindex: q.qindex,
+                dc_quant: q.dc_quant,
+                ac_quant: q.ac_quant,
+                denominator: q.denominator,
+                bit_depth: q.bit_depth.bits(),
+                matrix: q
+                    .matrix
+                    .map(|m| {
+                        Ok::<_, Refusal>(BlockCoefficientMatrix {
+                            level: u8::try_from(m.level).map_err(|_| {
+                                unsupported("The matrix level exceeds the protocol range.")
+                            })?,
+                            user_defined: m.user_defined,
+                        })
+                    })
+                    .transpose()?,
+            })
+        })
+        .transpose()?;
+    let size = |value| {
+        u8::try_from(value)
+            .map_err(|_| unsupported("The coefficient grid exceeds the protocol range."))
+    };
+    Ok(BlockCoefficients {
+        id: transform_id(values.id)?,
+        codec_revision: env!("SPLOT_CODEC_REVISION").into(),
+        width: size(values.width)?,
+        height: size(values.height)?,
+        domain,
+        quantized: values.quantized,
+        dequantized: values.dequantized,
+        scan: values.scan.map(<[u16]>::to_vec),
+        eob: u16::try_from(values.eob)
+            .map_err(|_| unsupported("The coefficient scan exceeds the protocol range."))?,
+        use_tcq: values.use_tcq,
+        forward_scan: values.forward_scan,
+        dc_parity_hidden: values.dc_parity_hidden,
+        quantization,
+        secondary: values.secondary.map(|secondary| BlockSecondaryTransform {
+            sec_tx_type: secondary.sec_tx_type,
+            most_probable_stx_set: secondary.most_probable_stx_set,
+        }),
+    })
+}
+
 fn record(record: &BlockEvidenceRecord) -> Result<BlockRecord, Refusal> {
     let data = match record.data {
         BlockEvidenceData::Partition(split) => BlockData::Partition {
@@ -283,15 +378,7 @@ fn record(record: &BlockEvidenceRecord) -> Result<BlockRecord, Refusal> {
         },
         BlockEvidenceData::Transform(transform) => BlockData::Transform {
             transform: BlockTransform {
-                id: BlockTransformId {
-                    block: block_id(transform.id.block)?,
-                    plane: match transform.id.plane {
-                        PlaneId::Y => SamplePlane::Y,
-                        PlaneId::U => SamplePlane::U,
-                        PlaneId::V => SamplePlane::V,
-                    },
-                    coded: wire_rect(transform.id.coded)?,
-                },
+                id: transform_id(transform.id)?,
                 luma_coded: wire_rect(transform.luma_coded)?,
                 details: transform.details.map(|details| BlockTransformDetails {
                     has_coefficients: details.has_coefficients,

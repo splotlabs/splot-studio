@@ -59,6 +59,7 @@ mod block_motion;
 pub(crate) mod block_overlay;
 pub(crate) mod blocks;
 mod bytes;
+mod coefficients;
 mod document;
 mod timeline_links;
 
