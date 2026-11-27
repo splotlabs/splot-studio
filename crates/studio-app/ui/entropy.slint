@@ -26,6 +26,7 @@ export global EntropyView {
     in property <bool> can-read;
     in property <string> read-label;
     in property <bool> can-read-block;
+    in property <bool> can-read-next;
     in property <bool> can-read-transform;
     in property <bool> busy;
     in property <bool> stopping;
@@ -37,6 +38,7 @@ export global EntropyView {
     in property <int> page-size;
     callback read();
     callback read-block();
+    callback read-next();
     callback read-transform();
     callback stop();
     callback search(string);
@@ -145,6 +147,11 @@ export component EntropyPane inherits ScrollView {
             if EntropyView.can-read-block: LinkButton {
                 text: "Read Parent Block";
                 clicked => { EntropyView.read-block(); }
+            }
+            if EntropyView.can-read-next: LinkButton {
+                text: "Read Next Symbols";
+                description: "Read the symbols of this scope after the last shown symbol.";
+                clicked => { EntropyView.read-next(); }
             }
             if EntropyView.busy: LinkButton {
                 enabled: !EntropyView.stopping;

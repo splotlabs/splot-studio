@@ -155,6 +155,8 @@ codec is young.
   Search the captured table or filter by coding operation. Select a row to see available
   syntax, context and pre-read CDF cutoffs. Use **Read Owning Transform** when the
   symbol has an exact owner. **Read Parent Block** returns to the coding block.
+  One replay shows at most 96 symbols. When a scope has more, **Read Next Symbols**
+  replaces them with the next part, and **Read Symbols** reads from the start again.
   The cost summary shows estimated bits, separates joint U/V reads from transform costs,
   and lists the exact tile payload size in bytes. **Copy Capture** includes the source
   identity, codec revision and capture coverage.

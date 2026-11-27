@@ -191,17 +191,35 @@ pub struct EntropyEvidence {
     pub codec_revision: String,
     /// Exact scope requested.
     pub scope: EntropyScope,
+    /// Exact start ordinal requested.
+    pub start: u64,
     /// Exact byte length of the enclosing tile payload.
     pub tile_payload_bytes: u64,
-    /// Exclusive ordinal of the observed parse, including units past the capture limit.
+    /// Exclusive ordinal of the observed parse, including units before the start
+    /// and past the capture limit.
     pub end_ordinal: u64,
-    /// Observed operations in decoder order.
+    /// Observed operations in decoder order, from the start ordinal.
     pub symbols: Vec<EntropySymbol>,
 }
 
 impl EntropyEvidence {
-    pub(super) fn matches(&self, scope: EntropyScope, limit: u32, complete: bool) -> bool {
+    /// Checks that the first read at or after the start can begin at `ordinal`.
+    /// A scope's first read begins at 0. An earlier read can cover at most 32
+    /// units, so it ends fewer than 32 units after a later start.
+    fn begins_at_start(&self, ordinal: u64) -> bool {
+        ordinal == self.start
+            || (self.start > 0 && ordinal > self.start && ordinal - self.start < 32)
+    }
+
+    pub(super) fn matches(
+        &self,
+        scope: EntropyScope,
+        start: u64,
+        limit: u32,
+        complete: bool,
+    ) -> bool {
         self.scope == scope
+            && self.start == start
             && self.schema > 0
             && valid_label(&self.spec)
             && self.codec_revision.len() == 40
@@ -214,7 +232,7 @@ impl EntropyEvidence {
             && self
                 .symbols
                 .first()
-                .is_none_or(|symbol| symbol.ordinal == 0)
+                .is_none_or(|symbol| self.begins_at_start(symbol.ordinal))
             && self.symbols.last().is_none_or(|symbol| {
                 symbol
                     .end_ordinal()
@@ -225,11 +243,10 @@ impl EntropyEvidence {
                 .windows(2)
                 .all(|pair| pair[0].end_ordinal() == Some(pair[1].ordinal))
             && (!complete
-                || self
-                    .symbols
-                    .last()
-                    .map_or(Some(0), EntropySymbol::end_ordinal)
-                    == Some(self.end_ordinal))
+                || match self.symbols.last() {
+                    Some(symbol) => symbol.end_ordinal() == Some(self.end_ordinal),
+                    None => self.end_ordinal < self.start || self.begins_at_start(self.end_ordinal),
+                })
             && self.symbols.iter().all(|symbol| symbol.matches(scope))
     }
 }
@@ -245,6 +262,9 @@ mod tests {
     use crate::layers::LayerDecodeSelection;
     use crate::preview::SamplePlane;
     use crate::protocol::{Envelope, Event, ProtocolError, read_message, write_message};
+
+    // The longest ordinals that leave room for a full capture before `u64::MAX`.
+    const START: u64 = u64::MAX - 2 * MAX_ENTROPY_EVENTS as u64;
 
     fn largest_case() -> (BlockQuery, EntropyScope, BlockEvidence) {
         let coded = BlockRect {
@@ -265,7 +285,10 @@ mod tests {
         let query = BlockQuery {
             coded_offset: u64::MAX - 1,
             selection: LayerDecodeSelection::Default,
-            kind: BlockEvidenceKind::Entropy(scope),
+            kind: BlockEvidenceKind::Entropy {
+                scope,
+                start: START,
+            },
             region: None,
             detail: None,
             max_events: MAX_ENTROPY_EVENTS,
@@ -292,11 +315,12 @@ mod tests {
                 spec: "1.0.0".to_owned(),
                 codec_revision: "f".repeat(40),
                 scope,
+                start: START,
                 tile_payload_bytes: 123,
-                end_ordinal: 500,
+                end_ordinal: u64::MAX,
                 symbols: (0..MAX_ENTROPY_EVENTS)
-                    .map(|ordinal| EntropySymbol {
-                        ordinal: ordinal.into(),
+                    .map(|index| EntropySymbol {
+                        ordinal: START + u64::from(index),
                         transform: match scope {
                             EntropyScope::Transform(id) => Some(id),
                             EntropyScope::Block(_) => None,
@@ -359,9 +383,56 @@ mod tests {
         assert!(!evidence.matches(query));
         if let Some(kept) = &mut evidence.entropy {
             kept.scope = scope;
-            kept.symbols[1].ordinal = 0;
+            kept.symbols[1].ordinal = START;
         }
         assert!(!evidence.matches(query));
         Ok(())
+    }
+
+    #[test]
+    fn entropy_reply_must_echo_the_start_and_begin_at_or_after_it() {
+        let (query, scope, evidence) = largest_case();
+        let with = |start: u64, first: u64, end: u64, count: u64| {
+            let mut reply = evidence.clone();
+            reply.query.kind = BlockEvidenceKind::Entropy { scope, start };
+            reply.coverage = BlockCoverage::Complete;
+            if let Some(kept) = &mut reply.entropy {
+                kept.start = start;
+                kept.end_ordinal = end;
+                kept.symbols
+                    .truncate(usize::try_from(count).unwrap_or_default());
+                for (offset, symbol) in (0..).zip(&mut kept.symbols) {
+                    symbol.ordinal = first + offset;
+                }
+            }
+            reply
+        };
+        let matches = |reply: &BlockEvidence| reply.matches(reply.query);
+        assert!(matches(&with(0, 0, 3, 3)));
+        assert!(matches(&with(100, 100, 103, 3)));
+        // A bypass read that began before the start can end up to 31 units after it.
+        assert!(matches(&with(100, 131, 134, 3)));
+        assert!(!matches(&with(100, 132, 135, 3)));
+        assert!(!matches(&with(100, 99, 102, 3)), "a read before the start");
+        assert!(
+            !matches(&with(0, 1, 4, 3)),
+            "the first read of a scope is at 0"
+        );
+        // A complete reply with no reads after the start.
+        assert!(matches(&with(100, 0, 100, 0)));
+        assert!(matches(&with(100, 0, 90, 0)));
+        assert!(matches(&with(100, 0, 131, 0)));
+        assert!(!matches(&with(100, 0, 132, 0)));
+        assert!(!matches(&with(0, 0, 1, 0)));
+
+        let mut other_start = with(100, 100, 103, 3);
+        assert!(!other_start.matches(BlockQuery {
+            kind: BlockEvidenceKind::Entropy { scope, start: 0 },
+            ..query
+        }));
+        if let Some(kept) = &mut other_start.entropy {
+            kept.start = 0;
+        }
+        assert!(!matches(&other_start), "the payload must echo the start");
     }
 }

@@ -44,7 +44,7 @@ pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch, clipboard: &RefCell<Stri
     assert!(
         view(rig)
             .get_copied_capture()
-            .starts_with("Entropy capture TSV 1\n")
+            .starts_with("Entropy capture TSV 2\n")
     );
     assert!(view(rig).get_copied_capture().contains("Coverage\t"));
 
@@ -77,6 +77,7 @@ pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch, clipboard: &RefCell<Stri
     assert!(view(rig).get_copied_capture().is_empty());
 
     partial_capture(rig, scratch);
+    read_next_part(rig);
     page_with_keys(rig, clipboard);
     stop_and_read_again(rig);
 }
@@ -128,6 +129,58 @@ fn partial_capture(rig: &mut Rig, scratch: &Scratch) {
         .take_while(|line| !line.is_empty())
         .count();
     assert_eq!(symbols, limit);
+}
+
+/// Read Next Symbols continues a partial capture after its last symbol. Every
+/// view names the start, and Read reads the first part again.
+fn read_next_part(rig: &mut Rig) {
+    let first_status = view(rig).get_status();
+    let copied = view(rig).get_copied_capture();
+    assert!(copied.contains("\nStart ordinal\t0\n"));
+    // The last TSV symbol line ends the part: a bypass read covers its bit count.
+    let last = copied
+        .lines()
+        .skip_while(|line| !line.starts_with("Ordinal\t"))
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .last()
+        .unwrap_or_else(|| unreachable!("symbol line"));
+    let fields: Vec<&str> = last.split('\t').collect();
+    let ordinal: u64 = fields[0]
+        .parse()
+        .unwrap_or_else(|_| unreachable!("ordinal"));
+    let next = ordinal + fields[7].parse::<u64>().unwrap_or(1);
+    assert!(view(rig).get_can_read_next());
+
+    view(rig).invoke_read_next();
+    rig.idle("the next entropy part");
+    let row = view(rig)
+        .get_rows()
+        .row_data(0)
+        .unwrap_or_else(|| unreachable!("symbol"));
+    assert_eq!(row.ordinal, next.to_string());
+    let status = view(rig).get_status();
+    assert!(
+        status.starts_with(&format!("Symbols from ordinal {next}. ")),
+        "{status}"
+    );
+    let accounting = view(rig).get_accounting();
+    assert!(
+        accounting.contains("this sum is a lower bound for this owner"),
+        "{accounting}"
+    );
+    assert!(accounting.contains(&format!("Captured scope ordinals [{next}, ")));
+    assert!(
+        view(rig)
+            .get_copied_capture()
+            .contains(&format!("\nStart ordinal\t{next}\n"))
+    );
+    assert!(view(rig).get_can_read());
+
+    view(rig).invoke_read();
+    rig.idle("the first entropy part again");
+    assert_eq!(view(rig).get_status(), first_status);
+    assert_eq!(view(rig).get_copied_capture(), copied);
 }
 
 /// Arrow, Page and Home/End keys on the focused symbol table move the

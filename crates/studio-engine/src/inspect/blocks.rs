@@ -100,7 +100,7 @@ fn capture_request(
         query.max_bytes as usize,
     )
     .with_kind(match query.kind {
-        BlockEvidenceKind::Structure | BlockEvidenceKind::Entropy(_) => {
+        BlockEvidenceKind::Structure | BlockEvidenceKind::Entropy { .. } => {
             NativeKind::PartitionsAndBlocks
         }
         BlockEvidenceKind::Partitions => NativeKind::Partitions,
@@ -116,13 +116,17 @@ fn capture_request(
         Some(id) => request.with_transform_details(native_transform(id)?),
         None => request,
     };
-    Ok(if let BlockEvidenceKind::Entropy(scope) = query.kind {
-        request.with_entropy(entropy::native_scope(scope)?)
-    } else if let Some(scope) = stage_scope {
-        request.with_stage_samples(stages::plane(scope.plane), stages::region(scope.region)?)
-    } else {
-        request
-    })
+    Ok(
+        if let BlockEvidenceKind::Entropy { scope, start } = query.kind {
+            request
+                .with_entropy(entropy::native_scope(scope)?)
+                .with_entropy_start(start)
+        } else if let Some(scope) = stage_scope {
+            request.with_stage_samples(stages::plane(scope.plane), stages::region(scope.region)?)
+        } else {
+            request
+        },
+    )
 }
 
 fn assemble(
@@ -208,7 +212,7 @@ fn assemble(
         entropy: report
             .entropy
             .as_ref()
-            .map(entropy::wire_evidence)
+            .map(|native| entropy::wire_evidence(native, query.kind))
             .transpose()?,
     };
     if !evidence.matches(query) {

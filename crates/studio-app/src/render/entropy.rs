@@ -26,6 +26,7 @@ pub(crate) fn bind(window: &AppWindow, send: impl Fn(Input) + Clone + 'static) {
         move || send(Input::Entropy(input.clone()))
     };
     view.on_read(action(EntropyInput::Read));
+    view.on_read_next(action(EntropyInput::ReadNext));
     view.on_read_block(action(EntropyInput::ReadBlock));
     view.on_read_transform(action(EntropyInput::ReadTransform));
     view.on_stop(action(EntropyInput::Stop));
@@ -62,15 +63,7 @@ pub(super) fn render(window: &AppWindow, analysis: &Analysis) {
                 .to_owned()
         });
     let status = if let Some(report) = report {
-        let count = entropy.map_or(0, |entropy| entropy.symbols.len());
-        if count > 0 && filtered.is_empty() {
-            format!(
-                "{} No symbols match the filters.",
-                coverage_status(report.coverage, count)
-            )
-        } else {
-            coverage_status(report.coverage, count)
-        }
+        report_status(report, filtered.is_empty())
     } else if let Some(notice) = state.and_then(|state| state.notice.as_deref()) {
         notice.to_owned()
     } else if stopping {
@@ -88,7 +81,10 @@ pub(super) fn render(window: &AppWindow, analysis: &Analysis) {
         report
             .zip(entropy)
             .map_or_else(String::new, |(report, entropy)| {
-                totals(entropy, report.coverage == BlockCoverage::Complete)
+                totals(
+                    entropy,
+                    report.coverage == BlockCoverage::Complete && entropy.start == 0,
+                )
             })
             .into(),
     );
@@ -111,6 +107,7 @@ pub(super) fn render(window: &AppWindow, analysis: &Analysis) {
     let selected_transform = matches!(selection_scope, Some(EntropyScope::Transform(_)));
     view.set_can_read(selection.is_some() && !busy && (!showing_transform || selected_transform));
     view.set_can_read_block((showing_transform || selected_transform) && !busy);
+    view.set_can_read_next(state.and_then(Entropy::next_start).is_some());
     view.set_read_label(
         if selected_transform {
             "Read Selected Transform"
@@ -140,6 +137,17 @@ pub(super) fn render(window: &AppWindow, analysis: &Analysis) {
             .map(|(index, symbol)| symbol_row(symbol, index == selected))
             .collect(),
     ));
+}
+
+fn report_status(report: &BlockEvidence, nothing_shown: bool) -> String {
+    let entropy = report.entropy.as_ref();
+    let count = entropy.map_or(0, |entropy| entropy.symbols.len());
+    let start = entropy.map_or(0, |entropy| entropy.start);
+    let mut status = coverage_status(report.coverage, count, start);
+    if count > 0 && nothing_shown {
+        status.push_str(" No symbols match the filters.");
+    }
+    status
 }
 
 fn symbol_row(symbol: &EntropySymbol, selected: bool) -> EntropyTableRow {
@@ -179,7 +187,18 @@ fn scope_text(scope: EntropyScope) -> String {
     }
 }
 
-fn coverage_status(coverage: BlockCoverage, count: usize) -> String {
+/// States the coverage of the shown part. A part that starts after ordinal 0
+/// names its start, so that its count does not read as the count of the scope.
+fn coverage_status(coverage: BlockCoverage, count: usize, start: u64) -> String {
+    if start > 0 {
+        let part = match coverage {
+            BlockCoverage::Complete => {
+                format!("{count} captured symbols to the end of this scope.")
+            }
+            _ => coverage_status(coverage, count, 0),
+        };
+        return format!("Symbols from ordinal {start}. {part}");
+    }
     match coverage {
         BlockCoverage::Complete => format!("{count} captured symbols in this scope."),
         BlockCoverage::Truncated => {
@@ -245,15 +264,16 @@ fn totals(evidence: &EntropyEvidence, complete: bool) -> String {
             known += 1;
         }
     }
+    let captured_start = symbols.first().map_or(evidence.start, |row| row.ordinal);
     let captured_end = symbols
         .last()
         .and_then(EntropySymbol::end_ordinal)
-        .unwrap_or(0);
+        .unwrap_or(captured_start);
     let span = format!(
-        "Captured scope ordinals [0, {captured_end}). Observed end ordinal {}.",
+        "Captured scope ordinals [{captured_start}, {captured_end}). Observed end ordinal {}.",
         evidence.end_ordinal,
     );
-    // A stopped capture holds only the first symbols of the owner. Its sum is a lower bound.
+    // A stopped capture or a later part holds only some owner symbols. Its sum is a lower bound.
     let owner = if complete {
         "symbols for this owner."
     } else {
@@ -349,12 +369,13 @@ fn symbol_detail(symbol: &EntropySymbol) -> String {
 
 fn copy_header(report: &BlockEvidence, evidence: &EntropyEvidence, digest: Option<&str>) -> String {
     let mut text = format!(
-        "Entropy capture TSV 1\nSchema\t{}\nAV2 specification\t{}\nCodec revision\t{}\nScope\t{}\nCoverage\t{}\n",
+        "Entropy capture TSV 2\nSchema\t{}\nAV2 specification\t{}\nCodec revision\t{}\nScope\t{}\nStart ordinal\t{}\nCoverage\t{}\n",
         evidence.schema,
         evidence.spec,
         evidence.codec_revision,
         scope_text(evidence.scope),
-        coverage_status(report.coverage, evidence.symbols.len()),
+        evidence.start,
+        coverage_status(report.coverage, evidence.symbols.len(), evidence.start),
     );
     if let Some(digest) = digest {
         let _ = writeln!(text, "Source SHA-256\t{digest}");
@@ -563,6 +584,7 @@ mod tests {
                     height: 8,
                 },
             }),
+            start: 0,
             tile_payload_bytes: 77,
             end_ordinal: 9,
             symbols,
@@ -598,5 +620,21 @@ mod tests {
         );
         assert!(partial.contains("this sum is a lower bound for this owner"));
         assert!(partial.contains("Captured syntax counts. The capture is partial."));
+
+        // The count of a later part must not read as the count of the scope.
+        assert_eq!(
+            coverage_status(BlockCoverage::Complete, 3, 96),
+            "Symbols from ordinal 96. 3 captured symbols to the end of this scope."
+        );
+        assert_eq!(
+            coverage_status(BlockCoverage::Complete, 3, 0),
+            "3 captured symbols in this scope."
+        );
+
+        let mut later = evidence(vec![symbol(5, Some(1_000_000))]);
+        later.start = 5;
+        assert!(totals(&later, false).contains("Captured scope ordinals [5, 6)."));
+        later.symbols.clear();
+        assert!(totals(&later, false).contains("Captured scope ordinals [5, 5)."));
     }
 }
