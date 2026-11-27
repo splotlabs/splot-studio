@@ -1,0 +1,279 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+import { ComboBox, LineEdit } from "std-widgets.slint";
+import { Caption, LinkButton } from "controls.slint";
+import { Stage, StageState, ToggleChip } from "stage.slint";
+import { Tokens } from "tokens.slint";
+
+export struct StageValue {
+    label: string,
+    value: string,
+}
+
+export global StageInspector {
+    in property <string> status;
+    in property <bool> can-capture;
+    in property <bool> can-use-block;
+    in property <bool> busy;
+    in property <bool> stopping;
+    in property <bool> has-evidence;
+    in property <string> origin-x;
+    in property <string> origin-y;
+    in-out property <int> plane;
+    in property <bool> include-grain;
+    in-out property <int> stage-a;
+    in-out property <int> stage-b;
+    in-out property <int> mode;
+    in-out property <int> zoom;
+    in-out property <int> gain;
+    in property <[string]> choices;
+    in property <image> image-a;
+    in property <image> image-b;
+    in property <string> label-a;
+    in property <string> label-b;
+    in property <bool> visual-a;
+    in property <bool> visual-b;
+    in property <string> sample-x;
+    in property <string> sample-y;
+    in property <string> sample-text;
+    in property <string> sample-heading;
+    in property <[StageValue]> sample-values;
+    in property <bool> can-copy;
+    callback use-block();
+    callback capture(int, string, string, bool);
+    callback choose-grain(bool);
+    callback stop();
+    callback choose(bool, int);
+    callback choose-mode(int);
+    callback choose-zoom(int);
+    callback choose-gain(int);
+    callback choose-plane(int);
+    callback pan(int, int);
+    callback sample(string, string);
+    callback pick(bool, int, int, int, int);
+}
+
+component Coordinate inherits LineEdit {
+    in property <string> coordinate;
+    horizontal-stretch: 1;
+    min-width: 0px;
+    text: root.coordinate;
+    changed coordinate => { root.text = root.coordinate; }
+}
+
+component StageImage inherits Stage {
+    in property <bool> right;
+    in property <string> label;
+    in property <bool> available;
+    horizontal-stretch: 1;
+    height: 142px;
+    state: root.available ? StageState.picture : StageState.unavailable;
+    precise: true;
+    pixelated: true;
+    use-block-overlay: false;
+    linked-pan: StageInspector.zoom > 0;
+    can-sample: root.available;
+    accessible-text: root.label;
+    message: root.label;
+    pan(dx, dy) => {
+        StageInspector.pan(dx == 0px ? 0 : dx < 0px ? -1 : 1,
+            dy == 0px ? 0 : dy < 0px ? -1 : 1);
+    }
+    pick-sample(x, y, width, height) => { StageInspector.pick(root.right, x, y, width, height); }
+}
+
+component StagePictures inherits VerticalLayout {
+    spacing: Tokens.space-1;
+    HorizontalLayout {
+        spacing: Tokens.space-2;
+        Caption {
+            width: left.width;
+            text: StageInspector.label-a;
+            wrap: word-wrap;
+        }
+        Caption {
+            width: right.width;
+            text: StageInspector.label-b;
+            wrap: word-wrap;
+        }
+    }
+    HorizontalLayout {
+        spacing: Tokens.space-2;
+        left := StageImage {
+            picture: StageInspector.image-a;
+            label: StageInspector.label-a;
+            available: StageInspector.visual-a;
+        }
+        right := StageImage {
+            right: true;
+            picture: StageInspector.image-b;
+            label: StageInspector.label-b;
+            available: StageInspector.visual-b;
+        }
+    }
+}
+
+export component StageControls inherits VerticalLayout {
+    callback copy(string);
+    spacing: Tokens.space-2;
+
+    Caption {
+        text: StageInspector.status;
+        wrap: word-wrap;
+        accessible-live-region: polite;
+    }
+
+    HorizontalLayout {
+        spacing: Tokens.space-2;
+        ComboBox {
+            width: 106px;
+            model: ["Y luma", "U chroma", "V chroma"];
+            current-index <=> StageInspector.plane;
+            accessible-label: "Capture plane";
+            selected => { StageInspector.choose-plane(self.current-index); }
+            enabled: !StageInspector.busy;
+        }
+        Caption { text: "X"; vertical-alignment: center; }
+        capture-x := Coordinate {
+            coordinate: StageInspector.origin-x;
+            placeholder-text: "Column";
+            accessible-label: "Capture column";
+            enabled: !StageInspector.busy;
+            accepted(text) => { if StageInspector.can-capture { StageInspector.capture(StageInspector.plane, text, capture-y.text, StageInspector.include-grain); } }
+        }
+        Caption { text: "Y"; vertical-alignment: center; }
+        capture-y := Coordinate {
+            coordinate: StageInspector.origin-y;
+            placeholder-text: "Row";
+            accessible-label: "Capture row";
+            enabled: !StageInspector.busy;
+            accepted(text) => { if StageInspector.can-capture { StageInspector.capture(StageInspector.plane, capture-x.text, text, StageInspector.include-grain); } }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: Tokens.space-2;
+        LinkButton {
+            text: "Use Block Origin";
+            description: "Use the selected block's column and row on the luma plane.";
+            enabled: StageInspector.can-use-block && !StageInspector.busy;
+            clicked => {
+                StageInspector.use-block();
+                capture-x.text = StageInspector.origin-x;
+                capture-y.text = StageInspector.origin-y;
+            }
+        }
+        if StageInspector.busy: LinkButton {
+            text: "Stop";
+            description: "Stop the stage replay.";
+            enabled: !StageInspector.stopping;
+            clicked => { StageInspector.stop(); }
+        }
+        if !StageInspector.busy: LinkButton {
+            text: "Capture";
+            description: "Decode the selected frame and capture up to 32 by 32 samples.";
+            enabled: StageInspector.can-capture;
+            clicked => { StageInspector.capture(StageInspector.plane, capture-x.text, capture-y.text, StageInspector.include-grain); }
+        }
+    }
+
+    ToggleChip {
+        text: "Capture Film Grain";
+        label: "Capture film grain";
+        description: "Synthesize grain for the direct display of the selected coded frame.";
+        checked: StageInspector.include-grain;
+        enabled: !StageInspector.busy;
+        toggled => { StageInspector.choose-grain(!StageInspector.include-grain); }
+    }
+
+    if StageInspector.has-evidence: VerticalLayout {
+        spacing: Tokens.space-2;
+        ComboBox {
+            model: StageInspector.choices;
+            current-index <=> StageInspector.stage-a;
+            accessible-label: "Stage A";
+            selected => { StageInspector.choose(false, self.current-index); }
+        }
+        ComboBox {
+            model: StageInspector.choices;
+            current-index <=> StageInspector.stage-b;
+            accessible-label: "Stage B";
+            selected => { StageInspector.choose(true, self.current-index); }
+        }
+        HorizontalLayout {
+            spacing: Tokens.space-2;
+            ComboBox {
+                model: ["A and B", "Signed B − A", "Absolute |B − A|"];
+                current-index <=> StageInspector.mode;
+                accessible-label: "Comparison mode";
+                selected => { StageInspector.choose-mode(self.current-index); }
+            }
+            ComboBox {
+                model: ["Fit", "2×", "4×", "8×"];
+                current-index <=> StageInspector.zoom;
+                accessible-label: "Linked zoom";
+                selected => { StageInspector.choose-zoom(self.current-index); }
+            }
+        }
+        HorizontalLayout {
+            spacing: Tokens.space-2;
+            Caption { text: StageInspector.mode == 0 ? "Display gain" : "Difference gain"; vertical-alignment: center; }
+            ComboBox {
+                model: ["1×", "4×", "16×"];
+                current-index <=> StageInspector.gain;
+                accessible-label: StageInspector.mode == 0 ? "Display gain" : "Difference gain";
+                accessible-description: "Display gain changes the image only.";
+                selected => { StageInspector.choose-gain(self.current-index); }
+            }
+        }
+        StagePictures { }
+        HorizontalLayout {
+            spacing: Tokens.space-2;
+            Caption { text: "X"; vertical-alignment: center; }
+            read-x := Coordinate {
+                coordinate: StageInspector.sample-x;
+                placeholder-text: "Column";
+                accessible-label: "Sample column";
+                accepted(text) => { StageInspector.sample(text, read-y.text); }
+            }
+            Caption { text: "Y"; vertical-alignment: center; }
+            read-y := Coordinate {
+                coordinate: StageInspector.sample-y;
+                placeholder-text: "Row";
+                accessible-label: "Sample row";
+                accepted(text) => { StageInspector.sample(read-x.text, text); }
+            }
+            LinkButton {
+                text: "Read";
+                description: "Read the exact sample values at these coordinates.";
+                clicked => { StageInspector.sample(read-x.text, read-y.text); }
+            }
+        }
+        Caption {
+            text: StageInspector.sample-heading;
+            wrap: word-wrap;
+            accessible-live-region: polite;
+        }
+        if StageInspector.sample-values.length > 0: VerticalLayout {
+            accessible-role: list;
+            accessible-label: "Exact sample values";
+            for row[index] in StageInspector.sample-values: Rectangle {
+                accessible-role: list-item;
+                accessible-label: row.label + " " + row.value;
+                accessible-item-index: index;
+                accessible-item-count: StageInspector.sample-values.length;
+                HorizontalLayout {
+                    spacing: Tokens.space-2;
+                    Caption { width: 68px; text: row.label; accessible-role: none; }
+                    Caption { text: row.value; accessible-role: none; }
+                }
+            }
+        }
+        if StageInspector.can-copy: LinkButton {
+            text: "Copy Samples";
+            description: "Copy the coordinates, exact values and difference.";
+            clicked => { root.copy(StageInspector.sample-text); }
+        }
+    }
+}

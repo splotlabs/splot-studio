@@ -43,7 +43,7 @@ use studio_domain::layers::LayerDecodeSelection;
 use studio_domain::preview::GrainPolicy;
 use studio_domain::protocol::{
     AnalysisEvidenceIdentity, Command, Envelope, ErrorCode, Event, ProtocolError, decode,
-    read_frame, write_message,
+    read_frame, write_inspect_event, write_message,
 };
 use studio_domain::references::{ReferenceEvidence, ReferenceQuery};
 use studio_domain::syntax::SYNTAX_SCHEMA;
@@ -502,7 +502,7 @@ impl<W: Write> Shared<W> {
         if out.error.is_some() {
             return;
         }
-        let mut written = write_message(&mut out.writer, &Envelope::new(request_id, event));
+        let mut written = write_inspect_event(&mut out.writer, &Envelope::new(request_id, event));
         if matches!(written, Err(ProtocolError::InvalidLength { .. })) {
             // An oversized reply has written no bytes. Keep the stream usable.
             let reply = refusal(

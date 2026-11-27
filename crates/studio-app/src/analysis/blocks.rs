@@ -58,6 +58,35 @@ impl Blocks {
 }
 
 impl Document {
+    pub(super) fn accept_block_query(
+        &mut self,
+        id: u64,
+        query: BlockQuery,
+        evidence: Box<BlockEvidence>,
+    ) {
+        if !evidence.matches(query) {
+            self.fail_block_query(id, query, None, "The engine sent invalid decoder evidence.");
+        } else if matches!(query.kind, BlockEvidenceKind::Stages(_)) {
+            self.stages.accept(id, evidence);
+        } else {
+            self.blocks.accept(id, evidence);
+        }
+    }
+
+    pub(super) fn fail_block_query(
+        &mut self,
+        id: u64,
+        query: BlockQuery,
+        code: Option<AnalysisFailure>,
+        message: &str,
+    ) {
+        if matches!(query.kind, BlockEvidenceKind::Stages(_)) {
+            self.stages.fail(id, code, message);
+        } else {
+            self.blocks.fail(id, code, message);
+        }
+    }
+
     pub(crate) fn block_evidence(&self) -> Option<&BlockEvidence> {
         let offset = self.coded_offset()?;
         self.blocks.evidence.as_deref().filter(|evidence| {
@@ -129,6 +158,7 @@ impl Analysis {
     }
 
     pub(super) fn clear_frame_evidence(&mut self, at: usize, out: &mut Vec<Effect>) {
+        self.cancel_stages(at, out);
         self.cancel_references(at, out);
         self.cancel_blocks(at, out);
     }

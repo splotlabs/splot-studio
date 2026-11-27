@@ -13,6 +13,7 @@ mod coefficients;
 mod evidence;
 pub(crate) mod layers;
 mod references;
+pub(crate) mod stages;
 pub(crate) mod timeline;
 
 use std::time::Instant;

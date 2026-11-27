@@ -316,6 +316,9 @@ export component Stage inherits KeyboardFocus {
     in property <bool> precise;
     in property <int> magnification;
     in property <bool> can-sample;
+    in property <bool> use-block-overlay: true;
+    in property <bool> linked-pan;
+    in property <bool> pixelated;
     property <float> fit-scale: min(root.width / 1phx / max(1, root.picture.width),
         root.height / 1phx / max(1, root.picture.height));
     property <float> paint-scale: root.magnification == 0 ? root.fit-scale : root.magnification;
@@ -342,9 +345,9 @@ export component Stage inherits KeyboardFocus {
     accessible-description: (root.can-compare ? "Press and hold, or hold O, to see the original. " : "")
         + (root.navigable ? "Space plays or pauses. Left and Right step one frame. Home goes to the first." : "")
         + (root.navigable && root.can-end ? " End goes to the last." : "")
-        + (root.precise && BlockOverlay.can-pick ? " Click the picture to inspect a block."
+        + (root.precise && root.use-block-overlay && BlockOverlay.can-pick ? " Click the picture to inspect a block."
             : root.precise && root.can-sample ? " Click a sample or enter its coordinates below." : "")
-        + (root.precise && root.magnification > 0 ? " Press W, A, S or D to pan." : "");
+        + (root.precise && (root.magnification > 0 || root.linked-pan) ? " Press W, A, S or D to pan." : "");
     // Screen readers cannot hold: activating switches sides until activated again.
     accessible-action-default => {
         if root.can-compare || root.comparing {
@@ -360,7 +363,7 @@ export component Stage inherits KeyboardFocus {
             }
             return accept;
         }
-        if root.precise && root.magnification > 0 {
+        if root.precise && (root.magnification > 0 || root.linked-pan) {
             if event.text == "a" || event.text == "A" {
                 root.keyboard-used();
                 root.pan(-32px, 0px);
@@ -472,11 +475,11 @@ export component Stage inherits KeyboardFocus {
             height: root.paint-height;
             source: root.picture;
             image-fit: fill;
-            image-rendering: root.magnification == 0 ? smooth : pixelated;
+            image-rendering: root.magnification == 0 && !root.pixelated ? smooth : ImageRendering.pixelated;
             accessible-role: none;
         }
 
-        if root.state == StageState.picture && root.precise && BlockOverlay.mode != 0: BlockDrawing {
+        if root.state == StageState.picture && root.precise && root.use-block-overlay && BlockOverlay.mode != 0: BlockDrawing {
             x: root.paint-x;
             y: root.paint-y;
             width: root.paint-width;
@@ -524,7 +527,7 @@ export component Stage inherits KeyboardFocus {
             }
         }
         moved => {
-            if root.precise && root.magnification > 0 && self.pressed {
+            if root.precise && (root.magnification > 0 || root.linked-pan) && self.pressed {
                 let dx = root.drag-x - self.mouse-x;
                 let dy = root.drag-y - self.mouse-y;
                 let threshold = max(3px, root.magnification * 1phx);
@@ -542,7 +545,7 @@ export component Stage inherits KeyboardFocus {
                 let y = floor((self.mouse-y - root.paint-y) / 1phx);
                 let width = round(root.paint-width / 1phx);
                 let height = round(root.paint-height / 1phx);
-                if BlockOverlay.can-pick {
+                if root.use-block-overlay && BlockOverlay.can-pick {
                     BlockOverlay.pick(x, y, width, height);
                 } else if root.can-sample {
                     root.pick-sample(x, y, width, height);
@@ -550,7 +553,7 @@ export component Stage inherits KeyboardFocus {
             }
         }
         scroll-event(event) => {
-            if root.native || (root.precise && root.magnification > 0) {
+            if root.native || (root.precise && (root.magnification > 0 || root.linked-pan)) {
                 root.pan(-event.delta-x, -event.delta-y);
                 return accept;
             }

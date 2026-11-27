@@ -38,6 +38,8 @@ pub enum BlockEvidenceKind {
     Transforms,
     /// Coefficient arrays for exactly one requested transform.
     Coefficients,
+    /// Exact samples for one requested plane and region.
+    Stages(crate::stages::StageScope),
 }
 
 /// A rectangle in the coded frame's luma coordinate system.
@@ -103,7 +105,14 @@ impl BlockQuery {
     #[must_use]
     pub fn is_valid(self) -> bool {
         (1..=MAX_BLOCK_RECORDS).contains(&self.max_events)
-            && (1..=MAX_BLOCK_BYTES).contains(&self.max_bytes)
+            && match self.kind {
+                BlockEvidenceKind::Stages(scope) => {
+                    scope.is_valid()
+                        && self.region.is_none()
+                        && (1..=crate::stages::MAX_STAGE_BYTES).contains(&self.max_bytes)
+                }
+                _ => (1..=MAX_BLOCK_BYTES).contains(&self.max_bytes),
+            }
             && self.region.is_none_or(BlockRect::is_valid)
             && (self.kind != BlockEvidenceKind::Coefficients
                 || (self.detail.is_some() && self.region.is_none() && self.max_events == 1))
@@ -265,9 +274,47 @@ pub struct BlockEvidence {
     /// Exact coefficient evidence, only for a coefficient query.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coefficients: Option<Box<BlockCoefficients>>,
+    /// Stage metadata and binary samples.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<crate::stages::StageSamples>,
 }
 
 impl BlockEvidence {
+    /// Validates stage metadata and returns the exact binary length of each stage in samples.
+    pub(crate) fn stage_lengths(&self) -> Option<Vec<usize>> {
+        use crate::stages::DecodeStage;
+        if !self.query.is_valid() || self.stages.len() > DecodeStage::ALL.len() {
+            return None;
+        }
+        let BlockEvidenceKind::Stages(scope) = self.query.kind else {
+            return self.stages.is_empty().then(Vec::new);
+        };
+        if !self.records.is_empty() || (self.frame.is_none() && !self.stages.is_empty()) {
+            return None;
+        }
+        let lengths: Vec<_> = self
+            .stages
+            .iter()
+            .enumerate()
+            .map(|(index, stage)| {
+                if self.stages[..index]
+                    .iter()
+                    .any(|other| other.stage == stage.stage)
+                    || self
+                        .stages
+                        .first()
+                        .is_some_and(|other| other.bit_depth != stage.bit_depth)
+                {
+                    return None;
+                }
+                stage.length(scope)
+            })
+            .collect::<Option<_>>()?;
+        // StageScope and DecodeStage bound each length and their count.
+        let bytes = lengths.iter().sum::<usize>() * size_of::<i32>();
+        (bytes <= self.query.max_bytes as usize).then_some(lengths)
+    }
+
     /// Checks that a reply agrees with its request and contains valid records.
     #[must_use]
     pub fn matches(&self, query: BlockQuery) -> bool {
@@ -300,6 +347,11 @@ impl BlockEvidence {
                         details.has_coefficients == (coefficients.eob != 0)
                     }))
                     && coefficients.is_valid()
+            })
+            && self.stage_lengths().is_some_and(|lengths| {
+                self.stages.iter().zip(lengths).all(|(stage, length)| {
+                    stage.samples.len() == length && stage.values_are_valid()
+                })
             })
             && self.records.iter().all(|record| record.matches(query))
     }
@@ -439,6 +491,7 @@ mod tests {
             }),
             coverage: BlockCoverage::Truncated,
             replayed_through: u64::MAX,
+            stages: Vec::new(),
             records: vec![record; MAX_BLOCK_RECORDS as usize],
             coefficients: None,
         };
@@ -503,6 +556,7 @@ mod tests {
             ..query()
         };
         BlockEvidence {
+            stages: Vec::new(),
             query,
             frame: Some(BlockFrame {
                 coded_offset: query.coded_offset,

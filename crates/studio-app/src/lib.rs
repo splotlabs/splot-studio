@@ -73,7 +73,8 @@ pub use ui::{
     Analysis, AnalysisState, AppWindow, BlockMotionView, BlockOverlay, Blocks, ByteRegion,
     CheckRow, CoefficientView, DecodeExport, ExportForm, ExportPurpose, ExportSourceRow, Fact,
     JobAction, JobRow, JobView, NavStep, Notice, NoticeWindow, Palette, Playback, QueueRow,
-    References, RowState, SourceView, StageState, TimelineUi, Tone, ViewMode, WorkspaceView,
+    References, RowState, SourceView, StageInspector, StageState, TimelineUi, Tone, ViewMode,
+    WorkspaceView,
 };
 pub use ui::{LayerDetail, Layers};
 

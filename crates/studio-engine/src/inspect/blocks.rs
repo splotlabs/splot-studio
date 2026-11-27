@@ -13,7 +13,8 @@ use splot_decode::block_evidence::{
     BlockTransformCoefficients, BlockTransformId as NativeTransformId,
 };
 use splot_decode::{
-    DataProps, DecodeError, DecodeLimits, Decoder, ObuLocation, PlaneId, PlaneRect, SendStatus,
+    DataProps, DecodeError, DecodeLimits, Decoder, ObuLocation, Picture, PlaneId, PlaneRect,
+    SendStatus,
 };
 use studio_domain::analysis::AnalysisFailure;
 use studio_domain::blocks::{
@@ -24,8 +25,10 @@ use studio_domain::blocks::{
 };
 use studio_domain::identity::DecodeLayers;
 use studio_domain::preview::{GrainPolicy, SamplePlane};
+use studio_domain::stages::StageScope;
 
 mod prediction;
+mod stages;
 
 use super::Cancellation;
 use super::document::{Checked, MAX_UNIT_BYTES, Refusal};
@@ -42,28 +45,12 @@ pub(super) fn replay(
         operating_point_selection(query.selection).map_err(|error| decode_failed(&error))?;
     let settings = preview_decoder_settings(1, DecodeLimits::DEFAULT, GrainPolicy::Skip)
         .with_operating_point_selection(selection);
-    let region = query.region.map(native_rect).transpose()?;
-    let reader_cancellation = cancellation.clone();
-    let request = BlockEvidenceRequest::new(
-        move |location| absolute(location) == Some(query.coded_offset),
-        region,
-        query.max_events as usize,
-        query.max_bytes as usize,
-    )
-    .with_kind(match query.kind {
-        BlockEvidenceKind::Structure => NativeKind::PartitionsAndBlocks,
-        BlockEvidenceKind::Partitions => NativeKind::Partitions,
-        BlockEvidenceKind::Coding => NativeKind::Blocks,
-        BlockEvidenceKind::Transforms | BlockEvidenceKind::Coefficients => NativeKind::Transforms,
-    })
-    .with_cancellation(move || cancellation.is_set());
-    let request = match query.detail {
-        Some(id) if query.kind == BlockEvidenceKind::Coefficients => {
-            request.with_transform_coefficients(native_transform(id)?)
-        }
-        Some(id) => request.with_transform_details(native_transform(id)?),
-        None => request,
+    let stage_scope = match query.kind {
+        BlockEvidenceKind::Stages(scope) => Some(scope),
+        _ => None,
     };
+    let reader_cancellation = cancellation.clone();
+    let request = capture_request(query, stage_scope, cancellation)?;
     let (mut decoder, capture) = Decoder::new_with_block_evidence(settings, request)
         .map_err(|error| decode_failed(&error))?;
     let mut progress = ReplayProgress {
@@ -71,6 +58,8 @@ pub(super) fn replay(
         limit,
         partial,
         replayed_through: 0,
+        presentation: None,
+        capture_presentation: stage_scope.is_some_and(|scope| scope.include_grain),
     };
     let outcome = feed(
         &mut decoder,
@@ -94,15 +83,51 @@ pub(super) fn replay(
     {
         outcome?;
     }
-    wire_report(report, query, progress.replayed_through)
+    assemble(query, report, progress, stage_scope, &reader_cancellation)
 }
 
-fn wire_report(
-    report: BlockEvidenceReport,
+fn capture_request(
     query: BlockQuery,
-    replayed_through: u64,
+    stage_scope: Option<StageScope>,
+    cancellation: Cancellation,
+) -> Result<BlockEvidenceRequest, Refusal> {
+    let region = query.region.map(native_rect).transpose()?;
+    let request = BlockEvidenceRequest::new(
+        move |location| absolute(location) == Some(query.coded_offset),
+        region,
+        query.max_events as usize,
+        query.max_bytes as usize,
+    )
+    .with_kind(match query.kind {
+        BlockEvidenceKind::Structure => NativeKind::PartitionsAndBlocks,
+        BlockEvidenceKind::Partitions => NativeKind::Partitions,
+        BlockEvidenceKind::Coding => NativeKind::Blocks,
+        BlockEvidenceKind::Transforms | BlockEvidenceKind::Coefficients => NativeKind::Transforms,
+        BlockEvidenceKind::Stages(_) => NativeKind::Stages,
+    })
+    .with_cancellation(move || cancellation.is_set());
+    let request = match query.detail {
+        Some(id) if query.kind == BlockEvidenceKind::Coefficients => {
+            request.with_transform_coefficients(native_transform(id)?)
+        }
+        Some(id) => request.with_transform_details(native_transform(id)?),
+        None => request,
+    };
+    Ok(if let Some(scope) = stage_scope {
+        request.with_stage_samples(stages::plane(scope.plane), stages::region(scope.region)?)
+    } else {
+        request
+    })
+}
+
+fn assemble(
+    query: BlockQuery,
+    report: BlockEvidenceReport,
+    progress: ReplayProgress,
+    stage_scope: Option<StageScope>,
+    cancellation: &Cancellation,
 ) -> Result<BlockEvidence, Refusal> {
-    let coverage = match report.status {
+    let mut coverage = match report.status {
         BlockEvidenceStatus::Complete => BlockCoverage::Complete,
         BlockEvidenceStatus::Truncated => BlockCoverage::Truncated,
         BlockEvidenceStatus::Cancelled => BlockCoverage::Cancelled,
@@ -135,11 +160,35 @@ fn wire_report(
         .iter()
         .map(record)
         .collect::<Result<Vec<_>, _>>()?;
+    let mut stages = if let Some(scope) = stage_scope {
+        report
+            .stages
+            .into_iter()
+            .map(|stage| stages::evidence(scope, stage))
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    if let (Some(scope), Some(picture), Some(_)) = (stage_scope, progress.presentation, frame)
+        && !cancellation.is_set()
+        && coverage == BlockCoverage::Complete
+    {
+        let captured_bytes = stages
+            .iter()
+            .map(|stage| stage.samples.len() * size_of::<i32>())
+            .sum::<usize>();
+        let remaining = (query.max_bytes as usize).saturating_sub(captured_bytes);
+        stages.push(stages::grain(scope, &picture, remaining)?);
+    }
+    if stage_scope.is_some() && cancellation.is_set() {
+        stages.clear();
+        coverage = BlockCoverage::Cancelled;
+    }
     let evidence = BlockEvidence {
         query,
         frame,
         coverage,
-        replayed_through,
+        replayed_through: progress.replayed_through,
         records,
         coefficients: if coverage == BlockCoverage::Complete {
             report
@@ -150,6 +199,7 @@ fn wire_report(
         } else {
             None
         },
+        stages,
     };
     if !evidence.matches(query) {
         return Err(unsupported("The decoder returned invalid block evidence."));
@@ -162,6 +212,21 @@ struct ReplayProgress {
     limit: u64,
     partial: bool,
     replayed_through: u64,
+    presentation: Option<Picture>,
+    capture_presentation: bool,
+}
+
+impl ReplayProgress {
+    fn observe(&mut self, picture: Picture) {
+        if self.capture_presentation {
+            let provenance = picture.provenance();
+            if provenance.display == provenance.coded
+                && absolute(provenance.coded) == Some(self.target)
+            {
+                self.presentation = Some(picture);
+            }
+        }
+    }
 }
 
 fn feed(
@@ -208,26 +273,30 @@ fn feed(
             return Err(unsupported("The decoder did not accept the replay unit."));
         }
         progress.replayed_through = end;
-        while !capture.is_finished()
-            && !cancelled()
-            && decoder
+        while (!capture.is_finished() || progress.capture_presentation) && !cancelled() {
+            let Some(picture) = decoder
                 .wait_picture()
                 .map_err(|error| decode_failed(&error))?
-                .is_some()
-        {}
+            else {
+                break;
+            };
+            progress.observe(picture);
+        }
         if progress.target < end {
             break;
         }
     }
     if !capture.is_finished() && !cancelled() {
         decoder.drain();
-        while !capture.is_finished()
-            && !cancelled()
-            && decoder
+        while (!capture.is_finished() || progress.capture_presentation) && !cancelled() {
+            let Some(picture) = decoder
                 .get_picture()
                 .map_err(|error| decode_failed(&error))?
-                .is_some()
-        {}
+            else {
+                break;
+            };
+            progress.observe(picture);
+        }
     }
     Ok(())
 }

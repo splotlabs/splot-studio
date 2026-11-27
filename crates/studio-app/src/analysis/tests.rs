@@ -1968,6 +1968,7 @@ fn block_inspection_stops_and_ignores_replies_from_an_earlier_selection() {
     let reply = |query, coverage| Event::AnalysisBlocksReady {
         document: *document,
         evidence: Box::new(BlockEvidence {
+            stages: Vec::new(),
             query,
             frame: None,
             coverage,

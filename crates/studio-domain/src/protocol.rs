@@ -44,7 +44,7 @@ use crate::validation::{
 };
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -80,6 +80,9 @@ pub enum ProtocolError {
         /// The pixel bytes offered, or `0` when none were.
         bytes: usize,
     },
+    /// The decoder stage samples disagree with their declared scope or format.
+    #[error("invalid decoder stage samples")]
+    InvalidStageSamples,
     /// The body is not a message this build understands.
     #[error("malformed or unknown message: {0}")]
     Malformed(#[from] serde_json::Error),
@@ -1021,6 +1024,15 @@ pub fn write_message<T: Serialize>(
     writer: &mut impl Write,
     envelope: &Envelope<T>,
 ) -> Result<(), ProtocolError> {
+    write_header(writer, envelope)?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_header<T: Serialize>(
+    writer: &mut impl Write,
+    envelope: &Envelope<T>,
+) -> Result<(), ProtocolError> {
     let body = serde_json::to_vec(envelope)?;
     let len = u32::try_from(body.len()).unwrap_or(u32::MAX);
     if len == 0 || len > MAX_MESSAGE_BYTES {
@@ -1028,8 +1040,34 @@ pub fn write_message<T: Serialize>(
     }
     writer.write_all(&len.to_le_bytes())?;
     writer.write_all(&body)?;
-    writer.flush()?;
     Ok(())
+}
+
+/// Writes an inspect event, followed by any exact stage samples.
+///
+/// # Errors
+/// Returns an error for invalid stage data, an oversized header, or an I/O failure.
+pub fn write_inspect_event(
+    writer: &mut impl Write,
+    envelope: &Envelope<Event>,
+) -> Result<(), ProtocolError> {
+    if let Event::AnalysisBlocksReady { evidence, .. } = &envelope.body
+        && !evidence.stages.is_empty()
+    {
+        if !evidence.matches(evidence.query) {
+            return Err(ProtocolError::InvalidStageSamples);
+        }
+        let samples: Vec<_> = evidence
+            .stages
+            .iter()
+            .flat_map(|stage| stage.samples.iter().flat_map(|value| value.to_le_bytes()))
+            .collect();
+        write_header(writer, envelope)?;
+        writer.write_all(&samples)?;
+        writer.flush()?;
+        return Ok(());
+    }
+    write_message(writer, envelope)
 }
 
 /// Reads one frame's body. `Ok(None)` is a clean end of stream between frames.
@@ -1124,18 +1162,37 @@ pub fn write_picture(
 /// An event and, for an [`Event::Picture`], its pixels.
 pub type EventFrame = (Envelope<Event>, Option<Vec<u8>>);
 
-/// Reads one event and, for an [`Event::Picture`], the pixels that follow it.
-/// Every reader of engine output must use this, or a picture's pixels would
-/// be taken for the next frame. `Ok(None)` is a clean end of stream.
+/// Reads one event and its binary payload, if any.
+/// Read engine output with this function to consume picture and stage samples. `Ok(None)` is a clean end of stream.
 ///
 /// # Errors
 /// Returns [`ProtocolError::InvalidPicture`] before allocating for a picture
-/// whose size is out of range, [`ProtocolError::Truncated`] when the stream
-/// ends inside the pixels, and otherwise see [`read_message`].
+/// whose size is out of range, [`ProtocolError::InvalidStageSamples`] for
+/// invalid stage data, or [`ProtocolError::Truncated`] for an incomplete payload.
+/// For other errors see [`read_message`].
 pub fn read_event(reader: &mut impl Read) -> Result<Option<EventFrame>, ProtocolError> {
-    let Some(envelope) = read_message::<Event>(reader)? else {
+    let Some(mut envelope) = read_message::<Event>(reader)? else {
         return Ok(None);
     };
+    if let Event::AnalysisBlocksReady { evidence, .. } = &mut envelope.body {
+        let lengths = evidence
+            .stage_lengths()
+            .ok_or(ProtocolError::InvalidStageSamples)?;
+        for (stage, count) in evidence.stages.iter_mut().zip(lengths) {
+            let mut raw = vec![0; count * 4];
+            read_payload(reader, &mut raw)?;
+            stage.samples = raw
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .copied()
+                .map(i32::from_le_bytes)
+                .collect();
+            if !stage.values_are_valid() {
+                return Err(ProtocolError::InvalidStageSamples);
+            }
+        }
+    }
     let Event::Picture { picture } = &envelope.body else {
         return Ok(Some((envelope, None)));
     };
@@ -1149,11 +1206,15 @@ pub fn read_event(reader: &mut impl Read) -> Result<Option<EventFrame>, Protocol
         })?;
     // `len` is at most MAX_PICTURE_BYTES, so this allocation is bounded.
     let mut pixels = vec![0_u8; len as usize];
-    reader.read_exact(&mut pixels).map_err(|e| match e.kind() {
+    read_payload(reader, &mut pixels)?;
+    Ok(Some((envelope, Some(pixels))))
+}
+
+fn read_payload(reader: &mut impl Read, bytes: &mut [u8]) -> Result<(), ProtocolError> {
+    reader.read_exact(bytes).map_err(|e| match e.kind() {
         io::ErrorKind::UnexpectedEof => ProtocolError::Truncated,
         _ => ProtocolError::Io(e),
-    })?;
-    Ok(Some((envelope, Some(pixels))))
+    })
 }
 
 #[cfg(test)]
