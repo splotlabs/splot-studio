@@ -216,6 +216,7 @@ mod tests {
             Event::AnalysisBlocksReady {
                 document: 2,
                 evidence: Box::new(BlockEvidence {
+                    entropy: None,
                     coefficients: None,
                     query,
                     frame: Some(BlockFrame {

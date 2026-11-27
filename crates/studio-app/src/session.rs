@@ -504,7 +504,8 @@ impl Session {
         } else {
             None
         };
-        let effects = self.analysis.sync_overlay(picture);
+        let mut effects = self.analysis.sync_overlay(picture);
+        self.analysis.sync_entropy(&mut effects);
         if !effects.is_empty() {
             self.send_inspect(effects);
         }
@@ -530,7 +531,8 @@ impl Session {
         } else {
             None
         };
-        let effects = self.analysis.change_overlay(input, picture, point, view);
+        let mut effects = self.analysis.change_overlay(input, picture, point, view);
+        self.analysis.sync_entropy(&mut effects);
         self.send_inspect(effects);
         self.preview_outcome()
     }

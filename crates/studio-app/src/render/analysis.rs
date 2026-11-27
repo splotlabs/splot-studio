@@ -31,6 +31,7 @@ pub fn render_analysis(window: &AppWindow, analysis: &Analysis) {
     super::timeline::render(window, analysis);
     super::stages::render(window, analysis);
     super::block_motion::render(window, analysis);
+    super::entropy::render(window, analysis);
     super::blocks::render_document(&window.global::<crate::ui::Blocks>(), analysis.shown());
     super::layers::render(window, analysis.shown());
     let global = window.global::<Global>();

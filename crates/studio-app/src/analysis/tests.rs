@@ -1975,6 +1975,7 @@ fn block_inspection_stops_and_ignores_replies_from_an_earlier_selection() {
             replayed_through: 0,
             records: Vec::new(),
             coefficients: None,
+            entropy: None,
         }),
     };
 

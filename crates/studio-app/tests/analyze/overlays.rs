@@ -31,7 +31,7 @@ const DENSE: &[u8] = include_bytes!(
     "../../../studio-engine/tests/inspect/fixtures/syn-gdf-xtile-lr-512x256-q190.ivf"
 );
 
-fn open(rig: &mut Rig, scratch: &Scratch, name: &str, bytes: &[u8]) {
+pub(super) fn open(rig: &mut Rig, scratch: &Scratch, name: &str, bytes: &[u8]) {
     rig.session.block_overlay_input(BlockOverlayInput::Mode(0));
     while rig.session.analysis().shown().is_some() {
         rig.session.analysis_input(Input::Close);

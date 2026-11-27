@@ -71,10 +71,10 @@ pub use render::block_motion::render_reference as render_block_reference;
 pub use render::{render, render_analysis, render_counters, render_jobs, render_preview};
 pub use ui::{
     Analysis, AnalysisState, AppWindow, BlockMotionView, BlockOverlay, Blocks, ByteRegion,
-    CheckRow, CoefficientView, DecodeExport, ExportForm, ExportPurpose, ExportSourceRow, Fact,
-    JobAction, JobRow, JobView, NavStep, Notice, NoticeWindow, Palette, Playback, QueueRow,
-    References, RowState, SourceView, StageInspector, StageState, TimelineUi, Tone, ViewMode,
-    WorkspaceView,
+    CheckRow, CoefficientView, DecodeExport, EntropyView, ExportForm, ExportPurpose,
+    ExportSourceRow, Fact, JobAction, JobRow, JobView, NavStep, Notice, NoticeWindow, Palette,
+    Playback, QueueRow, References, RowState, SourceView, StageInspector, StageState, TimelineUi,
+    Tone, ViewMode, WorkspaceView,
 };
 pub use ui::{LayerDetail, Layers};
 
@@ -358,11 +358,13 @@ pub fn bind_block_overlay(
 
 /// Wires the Analyze workspace's callbacks to `send`, as the app does.
 /// UI tests use it to drive a session the way the window does.
+#[allow(clippy::too_many_lines)]
 pub fn bind_analysis(window: &AppWindow, send: impl Fn(analysis::Input) + Clone + 'static) {
     use analysis::{Input, Step};
     render::timeline::bind(window, send.clone());
     render::blocks::bind(window, send.clone());
     render::block_motion::bind(window, send.clone());
+    render::entropy::bind(window, send.clone());
     let global = window.global::<Analysis>();
     let step = |step: NavStep| match step {
         // The window sends no `None`; treat it as no movement.

@@ -14,6 +14,7 @@ import { LayerPanel, Layers } from "layers.slint";
 import { Tokens } from "tokens.slint";
 import { BlockPane } from "blocks.slint";
 import { StageControls } from "stage-inspector.slint";
+import { EntropyPane } from "entropy.slint";
 import { BlockOverlay, BlockOverlayMenu, BlockOverlayPanel } from "block-overlay.slint";
 import { ReferencePane } from "references.slint";
 import { DecodeExport, ExportPurpose } from "export-setup.slint";
@@ -1395,8 +1396,9 @@ export component AnalyzeView inherits VerticalLayout {
                 spacing: Tokens.space-1;
 
                 WorkspaceSwitch {
-                    options: ["Properties", "Syntax", "Findings", "Layers", "References", "Blocks", "Stages"];
+                    options: ["Properties", "Syntax", "Findings", "Layers", "References", "Blocks", "Stages", "Entropy"];
                     accessible-label: "Inspector views";
+                    tab-spacing: Tokens.space-1;
                     selected: Layers.shown ? 3 : Analysis.evidence-tab;
                     chosen(index) => {
                         Analysis.evidence-view(index);
@@ -1465,6 +1467,9 @@ export component AnalyzeView inherits VerticalLayout {
                 if !Layers.shown && Analysis.evidence-tab == 4: ReferencePane { }
                 if !Layers.shown && Analysis.evidence-tab == 5: BlockPane { }
                 if !Layers.shown && Analysis.evidence-tab == 6: StageControls {
+                    copy(text) => { root.copy(text); }
+                }
+                if !Layers.shown && Analysis.evidence-tab == 7: EntropyPane {
                     copy(text) => { root.copy(text); }
                 }
 
