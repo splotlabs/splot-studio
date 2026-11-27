@@ -8,8 +8,8 @@ use splot_encode::config::options::{OPTIONS, OptionClass, OptionDescription, Val
 use splot_encode::y4m::Y4mHeader;
 use splot_encode::{
     BitDepth, ChromaSamplePosition, Config, ContentDescription, CroppingWindow, Error,
-    KeyFrameMetadata, PixelFormat, Preset, PresetError, RateControlMode, ThreadCount, TileLayout,
-    Tune,
+    FrameMetadata, KeyFrameMetadata, PixelFormat, Preset, PresetError, RateControlMode,
+    ThreadCount, TileLayout, Tune,
 };
 use studio_domain::job::{ChromaLayout, ChromaSiting, SourceFacts};
 use studio_domain::options::{FieldError, OptionValue};
@@ -122,6 +122,7 @@ pub(super) fn apply(config: &mut Config, key: &str, value: &OptionValue) -> Resu
         "key_frame_metadata" => {
             config.key_frame_metadata = metadata(&Record::new(key, value)?)?;
         }
+        "frame_metadata" => config.frame_metadata = frame_metadata(&Record::new(key, value)?)?,
         "film_grain" => config.film_grain = boolean(key, value)?,
         "cbr_padding" => config.cbr_padding = boolean(key, value)?,
         "fast_decode" => config.fast_decode = boolean(key, value)?,
@@ -305,10 +306,13 @@ fn threads(record: &Record<'_>) -> Result<ThreadCount, FieldError> {
     }
 }
 
-fn metadata(record: &Record<'_>) -> Result<KeyFrameMetadata, FieldError> {
-    record.check_record()?;
+/// Reads the optional byte payloads of one metadata record within one
+/// [`MAX_METADATA_BYTES`] budget.
+fn payloads<'a>(
+    record: &'a Record<'a>,
+) -> impl FnMut(&str) -> Result<Option<Vec<u8>>, FieldError> + 'a {
     let mut remaining = MAX_METADATA_BYTES as usize;
-    let mut bytes = |field| {
+    move |field| {
         let path = record.path(field);
         match record.values.get(field) {
             None | Some(OptionValue::None) => Ok(None),
@@ -322,15 +326,37 @@ fn metadata(record: &Record<'_>) -> Result<KeyFrameMetadata, FieldError> {
             }
             Some(OptionValue::List(_)) => Err(FieldError::new(
                 path,
-                format!("Use at most {MAX_METADATA_BYTES} bytes in total for key-frame metadata."),
+                format!("Use at most {MAX_METADATA_BYTES} bytes in total for this metadata."),
             )),
             Some(_) => Err(FieldError::new(path, "Use a list of bytes or null.")),
         }
-    };
+    }
+}
+
+fn metadata(record: &Record<'_>) -> Result<KeyFrameMetadata, FieldError> {
+    record.check_record()?;
+    let mut bytes = payloads(record);
     let mut metadata = KeyFrameMetadata::default();
     metadata.icc_profile = bytes("icc_profile")?;
     metadata.itut_t35 = bytes("itut_t35")?;
     metadata.user_data_unregistered = bytes("user_data_unregistered")?;
+    Ok(metadata)
+}
+
+fn frame_metadata(record: &Record<'_>) -> Result<FrameMetadata, FieldError> {
+    record.check_record()?;
+    // An absent flag keeps the codec default, as an absent payload does.
+    let flag = |field| {
+        record
+            .values
+            .get(field)
+            .map_or(Ok(false), |value| boolean(&record.path(field), value))
+    };
+    let mut metadata = FrameMetadata::default();
+    metadata.timecode = flag("timecode")?;
+    metadata.temporal_point_info = flag("temporal_point_info")?;
+    metadata.scan_type = flag("scan_type")?;
+    metadata.banding_hints = payloads(record)("banding_hints")?;
     Ok(metadata)
 }
 
@@ -356,40 +382,7 @@ pub(super) fn value(config: &Config, key: &str) -> Option<OptionValue> {
         }),
         "chroma" => choice(config.chroma.as_str()),
         "frame_rate" => ratio(config.frame_rate),
-        "content" => {
-            let content = &config.content;
-            record([
-                ("color_primaries", number(content.color_primaries)),
-                (
-                    "transfer_characteristics",
-                    number(content.transfer_characteristics),
-                ),
-                ("matrix_coefficients", number(content.matrix_coefficients)),
-                ("full_range", Bool(content.full_range)),
-                (
-                    "chroma_sample_position",
-                    content
-                        .chroma_sample_position
-                        .map_or(OptionValue::None, |position| {
-                            choice(match position {
-                                ChromaSamplePosition::Left => "left",
-                                ChromaSamplePosition::Center => "center",
-                                ChromaSamplePosition::TopLeft => "top_left",
-                                ChromaSamplePosition::Top => "top",
-                                ChromaSamplePosition::BottomLeft => "bottom_left",
-                                ChromaSamplePosition::Bottom => "bottom",
-                            })
-                        }),
-                ),
-                (
-                    "sample_aspect_ratio",
-                    content.sample_aspect_ratio.map_or(OptionValue::None, ratio),
-                ),
-                ("timing_info", Bool(content.timing_info)),
-                ("mastering_display", OptionValue::None),
-                ("content_light_level", OptionValue::None),
-            ])
-        }
+        "content" => content_value(&config.content),
         "key_frame_metadata" => record([
             (
                 "icc_profile",
@@ -404,6 +397,18 @@ pub(super) fn value(config: &Config, key: &str) -> Option<OptionValue> {
                 byte_value(config.key_frame_metadata.user_data_unregistered.as_deref()),
             ),
         ]),
+        "frame_metadata" => {
+            let metadata = &config.frame_metadata;
+            record([
+                ("timecode", Bool(metadata.timecode)),
+                ("temporal_point_info", Bool(metadata.temporal_point_info)),
+                ("scan_type", Bool(metadata.scan_type)),
+                (
+                    "banding_hints",
+                    byte_value(metadata.banding_hints.as_deref()),
+                ),
+            ])
+        }
         "preset" => number(config.preset.get()),
         "rate_control" => rate_control_value(config.rate_control)?,
         "tiles" => tile_value(&config.tiles),
@@ -462,6 +467,42 @@ pub(super) fn content_origin(source: &SourceFacts, requested: Option<&OptionValu
         ),
         ("mastering_display", origin(false)),
         ("content_light_level", origin(false)),
+    ])
+}
+
+fn content_value(content: &ContentDescription) -> OptionValue {
+    use OptionValue::Bool;
+
+    record([
+        ("color_primaries", number(content.color_primaries)),
+        (
+            "transfer_characteristics",
+            number(content.transfer_characteristics),
+        ),
+        ("matrix_coefficients", number(content.matrix_coefficients)),
+        ("full_range", Bool(content.full_range)),
+        (
+            "chroma_sample_position",
+            content
+                .chroma_sample_position
+                .map_or(OptionValue::None, |position| {
+                    choice(match position {
+                        ChromaSamplePosition::Left => "left",
+                        ChromaSamplePosition::Center => "center",
+                        ChromaSamplePosition::TopLeft => "top_left",
+                        ChromaSamplePosition::Top => "top",
+                        ChromaSamplePosition::BottomLeft => "bottom_left",
+                        ChromaSamplePosition::Bottom => "bottom",
+                    })
+                }),
+        ),
+        (
+            "sample_aspect_ratio",
+            content.sample_aspect_ratio.map_or(OptionValue::None, ratio),
+        ),
+        ("timing_info", Bool(content.timing_info)),
+        ("mastering_display", OptionValue::None),
+        ("content_light_level", OptionValue::None),
     ])
 }
 
@@ -578,7 +619,7 @@ pub(super) fn error(config: &Config, error: &Error) -> FieldError {
         Error::InvalidContentDescription { .. } | Error::InvalidMasteringDisplay { .. } => {
             "content".into()
         }
-        Error::InvalidMetadata { .. } => "key_frame_metadata".into(),
+        Error::InvalidMetadata { .. } => metadata_field(config).into(),
         Error::InvalidTiles { reason, .. } => return FieldError::new("tiles", *reason),
         Error::InvalidPreset { .. } => "preset".into(),
         Error::Preset(PresetError::UnknownField { name }) => format!("preset.{name}"),
@@ -589,6 +630,21 @@ pub(super) fn error(config: &Config, error: &Error) -> FieldError {
         _ => "config".into(),
     };
     FieldError::new(field, error.to_string())
+}
+
+/// Names the record that failed: both records report
+/// [`Error::InvalidMetadata`], and the codec checks the key-frame record first.
+fn metadata_field(config: &Config) -> &'static str {
+    let mut key_frame_only = config.clone();
+    key_frame_only.frame_metadata = FrameMetadata::default();
+    if matches!(
+        key_frame_only.validate(),
+        Err(Error::InvalidMetadata { .. })
+    ) {
+        "key_frame_metadata"
+    } else {
+        "frame_metadata"
+    }
 }
 
 #[cfg(test)]
@@ -662,6 +718,30 @@ mod tests {
             Err(error) if error.field == "key_frame_metadata.itut_t35"
         ));
         assert!(config.key_frame_metadata.itut_t35.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn frame_metadata_round_trips_and_codec_errors_name_the_failed_record() -> Result<(), FieldError>
+    {
+        let mut config = Config::new(64, 64);
+        let request = record([
+            ("timecode", OptionValue::Bool(true)),
+            ("temporal_point_info", OptionValue::Bool(true)),
+            ("scan_type", OptionValue::Bool(false)),
+            ("banding_hints", byte_value(Some(&[0xA8, 0xA6]))),
+        ]);
+        apply(&mut config, "frame_metadata", &request)?;
+        assert_eq!(value(&config, "frame_metadata"), Some(request));
+
+        // Temporal point info counts timing-info ticks, which are off by default.
+        let failed = |config: &Config| config.validate().map_err(|cause| error(config, &cause));
+        assert!(matches!(failed(&config), Err(error) if error.field == "frame_metadata"));
+        config.key_frame_metadata.icc_profile = Some(vec![0; 1]);
+        assert!(matches!(failed(&config), Err(error) if error.field == "key_frame_metadata"));
+        config.key_frame_metadata = KeyFrameMetadata::default();
+        config.content.timing_info = true;
+        assert!(failed(&config).is_ok());
         Ok(())
     }
 

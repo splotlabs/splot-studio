@@ -112,6 +112,7 @@ fn top_level_examples() -> serde_json::Result<BTreeMap<String, OptionValue>> {
         "threads":{"mode":"fixed","count":2},
         "content":{"timing_info":true},
         "key_frame_metadata":{"icc_profile":vec![0; 128],"itut_t35":[181,0,1],"user_data_unregistered":vec![0; 16]},
+        "frame_metadata":{"timecode":true,"temporal_point_info":false,"scan_type":true,"banding_hints":[168,166]},
         "film_grain":true,
         "cbr_padding":true,
         "tune":"ssim",
