@@ -96,6 +96,7 @@ export component LinkButton inherits KeyboardFocus {
 export component WorkspaceSwitch inherits KeyboardFocus {
     in property <[string]> options;
     in property <int> selected;
+    in property <length> tab-spacing: Tokens.space-3;
     callback chosen(int);
 
     property <int> count: root.options.length;
@@ -129,7 +130,7 @@ export component WorkspaceSwitch inherits KeyboardFocus {
     }
 
     HorizontalLayout {
-        spacing: Tokens.space-3;
+        spacing: root.tab-spacing;
 
         for option[i] in root.options: Rectangle {
             property <bool> on: i == root.selected;

@@ -27,6 +27,7 @@ use studio_domain::identity::DecodeLayers;
 use studio_domain::preview::{GrainPolicy, SamplePlane};
 use studio_domain::stages::StageScope;
 
+mod entropy;
 mod prediction;
 mod stages;
 
@@ -99,7 +100,9 @@ fn capture_request(
         query.max_bytes as usize,
     )
     .with_kind(match query.kind {
-        BlockEvidenceKind::Structure => NativeKind::PartitionsAndBlocks,
+        BlockEvidenceKind::Structure | BlockEvidenceKind::Entropy(_) => {
+            NativeKind::PartitionsAndBlocks
+        }
         BlockEvidenceKind::Partitions => NativeKind::Partitions,
         BlockEvidenceKind::Coding => NativeKind::Blocks,
         BlockEvidenceKind::Transforms | BlockEvidenceKind::Coefficients => NativeKind::Transforms,
@@ -113,7 +116,9 @@ fn capture_request(
         Some(id) => request.with_transform_details(native_transform(id)?),
         None => request,
     };
-    Ok(if let Some(scope) = stage_scope {
+    Ok(if let BlockEvidenceKind::Entropy(scope) = query.kind {
+        request.with_entropy(entropy::native_scope(scope)?)
+    } else if let Some(scope) = stage_scope {
         request.with_stage_samples(stages::plane(scope.plane), stages::region(scope.region)?)
     } else {
         request
@@ -200,6 +205,11 @@ fn assemble(
             None
         },
         stages,
+        entropy: report
+            .entropy
+            .as_ref()
+            .map(entropy::wire_evidence)
+            .transpose()?,
     };
     if !evidence.matches(query) {
         return Err(unsupported("The decoder returned invalid block evidence."));
@@ -343,13 +353,21 @@ fn block_id(id: BlockEvidenceId) -> Result<BlockId, Refusal> {
     })
 }
 
-fn native_transform(id: BlockTransformId) -> Result<NativeTransformId, Refusal> {
-    let tree = match id.block.tree {
+fn native_block(block: BlockId) -> Result<BlockEvidenceId, Refusal> {
+    let tree = match block.tree {
         BlockTree::Shared => BlockEvidenceTree::Shared,
         BlockTree::Luma => BlockEvidenceTree::Luma,
         BlockTree::Chroma => BlockEvidenceTree::Chroma,
     };
-    let block = BlockEvidenceId::new(id.block.tile as usize, tree, native_rect(id.block.coded)?);
+    Ok(BlockEvidenceId::new(
+        block.tile as usize,
+        tree,
+        native_rect(block.coded)?,
+    ))
+}
+
+fn native_transform(id: BlockTransformId) -> Result<NativeTransformId, Refusal> {
+    let block = native_block(id.block)?;
     let plane = match id.plane {
         SamplePlane::Y => PlaneId::Y,
         SamplePlane::U => PlaneId::U,

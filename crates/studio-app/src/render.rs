@@ -10,6 +10,7 @@ pub(crate) mod block_motion;
 mod block_overlay;
 pub(crate) mod blocks;
 mod coefficients;
+pub(crate) mod entropy;
 mod evidence;
 pub(crate) mod layers;
 mod references;

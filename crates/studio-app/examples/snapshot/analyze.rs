@@ -21,6 +21,7 @@
 //! `analyze-blocks-8bit` and `analyze-blocks-10bit` inspect the first coded frame.
 //! `analyze-overlay`, `analyze-transforms` and `analyze-quantizer` show a selected
 //! region on the decoded picture from `STUDIO_PLAYBACK_FIXTURE`.
+//! `analyze-entropy` reads the selected coding block with the same fixture.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,7 +29,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use slint::ComponentHandle;
-use studio_app::analysis::{BlockOverlayInput, Input, Origin, Phase, Restore, Saved};
+use studio_app::analysis::{BlockOverlayInput, EntropyInput, Input, Origin, Phase, Restore, Saved};
 use studio_app::engine::{Delivery, ENGINE_NAME};
 use studio_app::preview::{self, StageState};
 use studio_app::recovery::{Recovered, RestoredView};
@@ -72,7 +73,7 @@ const TRUNCATED: [u8; 11] = [
 
 fn overlay_mode(name: &str) -> Option<i32> {
     match name {
-        "analyze-overlay" => Some(1),
+        "analyze-overlay" | "analyze-entropy" => Some(1),
         "analyze-transforms" => Some(2),
         "analyze-quantizer" => Some(3),
         _ => None,
@@ -155,6 +156,18 @@ impl Scenario {
                 if overlay.get_row_count() == 0 {
                     return Err(
                         "The decoder did not return overlay records for this fixture.".into(),
+                    );
+                }
+            }
+            if name == "analyze-entropy" {
+                self.input(Input::EvidenceView(7));
+                self.input(Input::Entropy(EntropyInput::Read));
+                self.settle()?;
+                studio_app::render_analysis(window, self.session.analysis());
+                let entropy = window.global::<studio_app::EntropyView>();
+                if entropy.get_count() == 0 {
+                    return Err(
+                        format!("No captured entropy symbols. {}", entropy.get_status()).into(),
                     );
                 }
             }

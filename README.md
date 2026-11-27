@@ -150,6 +150,14 @@ codec is young.
   **Read references** locates coded pictures in the input slots. **Preview**
   uses the indexed output when available. **Follow** opens the coded
   reference, and **Back** restores the selected block and viewer position.
+- Select a coding block or transform in the picture overlay. Open **Entropy**.
+  Select **Read Symbols** or **Read Selected Transform** to start a bounded decoder replay.
+  Search the captured table or filter by coding operation. Select a row to see available
+  syntax, context and pre-read CDF cutoffs. Use **Read Owning Transform** when the
+  symbol has an exact owner. **Read Parent Block** returns to the coding block.
+  The cost summary shows estimated bits, separates joint U/V reads from transform costs,
+  and lists the exact tile payload size in bytes. **Copy Capture** includes the source
+  identity, codec revision and capture coverage.
 - In Analyze, use **Export Decoded Video** for a stream or range, **Export Frame** for
   the displayed output, or **Frame Hashes** for a report. A frame export keeps the
   displayed layer and grain policy. Jobs writes only the selected outputs, even

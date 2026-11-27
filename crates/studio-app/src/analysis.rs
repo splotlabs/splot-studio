@@ -67,6 +67,7 @@ mod timeline_links;
 
 use timeline_links::Request as TimelineRequest;
 pub use timeline_links::{Timeline, TimelineRange};
+pub(crate) mod entropy;
 pub(crate) mod evidence;
 pub(crate) mod layers;
 pub(crate) mod references;
@@ -81,6 +82,7 @@ pub use document::{
     parse_offset, same_file,
 };
 use document::{in_window, line_of};
+pub use entropy::EntropyInput;
 use evidence::{Pick, Request as EvidenceRequest, VIEW_ROWS};
 pub use layers::LayerInput;
 
@@ -271,6 +273,8 @@ pub enum Input {
     FollowReference(i32),
     /// Inspect motion or follow a reference from the selected coding block.
     BlockMotion(BlockMotionInput),
+    /// Inspect entropy observations for the selected decoder region.
+    Entropy(EntropyInput),
     /// Remove the indexes saved on disk.
     ClearCache,
 }
@@ -286,6 +290,7 @@ enum Asked {
     References(studio_domain::references::ReferenceQuery),
     Blocks(studio_domain::blocks::BlockQuery),
     Overlay(studio_domain::blocks::BlockQuery),
+    Entropy(studio_domain::blocks::BlockQuery),
     ReferencePreview(references::ReferencePreviewQuery),
     Cancel,
     Close,
@@ -334,6 +339,7 @@ pub struct Analysis {
     reference_view: Option<(u64, crate::preview::HistoryView)>,
     overlay: block_overlay::Overlay,
     motion_preview: Option<block_motion::PreviewSelection>,
+    entropy: entropy::Entropy,
     show_motion: bool,
 }
 
@@ -717,6 +723,7 @@ impl Analysis {
             Input::StopReferences => self.stop_references(at, out),
             Input::FollowReference(index) => self.follow_reference(at, index, out),
             Input::BlockMotion(input) => self.block_motion_input(at, input, out),
+            Input::Entropy(input) => self.entropy_input(input, out),
             Input::TypeFilter(index) => self.choose_kind(at, index, out),
             Input::LayerFilter(index) => self.choose_layer(at, index, out),
             Input::ClearFilters => self.refilter(at, RowFilter::default(), out),
@@ -794,7 +801,7 @@ impl Analysis {
                     return;
                 }
                 let evidence = &mut self.documents[at].evidence;
-                evidence.tab = tab.clamp(0, stages::TAB);
+                evidence.tab = tab.clamp(0, entropy::TAB);
                 let doc = &mut self.documents[at];
                 if doc.evidence.selected.is_none()
                     && let Some(place) = doc.history.get_mut(doc.at)
@@ -1042,7 +1049,11 @@ impl Analysis {
             return out;
         };
         self.dirty = true;
-        self.event_for_document(at, request_id, asked, event, &mut out);
+        if let Asked::Entropy(query) = asked {
+            self.entropy_event(at, request_id, query, event, &mut out);
+        } else {
+            self.event_for_document(at, request_id, asked, event, &mut out);
+        }
         self.ensure_layers(&mut out);
         out
     }
@@ -1434,7 +1445,7 @@ impl Analysis {
                     self.fail_reference_preview(at, request_id, message);
                 }
             }
-            Asked::Cancel | Asked::Close | Asked::CancelLayers => {}
+            Asked::Cancel | Asked::Close | Asked::CancelLayers | Asked::Entropy(_) => {}
         }
     }
 

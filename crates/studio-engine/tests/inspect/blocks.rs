@@ -346,3 +346,106 @@ fn assert_coefficient_values(
     assert_eq!((values.quantized[raster], values.dequantized[raster]), ac);
     Ok(values)
 }
+
+#[test]
+fn entropy_replay_keeps_the_coded_frame_and_exact_transform_scope() -> TestResult {
+    use studio_domain::blocks::{EntropyScope, MAX_ENTROPY_BYTES, MAX_ENTROPY_EVENTS};
+
+    const FILTERS: &[u8] =
+        include_bytes!("../preview/fixtures/syn-3frame-padded-filters-422-134x69-10bit-q150.ivf");
+    // AVM a1ec4594d97028ebc34083ec8346616d697c2fc9, before the first coefficient read.
+    for (name, bytes, offset, x, skip_context, skip_cutoff) in [
+        ("eight.ivf", MULTI_TILE, 60, 64, 0, 32683),
+        // The first packet starts after the 32-byte IVF and 12-byte packet headers.
+        ("eight.obu", &MULTI_TILE[44..], 16, 64, 0, 32683),
+        ("ten.ivf", FILTERS, 73, 0, 1, 604),
+    ] {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join(name);
+        fs::write(&path, bytes)?;
+        let mut inspect = Inspect::spawn()?;
+        inspect.open(1, &path)?;
+
+        let point = query(offset, x, 0);
+        let geometry = capture(
+            &mut inspect,
+            BlockQuery {
+                kind: BlockEvidenceKind::Transforms,
+                ..point
+            },
+        )?;
+        let transform = geometry
+            .records
+            .iter()
+            .find_map(|record| match &record.data {
+                BlockData::Transform { transform }
+                    if transform.id.plane == SamplePlane::Y
+                        && transform.id.coded.x == x
+                        && transform.id.coded.y == 0 =>
+                {
+                    Some(transform.id)
+                }
+                _ => None,
+            })
+            .ok_or("Expected a transform at the test point.")?;
+        let query = BlockQuery {
+            kind: BlockEvidenceKind::Entropy(EntropyScope::Transform(transform)),
+            region: None,
+            max_events: MAX_ENTROPY_EVENTS,
+            max_bytes: MAX_ENTROPY_BYTES,
+            ..point
+        };
+        let details = capture(&mut inspect, query)?;
+        assert_eq!(details.frame, geometry.frame);
+        assert_eq!(details.records, []);
+        let entropy = details
+            .entropy
+            .ok_or("Expected entropy for the selected transform.")?;
+        assert_eq!(entropy.scope, EntropyScope::Transform(transform));
+        assert!(entropy.tile_payload_bytes < bytes.len() as u64);
+        let first = entropy
+            .symbols
+            .first()
+            .ok_or("Expected a transform symbol.")?;
+        assert_eq!(first.ordinal, 0);
+        assert_eq!(first.syntax.as_deref(), Some("all_zero"));
+        assert_eq!(first.value, 0);
+        assert_eq!(
+            first.context.as_ref().map(|context| context.values[2]),
+            Some(skip_context)
+        );
+        assert_eq!(
+            first.cdf.as_ref().map(|cdf| cdf.cutoffs_q15.as_slice()),
+            Some([skip_cutoff].as_slice())
+        );
+        assert!(first.estimated_microbits.is_some());
+
+        let partial = capture(
+            &mut inspect,
+            BlockQuery {
+                max_bytes: 1,
+                ..query
+            },
+        )?;
+        assert_eq!(partial.coverage, BlockCoverage::Truncated);
+        let partial = partial
+            .entropy
+            .ok_or("Expected scope metadata for the partial capture.")?;
+        assert_eq!(partial.end_ordinal, entropy.end_ordinal);
+        assert_eq!(partial.symbols, []);
+
+        let block = capture(
+            &mut inspect,
+            BlockQuery {
+                kind: BlockEvidenceKind::Entropy(EntropyScope::Block(transform.block)),
+                ..query
+            },
+        )?;
+        let block = block
+            .entropy
+            .ok_or("Expected entropy for the parent block.")?;
+        assert_eq!(block.scope, EntropyScope::Block(transform.block));
+        assert_eq!(block.tile_payload_bytes, entropy.tile_payload_bytes);
+    }
+    Ok(())
+}

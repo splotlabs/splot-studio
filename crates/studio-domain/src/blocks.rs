@@ -10,13 +10,13 @@
 
 use serde::{Deserialize, Serialize};
 
-pub use self::coefficients::*;
-pub use self::prediction::*;
+pub use self::{coefficients::*, entropy::*, prediction::*};
 use crate::identity::DecodeLayers;
 use crate::layers::LayerDecodeSelection;
 use crate::preview::SamplePlane;
 
 mod coefficients;
+mod entropy;
 mod prediction;
 
 /// Most records in one result. The result fits one control message.
@@ -40,6 +40,8 @@ pub enum BlockEvidenceKind {
     Coefficients,
     /// Exact samples for one requested plane and region.
     Stages(crate::stages::StageScope),
+    /// Entropy operations in one exact block or transform.
+    Entropy(EntropyScope),
 }
 
 /// A rectangle in the coded frame's luma coordinate system.
@@ -104,6 +106,13 @@ impl BlockQuery {
     /// Checks both independent budgets and the optional rectangle.
     #[must_use]
     pub fn is_valid(self) -> bool {
+        if let BlockEvidenceKind::Entropy(scope) = self.kind {
+            return scope.is_valid()
+                && (1..=MAX_ENTROPY_EVENTS).contains(&self.max_events)
+                && (1..=MAX_ENTROPY_BYTES).contains(&self.max_bytes)
+                && self.region.is_none()
+                && self.detail.is_none();
+        }
         (1..=MAX_BLOCK_RECORDS).contains(&self.max_events)
             && match self.kind {
                 BlockEvidenceKind::Stages(scope) => {
@@ -277,6 +286,9 @@ pub struct BlockEvidence {
     /// Stage metadata and binary samples.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stages: Vec<crate::stages::StageSamples>,
+    /// Entropy observations present only for a scoped entropy query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entropy: Option<EntropyEvidence>,
 }
 
 impl BlockEvidence {
@@ -353,6 +365,25 @@ impl BlockEvidence {
                     stage.samples.len() == length && stage.values_are_valid()
                 })
             })
+            && match query.kind {
+                BlockEvidenceKind::Entropy(scope) => {
+                    self.records.is_empty()
+                        && self.entropy.as_ref().is_none_or(|evidence| {
+                            evidence.matches(
+                                scope,
+                                query.max_events,
+                                self.coverage == BlockCoverage::Complete,
+                            ) && (evidence.symbols.is_empty()
+                                || (self.frame.is_some()
+                                    && !matches!(
+                                        self.coverage,
+                                        BlockCoverage::FrameNotFound | BlockCoverage::Unavailable
+                                    )))
+                        })
+                        && (self.coverage != BlockCoverage::Complete || self.entropy.is_some())
+                }
+                _ => self.entropy.is_none(),
+            }
             && self.records.iter().all(|record| record.matches(query))
     }
 }
@@ -494,6 +525,7 @@ mod tests {
             stages: Vec::new(),
             records: vec![record; MAX_BLOCK_RECORDS as usize],
             coefficients: None,
+            entropy: None,
         };
         assert!(evidence.matches(query));
         let mut malformed = evidence.clone();
@@ -585,6 +617,7 @@ mod tests {
                     },
                 },
             }],
+            entropy: None,
             coefficients: Some(Box::new(BlockCoefficients {
                 id,
                 codec_revision: "a".repeat(40),

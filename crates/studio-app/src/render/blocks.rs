@@ -72,7 +72,7 @@ pub(super) fn render_document(view: &Blocks<'_>, document: Option<&Document>) {
     let context = document.zip(evidence).and_then(|(doc, evidence)| {
         evidence.frame.map(|frame| {
             format!(
-                "Coded byte {}. Sequence byte {}. Layers X{}/M{}/T{}. Replay prefix totals {} bytes. {} Q shows the block qindex before plane adjustments. Transform details and entropy evidence are unavailable.",
+                "Coded byte {}. Sequence byte {}. Layers X{}/M{}/T{}. Replay prefix totals {} bytes. {} Q shows the block qindex before plane adjustments.",
                 frame.coded_offset,
                 frame.sequence_offset,
                 frame.layers.extended,

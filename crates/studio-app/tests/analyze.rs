@@ -36,6 +36,8 @@ use studio_app::{AnalysisState, AppWindow, ByteRegion};
 
 #[path = "analyze/blocks.rs"]
 mod blocks;
+#[path = "analyze/entropy.rs"]
+mod entropy;
 #[path = "analyze/layers.rs"]
 mod layers;
 #[path = "analyze/motion.rs"]
@@ -674,6 +676,7 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
     timeline::controls(&mut rig, &scratch);
     blocks::inspect(&mut rig, &scratch);
     overlays::inspect(&mut rig, &scratch, &clipboard);
+    entropy::inspect(&mut rig, &scratch, &clipboard);
     motion::inspect(&mut rig, &scratch);
     stages::inspect(&mut rig, &scratch, &clipboard);
 }

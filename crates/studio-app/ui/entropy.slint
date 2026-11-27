@@ -1,0 +1,246 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+import { ComboBox, LineEdit, ScrollView } from "std-widgets.slint";
+import { Caption, LinkButton } from "controls.slint";
+import { FocusRing, KeyboardFocus } from "focus.slint";
+import { Tokens } from "tokens.slint";
+
+export struct EntropyTableRow {
+    ordinal: string,
+    operation: string,
+    value: string,
+    cost: string,
+    accessible: string,
+    selected: bool,
+}
+
+export global EntropyView {
+    in property <string> status;
+    in property <string> scope;
+    in property <string> accounting;
+    in property <string> statistics;
+    in property <string> detail;
+    in property <string> copied-capture;
+    in property <string> copied-symbol;
+    in property <bool> can-read;
+    in property <string> read-label;
+    in property <bool> can-read-block;
+    in property <bool> can-read-transform;
+    in property <bool> busy;
+    in property <bool> stopping;
+    in-out property <string> query;
+    in-out property <int> kind;
+    in property <[EntropyTableRow]> rows;
+    in property <int> first;
+    in property <int> count;
+    in property <int> page-size;
+    callback read();
+    callback read-block();
+    callback read-transform();
+    callback stop();
+    callback search(string);
+    callback filter(int);
+    callback pick(int);
+    callback move(int);
+}
+
+component Cell inherits Caption {
+    vertical-alignment: center;
+    overflow: elide;
+    accessible-role: none;
+}
+
+component SymbolTable inherits KeyboardFocus {
+    callback copy(string);
+    height: EntropyView.rows.length * 24px;
+    accessible-role: list;
+    accessible-label: "Captured entropy symbols";
+    accessible-description: "Use the arrow keys to select a symbol. Use Page Up or Page Down to change pages.";
+    key-pressed(event) => {
+        if event.modifiers.control && (event.text == "c" || event.text == "C") && EntropyView.copied-symbol != "" {
+            root.copy(EntropyView.copied-symbol);
+            return accept;
+        }
+        let step = event.text == Key.UpArrow ? -1 : event.text == Key.DownArrow ? 1
+            : event.text == Key.PageUp ? -EntropyView.page-size : event.text == Key.PageDown ? EntropyView.page-size
+            : event.text == Key.Home ? -2147483647 : event.text == Key.End ? 2147483647 : 0;
+        if step == 0 {
+            return reject;
+        }
+        root.keyboard-used();
+        EntropyView.move(step);
+        accept
+    }
+
+    FocusRing {
+        shown: root.ring;
+        x: -3px;
+        y: -3px;
+        width: root.width + 6px;
+        height: root.height + 6px;
+        radius: Tokens.radius-small;
+    }
+
+    for row[index] in EntropyView.rows: Rectangle {
+        y: index * 24px;
+        width: root.width;
+        height: 24px;
+        background: row.selected ? Tokens.row-selected : hit.has-hover ? Tokens.row-hover : Tokens.surface;
+        accessible-role: list-item;
+        accessible-label: row.accessible;
+        accessible-item-selectable: true;
+        accessible-item-selected: row.selected;
+        accessible-item-index: EntropyView.first + index;
+        accessible-item-count: EntropyView.count;
+        accessible-action-default => { EntropyView.pick(EntropyView.first + index); }
+
+        HorizontalLayout {
+            padding-left: Tokens.space-1;
+            padding-right: Tokens.space-1;
+            spacing: Tokens.space-2;
+            Cell { width: 48px; text: row.ordinal; }
+            Cell { horizontal-stretch: 1; text: row.operation; }
+            Cell { width: 54px; text: row.value; }
+            Cell { width: 70px; text: row.cost; }
+        }
+
+        hit := TouchArea {
+            mouse-cursor: pointer;
+            clicked => {
+                root.focus();
+                EntropyView.pick(EntropyView.first + index);
+            }
+        }
+    }
+}
+
+export component EntropyPane inherits ScrollView {
+    callback copy(string);
+    min-height: 120px;
+    content-width: self.visible-width;
+
+    VerticalLayout {
+        width: parent.content-width;
+        spacing: Tokens.space-2;
+        padding: Tokens.space-1;
+
+        if EntropyView.scope != "": Caption {
+            text: EntropyView.scope;
+            wrap: word-wrap;
+        }
+
+        Caption {
+            text: EntropyView.status;
+            wrap: word-wrap;
+            accessible-live-region: polite;
+        }
+
+        HorizontalLayout {
+            spacing: Tokens.space-2;
+            if EntropyView.can-read: LinkButton {
+                text: EntropyView.read-label;
+                clicked => { EntropyView.read(); }
+            }
+            if EntropyView.can-read-block: LinkButton {
+                text: "Read Parent Block";
+                clicked => { EntropyView.read-block(); }
+            }
+            if EntropyView.busy: LinkButton {
+                enabled: !EntropyView.stopping;
+                text: "Stop";
+                description: "Stop entropy capture.";
+                clicked => { EntropyView.stop(); }
+            }
+        }
+
+        if EntropyView.accounting != "": Caption {
+            text: EntropyView.accounting;
+            wrap: word-wrap;
+        }
+
+        if EntropyView.copied-capture != "": HorizontalLayout {
+            spacing: Tokens.space-2;
+            LineEdit {
+                horizontal-stretch: 1;
+                text <=> EntropyView.query;
+                placeholder-text: "Search symbols";
+                accessible-label: "Search captured symbols";
+                accessible-description: "Search by syntax name, ordinal or decoded value.";
+                edited(value) => { EntropyView.search(value); }
+            }
+            ComboBox {
+                width: 124px;
+                model: ["All kinds", "CDF-coded", "Bypass", "Unary"];
+                current-index <=> EntropyView.kind;
+                accessible-label: "Symbol coding kind";
+                selected => { EntropyView.filter(self.current-index); }
+            }
+        }
+
+        if EntropyView.rows.length > 0: HorizontalLayout {
+            padding-left: Tokens.space-1;
+            padding-right: Tokens.space-1;
+            spacing: Tokens.space-2;
+            Cell { width: 48px; text: "Ordinal"; }
+            Cell { horizontal-stretch: 1; text: "Operation"; }
+            Cell { width: 54px; text: "Value"; }
+            Cell { width: 70px; text: "Est. bits"; }
+        }
+
+        if EntropyView.rows.length > 0: SymbolTable {
+            copy(text) => { root.copy(text); }
+        }
+
+        if EntropyView.count > EntropyView.page-size: HorizontalLayout {
+            spacing: Tokens.space-2;
+            LinkButton {
+                quiet: true;
+                enabled: EntropyView.first > 0;
+                text: "Previous Page";
+                clicked => { EntropyView.move(-EntropyView.page-size); }
+            }
+            Caption {
+                horizontal-stretch: 1;
+                text: (EntropyView.first + 1) + "–" + (EntropyView.first + EntropyView.rows.length) + " of " + EntropyView.count;
+                vertical-alignment: center;
+            }
+            LinkButton {
+                quiet: true;
+                enabled: EntropyView.first + EntropyView.page-size < EntropyView.count;
+                text: "Next Page";
+                clicked => { EntropyView.move(EntropyView.page-size); }
+            }
+        }
+
+        if EntropyView.detail != "": Caption {
+            text: EntropyView.detail;
+            wrap: word-wrap;
+            accessible-live-region: polite;
+        }
+
+        if EntropyView.copied-capture != "": HorizontalLayout {
+            spacing: Tokens.space-2;
+            if EntropyView.can-read-transform: LinkButton {
+                text: "Read Owning Transform";
+                clicked => { EntropyView.read-transform(); }
+            }
+            if EntropyView.copied-symbol != "": LinkButton {
+                text: "Copy Symbol";
+                quiet: true;
+                clicked => { root.copy(EntropyView.copied-symbol); }
+            }
+            LinkButton {
+                text: "Copy Capture";
+                quiet: true;
+                description: "Copy all captured symbols with scope and coverage.";
+                clicked => { root.copy(EntropyView.copied-capture); }
+            }
+        }
+
+        if EntropyView.statistics != "": Caption {
+            text: EntropyView.statistics;
+            wrap: word-wrap;
+        }
+    }
+}
