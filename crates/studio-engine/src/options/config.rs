@@ -8,7 +8,7 @@ use splot_encode::config::options::{OPTIONS, OptionClass, OptionDescription, Val
 use splot_encode::y4m::Y4mHeader;
 use splot_encode::{
     BitDepth, ChromaSamplePosition, Config, ContentDescription, CroppingWindow, Error,
-    FrameMetadata, KeyFrameMetadata, PixelFormat, Preset, PresetError, RateControlMode,
+    FrameMetadata, KeyFrameMetadata, PixelFormat, Preset, PresetError, ProfileIdc, RateControlMode,
     ThreadCount, TileLayout, Tune,
 };
 use studio_domain::job::{ChromaLayout, ChromaSiting, SourceFacts};
@@ -127,6 +127,10 @@ pub(super) fn apply(config: &mut Config, key: &str, value: &OptionValue) -> Resu
         "cbr_padding" => config.cbr_padding = boolean(key, value)?,
         "fast_decode" => config.fast_decode = boolean(key, value)?,
         "multi_frame_header" => config.multi_frame_header = boolean(key, value)?,
+        "disable_loopfilters_across_tiles" => {
+            config.disable_loopfilters_across_tiles = boolean(key, value)?;
+        }
+        "profile" => config.profile = profile(key, value)?,
         "tune" => {
             config.tune = match value {
                 OptionValue::Choice(choice) if choice == "psnr" => Tune::Psnr,
@@ -142,6 +146,18 @@ pub(super) fn apply(config: &mut Config, key: &str, value: &OptionValue) -> Resu
         _ => return Err(FieldError::new(key, "The encoder option is unknown.")),
     }
     Ok(())
+}
+
+/// Reads a `seq_profile_idc` choice. The codec refuses a reserved profile.
+fn profile(key: &str, value: &OptionValue) -> Result<Option<ProfileIdc>, FieldError> {
+    let bits = match value {
+        OptionValue::None => return Ok(None),
+        // The syntax element has five bits.
+        OptionValue::Choice(choice) => choice.parse().ok().filter(|bits: &u8| *bits < 32),
+        _ => None,
+    };
+    bits.map(|bits| Some(ProfileIdc::from_bits(bits)))
+        .ok_or_else(|| FieldError::new(key, "Select a profile from the list."))
 }
 
 fn boolean(key: &str, value: &OptionValue) -> Result<bool, FieldError> {
@@ -434,6 +450,10 @@ pub(super) fn value(config: &Config, key: &str) -> Option<OptionValue> {
         "cbr_padding" => Bool(config.cbr_padding),
         "fast_decode" => Bool(config.fast_decode),
         "multi_frame_header" => Bool(config.multi_frame_header),
+        "disable_loopfilters_across_tiles" => Bool(config.disable_loopfilters_across_tiles),
+        "profile" => config.profile.map_or(OptionValue::None, |profile| {
+            choice(&profile.get().to_string())
+        }),
         "tune" => choice(match config.tune {
             Tune::Psnr => "psnr",
             Tune::Ssim => "ssim",
@@ -619,7 +639,8 @@ pub(super) fn error(config: &Config, error: &Error) -> FieldError {
         Error::InvalidContentDescription { .. } | Error::InvalidMasteringDisplay { .. } => {
             "content".into()
         }
-        Error::InvalidMetadata { .. } => metadata_field(config).into(),
+        Error::InvalidMetadata { field, .. } => (*field).into(),
+        Error::InvalidProfile { .. } => "profile".into(),
         Error::InvalidTiles { reason, .. } => return FieldError::new("tiles", *reason),
         Error::InvalidPreset { .. } => "preset".into(),
         Error::Preset(PresetError::UnknownField { name }) => format!("preset.{name}"),
@@ -630,21 +651,6 @@ pub(super) fn error(config: &Config, error: &Error) -> FieldError {
         _ => "config".into(),
     };
     FieldError::new(field, error.to_string())
-}
-
-/// Names the record that failed: both records report
-/// [`Error::InvalidMetadata`], and the codec checks the key-frame record first.
-fn metadata_field(config: &Config) -> &'static str {
-    let mut key_frame_only = config.clone();
-    key_frame_only.frame_metadata = FrameMetadata::default();
-    if matches!(
-        key_frame_only.validate(),
-        Err(Error::InvalidMetadata { .. })
-    ) {
-        "key_frame_metadata"
-    } else {
-        "frame_metadata"
-    }
 }
 
 #[cfg(test)]
@@ -718,6 +724,31 @@ mod tests {
             Err(error) if error.field == "key_frame_metadata.itut_t35"
         ));
         assert!(config.key_frame_metadata.itut_t35.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn profile_round_trips_and_codec_errors_name_it() -> Result<(), FieldError> {
+        let mut config = Config::new(64, 64);
+        assert_eq!(value(&config, "profile"), Some(OptionValue::None));
+        for (request, refused) in [("0", false), ("3", false), ("5", true)] {
+            apply(&mut config, "profile", &choice(request))?;
+            assert_eq!(value(&config, "profile"), Some(choice(request)));
+            // The codec refuses a reserved profile (Annex A.2 Table A.1).
+            let field = config
+                .validate()
+                .map_err(|cause| error(&config, &cause).field);
+            assert_eq!(
+                field.err().as_deref(),
+                refused.then_some("profile"),
+                "{request}"
+            );
+        }
+        for request in [choice("32"), choice("main"), OptionValue::Bool(true)] {
+            assert!(apply(&mut config, "profile", &request).is_err());
+        }
+        apply(&mut config, "profile", &OptionValue::None)?;
+        assert_eq!(config.profile, None);
         Ok(())
     }
 

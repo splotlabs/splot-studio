@@ -75,12 +75,16 @@ pub(crate) fn classification(descriptor: &OptionDescriptor) -> Option<Classifica
         "fast_decode" => Class::named(SEARCH, "Fast decoding", false),
         "keyint" => Class::named(TEMPORAL, "Keyframe interval", false),
         "film_grain" => Class::named(FILTERS, "Film grain synthesis", false),
+        "disable_loopfilters_across_tiles" => {
+            Class::named(FILTERS, "In-loop filters at tile edges", true)
+        }
         "threads" => Class::named(PARALLEL, "Worker threads", false),
         "tiles" => Class::named(PARALLEL, "Tile layout", false),
         "tile_groups" => Class::named(OUTPUT, "Tile groups", true),
         "crop" => Class::named(OUTPUT, "Crop window", false),
         "resize_denominator" => Class::named(OUTPUT, "Output resize", false),
         "multi_frame_header" => Class::named(OUTPUT, "Multi-frame header", true),
+        "profile" => Class::named(OUTPUT, "Sequence profile", true),
         "key_frame_metadata" => Class::named(OUTPUT, "Keyframe metadata payloads", true),
         "frame_metadata" => Class::named(OUTPUT, "Per-frame metadata", true),
         "width" => Class::named(SOURCE, "Source width", false),
@@ -118,11 +122,13 @@ const PRESET_GROUPS: &[(&str, &[&str])] = &[
         "drl_reorder_always", "eighth_pel_max_qindex", "explicit_refs", "global_motion",
         "global_motion_predict", "hme_range", "implicit_mask", "implicit_output", "interintra",
         "interintra_search", "interp_filter_search", "intra_only", "jmvd_scales", "large_inter",
-        "long_term_id_bits", "me_range", "me_seeds", "motion_range", "mv_prediction", "mv_traj",
-        "mvd_tools", "newmv_ref_margin", "num_ref_frames", "open_loop_key", "opfl",
+        "long_term_id_bits", "max_tlayer_id", "me_range", "me_seeds", "motion_range",
+        "mv_prediction", "mv_traj", "mvd_tools", "newmv_ref_margin", "num_ref_frames",
+        "open_loop_key", "opfl",
         "opfl_refine_all", "primary_default_cdfs", "primary_ref_choose", "quant_matrices",
         "refinemv", "same_ref_modes", "sef_repeat", "seq_tile_info", "short_refresh",
-        "subpel_depth", "tip", "tip_amvd", "tip_explicit_qp", "tip_hole_fill", "tip_newmv",
+        "subpel_depth", "switch_frames", "switch_type", "tip", "tip_amvd", "tip_explicit_qp",
+        "tip_hole_fill", "tip_newmv",
         "tip_output", "tip_output_search", "tip_refinemv", "warp", "warp_interintra",
     ]),
     ("filters", &[
@@ -133,11 +139,12 @@ const PRESET_GROUPS: &[(&str, &[&str])] = &[
         "wiener_ns_classes",
     ]),
     ("screen_content", &[
-        "fsc", "idtx_intra", "integer_mv", "intrabc", "intrabc_drl", "intrabc_local",
-        "intrabc_morph", "intrabc_small", "intrabc_subpel", "palette", "screen_detect",
+        "fsc", "idtx_intra", "integer_mv", "intrabc", "intrabc_drl", "intrabc_inter",
+        "intrabc_local", "intrabc_morph", "intrabc_small", "intrabc_subpel", "palette",
+        "screen_detect",
     ]),
     ("lossless", &[
-        "lossless_dpcm",
+        "lossless_dpcm", "lossless_inter_tx",
     ]),
     ("gop", &[
         "bitrate_mini_gop_size", "delta_q_res", "key_qindex_boost", "lookahead_frames",
