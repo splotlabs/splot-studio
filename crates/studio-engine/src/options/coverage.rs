@@ -117,7 +117,9 @@ fn top_level_examples() -> serde_json::Result<BTreeMap<String, OptionValue>> {
         "cbr_padding":true,
         "tune":"ssim",
         "fast_decode":true,
-        "multi_frame_header":true
+        "multi_frame_header":true,
+        "disable_loopfilters_across_tiles":true,
+        "profile":"0"
     }))
 }
 
