@@ -14,6 +14,7 @@ use crate::analysis::{Document, Input, blocks::TAB};
 use crate::ui::{AppWindow, BlockTableRow, Blocks};
 
 pub(crate) fn bind(window: &AppWindow, send: impl Fn(Input) + Clone + 'static) {
+    super::stages::bind(window, send.clone());
     let blocks = window.global::<Blocks>();
     blocks.on_inspect({
         let send = send.clone();
@@ -71,7 +72,7 @@ pub(super) fn render_document(view: &Blocks<'_>, document: Option<&Document>) {
     let context = document.zip(evidence).and_then(|(doc, evidence)| {
         evidence.frame.map(|frame| {
             format!(
-                "Coded byte {}. Sequence byte {}. Layers X{}/M{}/T{}. Replay prefix totals {} bytes. {} Q shows the block qindex before plane adjustments. Transform details, reconstruction stages and entropy evidence are unavailable.",
+                "Coded byte {}. Sequence byte {}. Layers X{}/M{}/T{}. Replay prefix totals {} bytes. {} Q shows the block qindex before plane adjustments. Transform details and entropy evidence are unavailable.",
                 frame.coded_offset,
                 frame.sequence_offset,
                 frame.layers.extended,

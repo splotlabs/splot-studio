@@ -212,6 +212,7 @@ pub struct Document {
     pub(crate) evidence: Evidence,
     pub(super) timeline: Timeline,
     pub(crate) layers: super::layers::LayerInspector,
+    pub(crate) stages: super::stages::Stages,
     pub(crate) blocks: super::blocks::Blocks,
     pub(crate) references: super::references::References,
     /// Report awaiting source fingerprint verification at open.
@@ -252,6 +253,7 @@ impl Document {
             evidence: Evidence::default(),
             timeline: Timeline::default(),
             layers: super::layers::LayerInspector::default(),
+            stages: super::stages::Stages::default(),
             blocks: super::blocks::Blocks::default(),
             references: super::references::References::default(),
             pending_batch: None,
@@ -337,6 +339,7 @@ impl Document {
     /// The read ended without facts: keeps the view for the next read.
     pub(super) fn fail(&mut self, message: String, by: ReadEnd) {
         self.pending_batch = None;
+        self.stages = super::stages::Stages::default();
         self.blocks = super::blocks::Blocks::default();
         self.references = super::references::References::default();
         self.restore = self.restore();

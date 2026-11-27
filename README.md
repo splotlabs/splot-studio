@@ -104,6 +104,19 @@ codec is young.
   The table shows the tile, partition tree, coded and visible rectangles, prediction
   mode, segment ID, and block quantizer index where available. The capture status
   shows whether a limit stopped collection.
+- Open **Stages** for a coded frame. Choose a plane and enter a zero-based
+  column and row. Select **Capture** to read up to 32 × 32 samples from that
+  region. Studio may decode earlier frames. **Use Block Origin** copies the
+  selected block's visible origin to the luma fields. Select **Capture Film
+  Grain** before capture to include grain on a direct display output.
+- Choose two captured stages. Read the exact values at a coordinate or select
+  a sample in either picture. Use **Signed B − A** or **Absolute |B − A|**
+  when the samples share their units and geometry. Display gain, zoom and pan
+  change the pictures only. A stage can be skipped, unsupported or uncaptured.
+  The decoder rounds residuals before it adds them with clipping. Grain
+  presentation uses a direct display output and has its own sample values.
+  Grain can leave individual planes unchanged. Filter status applies to the
+  intersecting stripes and can include bypassed samples.
 - Coded byte counts include the frame OBU and its continuation OBUs. Output byte
   counts assign each display OBU once. File accounting separates OBU bytes,
   framing, and unclassified bytes. The output bitrate uses the range's timestamp

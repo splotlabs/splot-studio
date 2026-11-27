@@ -42,6 +42,8 @@ mod layers;
 mod motion;
 #[path = "analyze/overlays.rs"]
 mod overlays;
+#[path = "analyze/stages.rs"]
+mod stages;
 #[path = "analyze/timeline.rs"]
 mod timeline;
 
@@ -673,6 +675,7 @@ fn ivf_and_annex_b_documents_in_the_running_window() {
     blocks::inspect(&mut rig, &scratch);
     overlays::inspect(&mut rig, &scratch, &clipboard);
     motion::inspect(&mut rig, &scratch);
+    stages::inspect(&mut rig, &scratch, &clipboard);
 }
 
 /// A malformed trailing bit has a native rule, a known bit position and

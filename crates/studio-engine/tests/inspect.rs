@@ -11,6 +11,8 @@ mod blocks;
 mod common;
 #[path = "inspect/layers.rs"]
 mod layers;
+#[path = "inspect/stages.rs"]
+mod stages;
 
 use std::error::Error;
 use std::fs;
@@ -30,7 +32,7 @@ use studio_domain::preview::{
     PictureView,
 };
 use studio_domain::protocol::{
-    BuildIdentity, Command, Envelope, ErrorCode, Event, read_event, read_message, write_message,
+    BuildIdentity, Command, Envelope, ErrorCode, Event, read_event, write_message,
 };
 use studio_domain::settings::OutputKind;
 use studio_domain::syntax::{SYNTAX_SCHEMA, SyntaxEvent, SyntaxValue};
@@ -86,7 +88,9 @@ impl Inspect {
     }
 
     fn next(&mut self) -> Result<Envelope<Event>, Box<dyn Error>> {
-        Ok(read_message::<Event>(&mut self.stdout)?.ok_or("inspect closed stdout")?)
+        Ok(read_event(&mut self.stdout)?
+            .ok_or("inspect closed stdout")?
+            .0)
     }
 
     /// Sends one command and returns its one answer.

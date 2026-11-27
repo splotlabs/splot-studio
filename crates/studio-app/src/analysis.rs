@@ -58,6 +58,8 @@ mod batch;
 mod block_motion;
 pub(crate) mod block_overlay;
 pub(crate) mod blocks;
+pub(crate) mod stages;
+pub use stages::StageInput;
 mod bytes;
 mod coefficients;
 mod document;
@@ -263,6 +265,8 @@ pub enum Input {
     InspectBlocks,
     /// Stop reading block evidence.
     StopBlocks,
+    /// Interact with the decoder stage inspector.
+    Stage(StageInput),
     /// Follow the direct dependency at this row.
     FollowReference(i32),
     /// Inspect motion or follow a reference from the selected coding block.
@@ -708,6 +712,7 @@ impl Analysis {
             Input::GoTo(text) => self.go_to(at, &text, out),
             Input::InspectBlocks => self.request_blocks(at, out),
             Input::StopBlocks => self.stop_blocks(at, out),
+            Input::Stage(input) => self.stage_input(at, input, out),
             Input::InspectReferences => self.request_references(at, out),
             Input::StopReferences => self.stop_references(at, out),
             Input::FollowReference(index) => self.follow_reference(at, index, out),
@@ -778,6 +783,9 @@ impl Analysis {
                 if tab != references::TAB && self.documents[at].evidence.tab == references::TAB {
                     self.cancel_references(at, out);
                 }
+                if tab != stages::TAB && self.documents[at].evidence.tab == stages::TAB {
+                    self.cancel_stages(at, out);
+                }
                 if tab != blocks::TAB && self.documents[at].evidence.tab == blocks::TAB {
                     self.cancel_blocks(at, out);
                 }
@@ -786,7 +794,7 @@ impl Analysis {
                     return;
                 }
                 let evidence = &mut self.documents[at].evidence;
-                evidence.tab = tab.clamp(0, blocks::TAB);
+                evidence.tab = tab.clamp(0, stages::TAB);
                 let doc = &mut self.documents[at];
                 if doc.evidence.selected.is_none()
                     && let Some(place) = doc.history.get_mut(doc.at)
@@ -887,6 +895,7 @@ impl Analysis {
             if blocks {
                 self.cancel_blocks(self.shown, out);
             }
+            self.cancel_stages(self.shown, out);
         }
         self.shown = at;
     }
@@ -1107,12 +1116,7 @@ impl Analysis {
                 }
             }
             (Asked::Blocks(query), Event::AnalysisBlocksReady { evidence, .. }) => {
-                let blocks = &mut self.documents[at].blocks;
-                if evidence.matches(query) {
-                    blocks.accept(request_id, evidence);
-                } else {
-                    blocks.fail(request_id, None, "The engine sent invalid block evidence.");
-                }
+                self.documents[at].accept_block_query(request_id, query, evidence);
             }
             (Asked::Overlay(query), Event::AnalysisBlocksReady { evidence, .. }) => {
                 self.accept_overlay(request_id, query, evidence, out);
@@ -1401,14 +1405,14 @@ impl Analysis {
                     doc.references.fail(request_id, code, &message);
                 }
             }
-            Asked::Blocks(_) => {
+            Asked::Blocks(query) => {
                 if matches!(
                     code,
                     Some(AnalysisFailure::SourceChanged | AnalysisFailure::UnknownDocument)
                 ) {
                     fail_or_notice(doc, code, &message);
                 } else {
-                    doc.blocks.fail(request_id, code, &message);
+                    doc.fail_block_query(request_id, query, code, &message);
                 }
             }
             Asked::Overlay(_) => {
