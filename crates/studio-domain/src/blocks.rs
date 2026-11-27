@@ -41,7 +41,12 @@ pub enum BlockEvidenceKind {
     /// Exact samples for one requested plane and region.
     Stages(crate::stages::StageScope),
     /// Entropy operations in one exact block or transform.
-    Entropy(EntropyScope),
+    Entropy {
+        /// Exact owner of the operations.
+        scope: EntropyScope,
+        /// First scope ordinal to record. Earlier reads use no budget.
+        start: u64,
+    },
 }
 
 /// A rectangle in the coded frame's luma coordinate system.
@@ -106,7 +111,7 @@ impl BlockQuery {
     /// Checks both independent budgets and the optional rectangle.
     #[must_use]
     pub fn is_valid(self) -> bool {
-        if let BlockEvidenceKind::Entropy(scope) = self.kind {
+        if let BlockEvidenceKind::Entropy { scope, .. } = self.kind {
             return scope.is_valid()
                 && (1..=MAX_ENTROPY_EVENTS).contains(&self.max_events)
                 && (1..=MAX_ENTROPY_BYTES).contains(&self.max_bytes)
@@ -366,11 +371,12 @@ impl BlockEvidence {
                 })
             })
             && match query.kind {
-                BlockEvidenceKind::Entropy(scope) => {
+                BlockEvidenceKind::Entropy { scope, start } => {
                     self.records.is_empty()
                         && self.entropy.as_ref().is_none_or(|evidence| {
                             evidence.matches(
                                 scope,
+                                start,
                                 query.max_events,
                                 self.coverage == BlockCoverage::Complete,
                             ) && (evidence.symbols.is_empty()

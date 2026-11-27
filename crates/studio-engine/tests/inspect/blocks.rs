@@ -401,7 +401,10 @@ fn entropy_replay_keeps_the_coded_frame_and_exact_transform_scope() -> TestResul
             })
             .ok_or("Expected a transform at the test point.")?;
         let query = BlockQuery {
-            kind: BlockEvidenceKind::Entropy(EntropyScope::Transform(transform)),
+            kind: BlockEvidenceKind::Entropy {
+                scope: EntropyScope::Transform(transform),
+                start: 0,
+            },
             region: None,
             max_events: MAX_ENTROPY_EVENTS,
             max_bytes: MAX_ENTROPY_BYTES,
@@ -449,7 +452,10 @@ fn entropy_replay_keeps_the_coded_frame_and_exact_transform_scope() -> TestResul
         let block = capture(
             &mut inspect,
             BlockQuery {
-                kind: BlockEvidenceKind::Entropy(EntropyScope::Block(transform.block)),
+                kind: BlockEvidenceKind::Entropy {
+                    scope: EntropyScope::Block(transform.block),
+                    start: 0,
+                },
                 ..query
             },
         )?;
@@ -508,7 +514,10 @@ fn entropy_capture(
     let evidence = capture(
         inspect,
         BlockQuery {
-            kind: BlockEvidenceKind::Entropy(EntropyScope::Block(block)),
+            kind: BlockEvidenceKind::Entropy {
+                scope: EntropyScope::Block(block),
+                start: 0,
+            },
             region: None,
             max_events: MAX_ENTROPY_EVENTS,
             max_bytes: MAX_ENTROPY_BYTES,
@@ -521,6 +530,77 @@ fn entropy_capture(
         "each reply names the coded frame it replayed"
     );
     Ok(evidence)
+}
+
+#[test]
+fn entropy_parts_continue_a_truncated_scope_to_its_end() -> TestResult {
+    use studio_domain::blocks::{EntropyScope, MAX_ENTROPY_BYTES, MAX_ENTROPY_EVENTS};
+
+    // Each lossless 64 × 64 coding block parses more than `MAX_ENTROPY_EVENTS` symbols.
+    const LOSSLESS: &[u8] =
+        include_bytes!("fixtures/syn-lossless-sdp-nondc-chroma-v-intra-64x64-10bit.ivf");
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("lossless.ivf");
+    fs::write(&path, LOSSLESS)?;
+    let mut inspect = Inspect::spawn()?;
+    inspect.open(1, &path)?;
+    let [offset] = coded_offsets(&mut inspect, 1)?[..] else {
+        return Err("Expected one coded frame.".into());
+    };
+    let scope = EntropyScope::Block(top_left_block(&mut inspect, offset)?);
+    let mut part = |start| {
+        let evidence = capture(
+            &mut inspect,
+            BlockQuery {
+                kind: BlockEvidenceKind::Entropy { scope, start },
+                region: None,
+                max_events: MAX_ENTROPY_EVENTS,
+                max_bytes: MAX_ENTROPY_BYTES,
+                ..query(offset, 0, 0)
+            },
+        )?;
+        let entropy = evidence.entropy.ok_or("Expected entropy for the block.")?;
+        assert_eq!(entropy.start, start);
+        Ok::<_, Box<dyn std::error::Error>>((evidence.coverage, entropy))
+    };
+
+    let (coverage, first) = part(0)?;
+    assert_eq!(coverage, BlockCoverage::Truncated);
+    assert_eq!(first.symbols.len(), MAX_ENTROPY_EVENTS as usize);
+    let mut start = first
+        .symbols
+        .last()
+        .and_then(studio_domain::blocks::EntropySymbol::end_ordinal)
+        .ok_or("Expected the end of the first part.")?;
+    assert!(start < first.end_ordinal);
+    let mut parts = 1;
+    loop {
+        let (coverage, next) = part(start)?;
+        assert_eq!(next.end_ordinal, first.end_ordinal);
+        let Some(last) = next.symbols.last() else {
+            assert_eq!(coverage, BlockCoverage::Complete);
+            assert!(start >= first.end_ordinal);
+            break;
+        };
+        // Parts continue each other without a gap or an overlap.
+        assert_eq!(next.symbols[0].ordinal, start);
+        assert!(
+            next.symbols
+                .windows(2)
+                .all(|pair| pair[0].end_ordinal() == Some(pair[1].ordinal))
+        );
+        start = last.end_ordinal().ok_or("Expected the end of a part.")?;
+        parts += 1;
+        if start == first.end_ordinal {
+            assert_eq!(coverage, BlockCoverage::Complete);
+        } else {
+            assert_eq!(coverage, BlockCoverage::Truncated);
+            assert_eq!(next.symbols.len(), MAX_ENTROPY_EVENTS as usize);
+        }
+        assert!(parts < 1000, "the parts do not reach the end ordinal");
+    }
+    assert!(parts > 1);
+    Ok(())
 }
 
 #[test]

@@ -5,8 +5,8 @@
 
 use studio_domain::analysis::AnalysisFailure;
 use studio_domain::blocks::{
-    BlockEvidence, BlockEvidenceKind, BlockFrame, BlockQuery, EntropyCoding, EntropyScope,
-    EntropySymbol, MAX_ENTROPY_BYTES, MAX_ENTROPY_EVENTS,
+    BlockCoverage, BlockEvidence, BlockEvidenceKind, BlockFrame, BlockQuery, EntropyCoding,
+    EntropyScope, EntropySymbol, MAX_ENTROPY_BYTES, MAX_ENTROPY_EVENTS,
 };
 use studio_domain::layers::LayerDecodeSelection;
 use studio_domain::protocol::{Command, Event};
@@ -35,8 +35,10 @@ pub(crate) fn operation(symbol: &EntropySymbol) -> &str {
 /// An action in the entropy inspector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntropyInput {
-    /// Capture the selected block or transform.
+    /// Capture the selected block or transform from its first symbol.
     Read,
+    /// Capture the shown scope from the end of the shown symbols.
+    ReadNext,
     /// Capture the selected transform's parent block.
     ReadBlock,
     /// Read the exact transform that owns the selected symbol.
@@ -104,6 +106,17 @@ impl Entropy {
                         || symbol.value.to_string().contains(&query))
             })
             .collect()
+    }
+
+    /// Returns the start of the part after the shown symbols, if the scope continues.
+    pub(crate) fn next_start(&self) -> Option<u64> {
+        let report = self.evidence.as_deref()?;
+        let entropy = report.entropy.as_ref()?;
+        let next = entropy
+            .symbols
+            .last()
+            .map_or(Some(entropy.start), EntropySymbol::end_ordinal)?;
+        (report.coverage != BlockCoverage::Complete && next < entropy.end_ordinal).then_some(next)
     }
 
     pub(crate) const fn first(&self) -> usize {
@@ -174,9 +187,16 @@ impl Analysis {
         let Some(selection) = self.entropy_selection() else {
             return;
         };
-        let scope = match input {
-            EntropyInput::Read => selection.scope,
-            EntropyInput::ReadBlock => EntropyScope::Block(selection.scope.block()),
+        let (scope, start) = match input {
+            EntropyInput::Read => (selection.scope, 0),
+            EntropyInput::ReadNext => {
+                let (Some(scope), Some(start)) = (self.entropy.scope, self.entropy.next_start())
+                else {
+                    return;
+                };
+                (scope, start)
+            }
+            EntropyInput::ReadBlock => (EntropyScope::Block(selection.scope.block()), 0),
             EntropyInput::ReadTransform => {
                 let Some(id) = self
                     .entropy
@@ -186,7 +206,7 @@ impl Analysis {
                 else {
                     return;
                 };
-                EntropyScope::Transform(id)
+                (EntropyScope::Transform(id), 0)
             }
 
             EntropyInput::Stop => return self.stop_entropy(out),
@@ -226,7 +246,7 @@ impl Analysis {
         let query = BlockQuery {
             coded_offset: selection.frame.coded_offset,
             selection: selection.policy,
-            kind: BlockEvidenceKind::Entropy(scope),
+            kind: BlockEvidenceKind::Entropy { scope, start },
             region: None,
             detail: None,
             max_events: MAX_ENTROPY_EVENTS,

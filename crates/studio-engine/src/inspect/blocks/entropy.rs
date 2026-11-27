@@ -8,8 +8,8 @@ use splot_decode::block_evidence::{
     EntropyCoding as NativeCoding, EntropySymbol as NativeSymbol,
 };
 use studio_domain::blocks::{
-    BlockTransformId, EntropyCdf, EntropyCoding, EntropyContext, EntropyEvidence, EntropyScope,
-    EntropySymbol, MICROBITS_PER_BIT,
+    BlockEvidenceKind, BlockTransformId, EntropyCdf, EntropyCoding, EntropyContext,
+    EntropyEvidence, EntropyScope, EntropySymbol, MICROBITS_PER_BIT,
 };
 
 use super::{Refusal, block_id, native_block, native_transform, transform_id, unsupported};
@@ -23,7 +23,15 @@ pub(super) fn native_scope(scope: EntropyScope) -> Result<BlockEntropyScope, Ref
     })
 }
 
-pub(super) fn wire_evidence(native: &BlockEntropyEvidence) -> Result<EntropyEvidence, Refusal> {
+pub(super) fn wire_evidence(
+    native: &BlockEntropyEvidence,
+    kind: BlockEvidenceKind,
+) -> Result<EntropyEvidence, Refusal> {
+    let BlockEvidenceKind::Entropy { start, .. } = kind else {
+        return Err(unsupported(
+            "The decoder returned entropy evidence for another query.",
+        ));
+    };
     let scope = match native.scope {
         BlockEntropyScope::Block(block) => EntropyScope::Block(block_id(block)?),
         BlockEntropyScope::Transform(transform) => {
@@ -40,6 +48,7 @@ pub(super) fn wire_evidence(native: &BlockEntropyEvidence) -> Result<EntropyEvid
         spec: ENTROPY_SPEC_VERSION.to_owned(),
         codec_revision: env!("SPLOT_CODEC_REVISION").to_owned(),
         scope,
+        start,
         tile_payload_bytes: native.tile_payload_bytes,
         end_ordinal: native.end_ordinal,
         symbols: native
