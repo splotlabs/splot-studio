@@ -67,10 +67,16 @@ fn stage_replay_distinguishes_reference_from_grain_at_exact_coordinates() -> Tes
         assert_eq!(stage.sample(3, 5), Some(sample));
     }
 
-    // The engine verifies the file again before it publishes a replay.
-    fs::write(&path, &GRAIN[..GRAIN.len() - 1])?;
-    let stale = inspect.ask(Command::AnalysisBlocks { document: 1, query })?;
-    assert_eq!(failure(&stale), Some(AnalysisFailure::SourceChanged));
+    match fs::write(&path, &GRAIN[..GRAIN.len() - 1]) {
+        // Windows refuses the write while the verified reader has the file open.
+        Err(error) if cfg!(windows) => assert_eq!(error.raw_os_error(), Some(32)), // ERROR_SHARING_VIOLATION
+        // The engine verifies the file again before it publishes a replay.
+        result => {
+            result?;
+            let stale = inspect.ask(Command::AnalysisBlocks { document: 1, query })?;
+            assert_eq!(failure(&stale), Some(AnalysisFailure::SourceChanged));
+        }
+    }
     Ok(())
 }
 
