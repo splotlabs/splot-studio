@@ -6,17 +6,21 @@ use std::fs;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use slint::language::ColorScheme::{Dark, Light};
 use slint::platform::Key;
 use slint::{ComponentHandle, Model};
-use studio_app::BlockOverlay;
 use studio_app::analysis::{BlockOverlayInput, Input};
 use studio_app::preview::{Dirty, Input as PreviewInput, StageState};
+use studio_app::{BlockOverlay, CoefficientView};
 use studio_domain::preview::{PictureBox, PictureView};
 
 use super::{Rig, Scratch};
 
 const RECTANGLE: &[u8] =
     include_bytes!("../../../studio-engine/tests/inspect/fixtures/syn-hrect-intra-64x64-q120.ivf");
+const EXACT: &[u8] = include_bytes!(
+    "../../../studio-engine/tests/inspect/fixtures/syn-2tile-zone1-edge-128x64-q192.ivf"
+);
 const CHROMA_TREE: &[u8] = include_bytes!(
     "../../../studio-engine/tests/inspect/fixtures/syn-lossless-sdp-nondc-chroma-v-intra-64x64-10bit.ivf"
 );
@@ -47,7 +51,7 @@ fn open(rig: &mut Rig, scratch: &Scratch, name: &str, bytes: &[u8]) {
     });
 }
 
-pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch) {
+pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch, clipboard: &RefCell<String>) {
     let actions = Rc::new(RefCell::new(Vec::new()));
     studio_app::bind_block_overlay(&rig.window, {
         let actions = actions.clone();
@@ -144,9 +148,136 @@ pub(super) fn inspect(rig: &mut Rig, scratch: &Scratch) {
     );
 
     zoom_and_pan(rig, &settle);
+    inspect_coefficients(rig, scratch, &settle, &actions, clipboard);
     inspect_edge(rig, scratch, &settle);
     inspect_chroma(rig, scratch, &settle);
     inspect_dense(rig, scratch, &settle);
+}
+
+fn inspect_coefficients(
+    rig: &mut Rig,
+    scratch: &Scratch,
+    settle: &impl Fn(&mut Rig, &str),
+    actions: &RefCell<Vec<BlockOverlayInput>>,
+    clipboard: &RefCell<String>,
+) {
+    open(rig, scratch, "tile coefficients.ivf", EXACT);
+    view(rig).invoke_choose(2);
+    settle(rig, "the transform overlay");
+    view(rig).invoke_pick(110, 20, 200, 100);
+    settle(rig, "the second tile transform");
+    assert!(!rig.window.global::<CoefficientView>().get_active());
+    rig.window.global::<CoefficientView>().invoke_read();
+    settle(rig, "exact coefficients");
+    let coefficients = rig.window.global::<CoefficientView>();
+    assert!(coefficients.get_active());
+    assert!(coefficients.get_geometry().contains("Y plane"));
+    assert_eq!(
+        coefficients.get_rows().row_data(0).map(|row| row.index),
+        Some(0)
+    );
+    let report: serde_json::Value = serde_json::from_str(&coefficients.get_report())
+        .unwrap_or_else(|error| unreachable!("{error}"));
+    assert_eq!(report["version"], 1);
+    assert_eq!(report["frame"]["coded_offset"], 60);
+    assert_eq!(report["scale"], 1);
+    assert_eq!(report["source_name"], "tile coefficients.ivf");
+    assert_eq!(report["source_digest"]["bytes"], EXACT.len() as u64);
+    assert_eq!(
+        report["source_digest"]["sha256"].as_str().map(str::len),
+        Some(64)
+    );
+    assert_eq!(
+        report["values"]["codec_revision"].as_str().map(str::len),
+        Some(40)
+    );
+    assert_eq!(report["transform"]["plane_tx_type"], "DCT_DCT");
+    assert_eq!(report["values"]["id"]["plane"], "y");
+    assert_eq!(report["values"]["id"]["block"]["tile"], 1);
+    assert_eq!(report["values"]["quantized"][0], -1);
+    assert_eq!(report["values"]["dequantized"][1], -3432);
+    assert_eq!(report["values"]["scan"][1], 32);
+    let first = coefficients
+        .get_rows()
+        .row_data(0)
+        .unwrap_or_else(|| unreachable!("no first coefficient"));
+    assert_eq!(first.quantized, "-1");
+    assert_eq!(first.dequantized, "-312");
+    assert_eq!(first.scan, "0");
+    navigate_coefficient_table(rig, settle, actions, clipboard);
+
+    rig.window.global::<CoefficientView>().invoke_read();
+    view(rig).invoke_choose_plane(2);
+    settle(rig, "change plane during coefficient capture");
+    assert!(!rig.window.global::<CoefficientView>().get_active());
+    assert!(
+        rig.window
+            .global::<CoefficientView>()
+            .get_report()
+            .is_empty()
+    );
+    view(rig).invoke_choose_plane(1);
+    settle(rig, "return to luma");
+    view(rig).invoke_pick(110, 20, 200, 100);
+    settle(rig, "return to transform selection");
+    assert!(!rig.window.global::<CoefficientView>().get_active());
+}
+
+fn navigate_coefficient_table(
+    rig: &mut Rig,
+    settle: &impl Fn(&mut Rig, &str),
+    actions: &RefCell<Vec<BlockOverlayInput>>,
+    clipboard: &RefCell<String>,
+) {
+    for _ in 0..50 {
+        rig.press(Key::Tab);
+        rig.press(Key::PageDown);
+        if actions
+            .borrow()
+            .iter()
+            .any(|action| matches!(action, BlockOverlayInput::MoveCoefficient(6)))
+        {
+            break;
+        }
+        actions.take();
+        rig.inputs.take();
+    }
+    assert!(
+        actions
+            .borrow()
+            .iter()
+            .any(|action| matches!(action, BlockOverlayInput::MoveCoefficient(6)))
+    );
+    settle(rig, "keyboard coefficient selection");
+    assert_eq!(
+        rig.window
+            .global::<CoefficientView>()
+            .get_rows()
+            .row_data(0)
+            .map(|row| (row.index, row.selected)),
+        Some((6, true))
+    );
+    rig.press(Key::Home);
+    settle(rig, "keyboard returns to DC");
+    assert_eq!(
+        rig.window.global::<CoefficientView>().get_position(),
+        "Coefficient 1 of 1024"
+    );
+    for (scheme, scale, name) in [
+        (Light, 1.0, "coefficients-keyboard-light-1x.ppm"),
+        (Dark, 2.0, "coefficients-keyboard-dark-2x.ppm"),
+        (Light, 2.0, "coefficients-keyboard-light-2x.ppm"),
+        (Dark, 1.0, "coefficients-keyboard-dark-1x.ppm"),
+    ] {
+        rig.snapshot(scheme, scale, name);
+    }
+    rig.press(Key::Backtab);
+    rig.press(Key::Backtab);
+    rig.press(Key::Return);
+    assert_eq!(
+        clipboard.borrow().as_str(),
+        rig.window.global::<CoefficientView>().get_report().as_str()
+    );
 }
 
 fn zoom_and_pan(rig: &mut Rig, settle: &impl Fn(&mut Rig, &str)) {

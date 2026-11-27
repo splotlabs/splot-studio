@@ -5,14 +5,15 @@
 
 use studio_domain::analysis::AnalysisFailure;
 use studio_domain::blocks::{
-    BlockCoverage, BlockData, BlockEvidence, BlockEvidenceKind, BlockFrame, BlockId, BlockMotion,
-    BlockPrediction, BlockQuery, BlockRecord, BlockRect, BlockTransformId, BlockTree,
-    MAX_BLOCK_BYTES, MAX_BLOCK_RECORDS,
+    BlockCoefficients, BlockCoverage, BlockData, BlockEvidence, BlockEvidenceKind, BlockFrame,
+    BlockId, BlockMotion, BlockPrediction, BlockQuery, BlockRecord, BlockRect,
+    BlockTransformDetails, BlockTransformId, BlockTree, MAX_BLOCK_BYTES, MAX_BLOCK_RECORDS,
 };
 use studio_domain::layers::LayerDecodeSelection;
 use studio_domain::preview::{SamplePlane, SampleRect};
 use studio_domain::protocol::Command;
 
+use super::coefficients::CoefficientCapture;
 use super::{Analysis, Asked, Effect};
 use crate::preview::{BlockPicture, HistoryView};
 
@@ -40,6 +41,12 @@ pub enum BlockOverlayInput {
         /// Painted height in physical pixels.
         height: i32,
     },
+    /// Capture exact values for the selected transform.
+    ReadCoefficients,
+    /// Select a coefficient in raster order.
+    SelectCoefficient(i32),
+    /// Move the coefficient selection by a signed step.
+    MoveCoefficient(i32),
     /// Cancel the current capture.
     Stop,
 }
@@ -112,6 +119,7 @@ enum Capture {
     View,
     Point(u32, u32, Option<HistoryView>),
     Details(BlockTransformId),
+    Coefficients(BlockTransformId),
     Motion(BlockId, u32, u32),
 }
 
@@ -125,6 +133,8 @@ pub(crate) struct Overlay {
     captured_document: Option<u64>,
     point: Option<Box<BlockEvidence>>,
     pub(crate) details: Option<Box<BlockEvidence>>,
+    coefficient_reply: Option<Box<CoefficientCapture>>,
+    pub(crate) coefficient_index: usize,
     pub(crate) selected: Option<History>,
     pending: Option<(u64, Capture)>,
     pub(crate) notice: Option<String>,
@@ -185,7 +195,9 @@ impl Overlay {
     pub(crate) fn selected_record(&self) -> Option<&BlockRecord> {
         let selected = self.selected?;
         if self.picture.is_none_or(|picture| {
-            picture.document != selected.document || !matches_picture(picture, selected.frame)
+            picture.document != selected.document
+                || picture.selection != selected.policy
+                || !matches_picture(picture, selected.frame)
         }) {
             return None;
         }
@@ -210,12 +222,57 @@ impl Overlay {
             })
     }
 
+    pub(crate) fn transform_selection(&self) -> Option<BlockTransformId> {
+        match self.selected_record()?.data {
+            BlockData::Transform { ref transform } => Some(transform.id),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn selected_transform_details(&self) -> Option<&BlockTransformDetails> {
+        let id = self.transform_selection()?;
+        let selected = self.selected?;
+        [
+            self.coefficient_reply
+                .as_ref()
+                .map(|capture| &capture.evidence),
+            self.details.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|reply| {
+            reply.frame == Some(selected.frame) && reply.query.selection == selected.policy
+        })
+        .filter_map(|reply| reply.records.first())
+        .find_map(|record| match &record.data {
+            BlockData::Transform { transform } if transform.id == id => transform.details.as_ref(),
+            _ => None,
+        })
+    }
+
+    pub(crate) fn coefficients(&self) -> Option<(&CoefficientCapture, &BlockCoefficients)> {
+        let selected = self.selected?;
+        let capture = self.coefficient_reply.as_deref()?;
+        let reply = &capture.evidence;
+        let values = reply.coefficients.as_deref()?;
+        (reply.frame == Some(selected.frame)
+            && reply.query.selection == selected.policy
+            && self.transform_selection() == Some(values.id))
+        .then_some((capture, values))
+    }
+
+    fn clear_coefficients(&mut self) {
+        self.coefficient_reply = None;
+        self.coefficient_index = 0;
+    }
+
     fn clear_picture(&mut self) {
         self.picture = None;
         self.viewport = None;
         self.captured_document = None;
         self.point = None;
         self.details = None;
+        self.clear_coefficients();
         self.notice = None;
     }
 
@@ -255,9 +312,12 @@ impl Analysis {
         self.dirty = true;
         if let Some(picture) = picture {
             if self.overlay.selected.is_some_and(|selected| {
-                picture.document != selected.document || !matches_picture(picture, selected.frame)
+                picture.document != selected.document
+                    || picture.selection != selected.policy
+                    || !matches_picture(picture, selected.frame)
             }) {
                 self.overlay.selected = None;
+                self.overlay.clear_coefficients();
             }
             let covered = self.overlay.captured_document == Some(picture.document)
                 && self.overlay.viewport.as_deref().is_some_and(|evidence| {
@@ -295,6 +355,8 @@ impl Analysis {
             {
                 self.request_overlay(Capture::Details(id), &mut out);
             }
+        } else {
+            self.overlay.clear_coefficients();
         }
         out
     }
@@ -318,6 +380,7 @@ impl Analysis {
                     self.overlay.mode = mode;
                     self.overlay.selected = None;
                     self.overlay.details = None;
+                    self.overlay.clear_coefficients();
                     self.overlay.notice = None;
                     if replace {
                         self.cancel_overlay(&mut out);
@@ -335,6 +398,7 @@ impl Analysis {
                 };
                 self.overlay.selected = None;
                 self.overlay.details = None;
+                self.overlay.clear_coefficients();
                 if self
                     .overlay
                     .pending
@@ -344,30 +408,7 @@ impl Analysis {
                 }
             }
             BlockOverlayInput::Tool(index) => self.overlay.tool = index.clamp(0, 3),
-            BlockOverlayInput::Pick { .. } => {
-                if self.overlay.picture == picture
-                    && let Some((x, y)) = point
-                {
-                    let selected = self.overlay.hit(x, y);
-                    let needs_point = self
-                        .overlay
-                        .viewport
-                        .as_deref()
-                        .is_none_or(|e| e.coverage != BlockCoverage::Complete)
-                        && selected.is_none_or(|key| matches!(key, Key::Partition(_)));
-                    if needs_point {
-                        self.overlay.selected = None;
-                        self.overlay.details = None;
-                        self.request_overlay(Capture::Point(x, y, view), &mut out);
-                    } else if let Some(key) = selected {
-                        self.select_overlay(key, (x, y), view, &mut out);
-                    } else {
-                        self.overlay.selected = None;
-                        self.overlay.details = None;
-                        self.overlay.notice = Some("No decoded region at this point.".to_owned());
-                    }
-                }
-            }
+            BlockOverlayInput::Pick { .. } => self.pick_overlay(picture, point, view, &mut out),
             BlockOverlayInput::Select(index) => {
                 if let Ok(index) = usize::try_from(index) {
                     self.select_overlay_index(index, view, &mut out);
@@ -387,6 +428,33 @@ impl Analysis {
                     self.select_overlay_index(index, view, &mut out);
                 }
             }
+            BlockOverlayInput::ReadCoefficients => {
+                if !self.overlay.busy()
+                    && let Some(id) = self.overlay.transform_selection()
+                {
+                    self.overlay.clear_coefficients();
+                    self.request_overlay(Capture::Coefficients(id), &mut out);
+                }
+            }
+            BlockOverlayInput::SelectCoefficient(index) => {
+                if let Ok(index) = usize::try_from(index)
+                    && self
+                        .overlay
+                        .coefficients()
+                        .is_some_and(|(_, values)| index < values.quantized.len())
+                {
+                    self.overlay.coefficient_index = index;
+                }
+            }
+            BlockOverlayInput::MoveCoefficient(step) => {
+                if let Some((_, values)) = self.overlay.coefficients() {
+                    self.overlay.coefficient_index = self
+                        .overlay
+                        .coefficient_index
+                        .saturating_add_signed(step as isize)
+                        .min(values.quantized.len() - 1);
+                }
+            }
             BlockOverlayInput::Stop => {
                 self.cancel_overlay(&mut out);
                 self.overlay.notice = Some("Block capture stopped.".to_owned());
@@ -394,6 +462,39 @@ impl Analysis {
         }
         self.dirty = true;
         out
+    }
+
+    fn pick_overlay(
+        &mut self,
+        picture: Option<BlockPicture>,
+        point: Option<(u32, u32)>,
+        view: Option<HistoryView>,
+        out: &mut Vec<Effect>,
+    ) {
+        if self.overlay.picture == picture
+            && let Some((x, y)) = point
+        {
+            let selected = self.overlay.hit(x, y);
+            let needs_point = self
+                .overlay
+                .viewport
+                .as_deref()
+                .is_none_or(|e| e.coverage != BlockCoverage::Complete)
+                && selected.is_none_or(|key| matches!(key, Key::Partition(_)));
+            if needs_point {
+                self.overlay.selected = None;
+                self.overlay.details = None;
+                self.overlay.clear_coefficients();
+                self.request_overlay(Capture::Point(x, y, view), out);
+            } else if let Some(key) = selected {
+                self.select_overlay(key, (x, y), view, out);
+            } else {
+                self.overlay.selected = None;
+                self.overlay.details = None;
+                self.overlay.clear_coefficients();
+                self.overlay.notice = Some("No decoded region at this point.".to_owned());
+            }
+        }
     }
 
     fn select_overlay_index(
@@ -457,6 +558,7 @@ impl Analysis {
         }
         self.overlay.notice = None;
         self.overlay.details = None;
+        self.overlay.clear_coefficients();
         self.request_selected_details(out);
     }
 
@@ -509,19 +611,19 @@ impl Analysis {
                 width: 1,
                 height: 1,
             }),
-            Capture::Details(_) => None,
+            Capture::Details(_) | Capture::Coefficients(_) => None,
         };
         let detail = match capture {
-            Capture::Details(id) => Some(id),
+            Capture::Details(id) | Capture::Coefficients(id) => Some(id),
             _ => None,
         };
         let query = BlockQuery {
             coded_offset,
             selection: picture.selection,
-            kind: if matches!(capture, Capture::Motion(..)) {
-                BlockEvidenceKind::Coding
-            } else {
-                self.overlay.mode.kind()
+            kind: match capture {
+                Capture::Motion(..) => BlockEvidenceKind::Coding,
+                Capture::Coefficients(_) => BlockEvidenceKind::Coefficients,
+                _ => self.overlay.mode.kind(),
             },
             region,
             detail,
@@ -618,6 +720,24 @@ impl Analysis {
                     .is_some_and(|s| s.key == Key::Transform(id))
                 {
                     self.overlay.details = Some(evidence);
+                }
+            }
+            Capture::Coefficients(id) => {
+                if self.overlay.transform_selection() == Some(id) {
+                    if evidence.coefficients.is_none() {
+                        self.overlay.notice = Some(match evidence.coverage {
+                            BlockCoverage::Truncated => "The capture reached its limit before it returned a coefficient grid.",
+                            BlockCoverage::Cancelled => "Coefficient capture stopped.",
+                            BlockCoverage::DecodeFailed => "The decoder failed during coefficient capture.",
+                            BlockCoverage::AllocationFailed => "The decoder could not allocate the coefficient grid.",
+                            _ => "No coefficient grid is available for this transform.",
+                        }.to_owned());
+                    }
+                    self.overlay.coefficient_reply = self
+                        .documents
+                        .get(self.shown)
+                        .and_then(|document| CoefficientCapture::new(evidence, document))
+                        .map(Box::new);
                 }
             }
             Capture::Motion(block, _, _) => {

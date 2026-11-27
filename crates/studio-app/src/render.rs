@@ -9,6 +9,7 @@ mod analysis;
 pub(crate) mod block_motion;
 mod block_overlay;
 pub(crate) mod blocks;
+mod coefficients;
 mod evidence;
 pub(crate) mod layers;
 mod references;

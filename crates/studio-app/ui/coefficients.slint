@@ -1,0 +1,200 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+import { Caption, LinkButton } from "controls.slint";
+import { FocusRing, KeyboardFocus } from "focus.slint";
+import { Tokens } from "tokens.slint";
+
+export struct CoefficientRow {
+    index: int,
+    x: string,
+    y: string,
+    scan: string,
+    quantized: string,
+    dequantized: string,
+    selected: bool,
+}
+
+export global CoefficientView {
+    in property <bool> has-transform;
+    in property <bool> can-read;
+    in property <bool> active;
+    in property <[CoefficientRow]> rows;
+    in property <int> count;
+    in property <string> position;
+    in property <string> geometry;
+    in property <string> quantizer;
+    in property <string> report;
+    in-out property <bool> exporting;
+    in-out property <string> export-status;
+    callback read();
+    callback select(int);
+    callback move(int);
+    callback save();
+}
+
+component CoefficientColumns inherits Rectangle {
+    in property <[string]> values;
+    property <length> column: (self.width - 2 * Tokens.space-2) / 9;
+
+    for value[i] in root.values: Caption {
+        x: Tokens.space-2 + root.column * (i <= 3 ? i : 6);
+        y: 0px;
+        width: root.column * (i < 3 ? 1 : 3);
+        height: parent.height;
+        text: value;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+}
+
+export component CoefficientsPane inherits VerticalLayout {
+    callback copy(string);
+    spacing: Tokens.space-2;
+
+    HorizontalLayout {
+        spacing: Tokens.space-3;
+        alignment: start;
+
+        LinkButton {
+            text: CoefficientView.active ? "Read Again" : "Read Coefficients";
+            description: "Decode the coefficient grid for the selected transform.";
+            enabled: CoefficientView.can-read;
+            clicked => { CoefficientView.read(); }
+        }
+
+        if CoefficientView.active: LinkButton {
+            text: "Copy Coefficients";
+            description: "Copy exact values and decoder metadata as JSON.";
+            enabled: CoefficientView.report != "";
+            clicked => { root.copy(CoefficientView.report); }
+        }
+
+        if CoefficientView.active: LinkButton {
+            text: "Save Coefficients…";
+            description: "Save exact values and decoder metadata as JSON.";
+            enabled: CoefficientView.report != "" && !CoefficientView.exporting;
+            clicked => { CoefficientView.save(); }
+        }
+
+        if CoefficientView.export-status != "": Caption {
+            horizontal-stretch: 1;
+            text: CoefficientView.export-status;
+            wrap: word-wrap;
+            accessible-live-region: polite;
+        }
+    }
+
+    if CoefficientView.active: VerticalLayout {
+        spacing: Tokens.space-1;
+
+        Caption {
+            text: CoefficientView.geometry;
+            wrap: word-wrap;
+            accessible-live-region: polite;
+        }
+
+        Caption {
+            text: CoefficientView.quantizer;
+            wrap: word-wrap;
+        }
+
+        Caption {
+            text: "X/Y start at the top left. Scan is zero-based. Values are signed integers at scale 1.";
+            wrap: word-wrap;
+        }
+
+        Caption {
+            text: "Quantized values are decoded levels. Dequantized values precede inverse transforms. Matrix weights and primary transform signaling provenance are unavailable.";
+            wrap: word-wrap;
+        }
+
+        CoefficientColumns {
+            height: 24px;
+            values: ["X", "Y", "Scan", "Quantized", "Dequantized"];
+        }
+
+        table := KeyboardFocus {
+            height: CoefficientView.rows.length * 24px;
+            accessible-role: list;
+            accessible-label: "Exact transform coefficients";
+            accessible-description: "Use Up or Down to select a coefficient. Use Page Up or Page Down to move by a page.";
+            key-pressed(event) => {
+                let step = event.text == Key.UpArrow ? -1 : event.text == Key.DownArrow ? 1
+                    : event.text == Key.PageUp ? -6 : event.text == Key.PageDown ? 6
+                    : event.text == Key.Home ? -1024 : event.text == Key.End ? 1024 : 0;
+                if step == 0 { return reject; }
+                table.keyboard-used();
+                CoefficientView.move(step);
+                accept
+            }
+
+            FocusRing {
+                shown: table.ring;
+                x: -3px;
+                y: -3px;
+                width: table.width + 6px;
+                height: table.height + 6px;
+                radius: Tokens.radius-small;
+            }
+
+            for row[i] in CoefficientView.rows: Rectangle {
+                y: i * 24px;
+                width: parent.width;
+                height: 24px;
+                background: row.selected ? Tokens.row-selected : hit.has-hover ? Tokens.row-hover : Tokens.surface;
+                accessible-role: list-item;
+                accessible-label: "X " + row.x + ", Y " + row.y + ", scan " + row.scan
+                    + ", quantized " + row.quantized + ", dequantized " + row.dequantized;
+                accessible-item-selectable: true;
+                accessible-item-selected: row.selected;
+                accessible-item-index: row.index;
+                accessible-item-count: CoefficientView.count;
+                accessible-action-default => { CoefficientView.select(row.index); }
+
+                hit := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        table.focus();
+                        CoefficientView.select(row.index);
+                    }
+                }
+
+                if row.selected: Rectangle {
+                    x: 0px;
+                    width: 3px;
+                    height: parent.height;
+                    background: Tokens.accent;
+                    accessible-role: none;
+                }
+
+                CoefficientColumns {
+                    values: [row.x, row.y, row.scan, row.quantized, row.dequantized];
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: Tokens.space-3;
+            alignment: start;
+            LinkButton {
+                text: "Previous";
+                description: "Select the previous coefficient page.";
+                enabled: CoefficientView.rows.length > 0 && CoefficientView.rows[0].index > 0;
+                clicked => { CoefficientView.move(-6); }
+            }
+            LinkButton {
+                text: "Next";
+                description: "Select the next coefficient page.";
+                enabled: CoefficientView.rows.length > 0
+                    && CoefficientView.rows[CoefficientView.rows.length - 1].index + 1 < CoefficientView.count;
+                clicked => { CoefficientView.move(6); }
+            }
+            Caption {
+                text: CoefficientView.position;
+                vertical-alignment: center;
+                accessible-live-region: polite;
+            }
+        }
+    }
+}

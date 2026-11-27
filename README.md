@@ -125,6 +125,12 @@ codec is young.
   the picture or the list to inspect its geometry and decoder facts. Use the
   overlay plane control to distinguish overlapping luma and chroma trees.
   If a capture reaches its limit, zoom in or select a point to read more.
+- Choose the **Transforms** overlay and select a transform. Select **Read
+  Coefficients** to capture the selected plane and transform. The table shows
+  signed quantized levels and dequantized values before inverse transforms.
+  Use the arrow keys to inspect values, or use **Copy Coefficients** and
+  **Save Coefficients…** for an exact, versioned JSON report. The report
+  identifies the coded frame, block, component basis, grid and scan order.
 - Select a coding block to inspect its prediction and motion. Studio shows
   signaled vector differences and resolved base vectors in eighths of a luma
   sample. **Show motion** displays available vectors and outlines.

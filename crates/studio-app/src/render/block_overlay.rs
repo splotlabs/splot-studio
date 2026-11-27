@@ -206,14 +206,7 @@ fn picked(overlay: &Overlay) -> String {
 }
 
 fn append_transform_details(text: &mut String, overlay: &Overlay) {
-    let detail = overlay
-        .details
-        .as_ref()
-        .and_then(|reply| reply.records.first())
-        .and_then(|record| match &record.data {
-            BlockData::Transform { transform } => transform.details.as_ref(),
-            _ => None,
-        });
+    let detail = overlay.selected_transform_details();
     if let Some(detail) = detail {
         let coefficients = if detail.has_coefficients {
             "Present"
@@ -232,7 +225,7 @@ fn append_transform_details(text: &mut String, overlay: &Overlay) {
         };
         let _ = write!(
             text,
-            "\nPlaneTxType {transform_type} · Coefficients {coefficients} · {segment}"
+            "\nResolved PlaneTxType {transform_type} · Coefficients {coefficients} · {segment}"
         );
     } else if overlay.busy() {
         text.push_str("\nReading transform details…");

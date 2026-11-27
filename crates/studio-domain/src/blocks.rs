@@ -10,11 +10,13 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use self::coefficients::*;
 pub use self::prediction::*;
 use crate::identity::DecodeLayers;
 use crate::layers::LayerDecodeSelection;
 use crate::preview::SamplePlane;
 
+mod coefficients;
 mod prediction;
 
 /// Most records in one result. The result fits one control message.
@@ -34,6 +36,8 @@ pub enum BlockEvidenceKind {
     Coding,
     /// Transform geometry, or details for one selected transform.
     Transforms,
+    /// Coefficient arrays for exactly one requested transform.
+    Coefficients,
 }
 
 /// A rectangle in the coded frame's luma coordinate system.
@@ -101,9 +105,13 @@ impl BlockQuery {
         (1..=MAX_BLOCK_RECORDS).contains(&self.max_events)
             && (1..=MAX_BLOCK_BYTES).contains(&self.max_bytes)
             && self.region.is_none_or(BlockRect::is_valid)
+            && (self.kind != BlockEvidenceKind::Coefficients
+                || (self.detail.is_some() && self.region.is_none() && self.max_events == 1))
             && self.detail.is_none_or(|id| {
-                self.kind == BlockEvidenceKind::Transforms
-                    && id.block.coded.is_valid()
+                matches!(
+                    self.kind,
+                    BlockEvidenceKind::Transforms | BlockEvidenceKind::Coefficients
+                ) && id.block.coded.is_valid()
                     && id.coded.is_valid()
             })
     }
@@ -254,6 +262,9 @@ pub struct BlockEvidence {
     pub replayed_through: u64,
     /// Decoder records, including any requested transform geometry.
     pub records: Vec<BlockRecord>,
+    /// Exact coefficient evidence, only for a coefficient query.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coefficients: Option<Box<BlockCoefficients>>,
 }
 
 impl BlockEvidence {
@@ -278,6 +289,18 @@ impl BlockEvidence {
                 }
                 _ => true,
             }
+            && self.coefficients.as_ref().is_none_or(|coefficients| {
+                query.kind == BlockEvidenceKind::Coefficients
+                    && self.coverage == BlockCoverage::Complete
+                    && query.detail == Some(coefficients.id)
+                    && self.frame.is_some()
+                    && matches!(self.records.as_slice(), [BlockRecord {
+                        data: BlockData::Transform { transform }, ..
+                    }] if transform.details.as_ref().is_some_and(|details| {
+                        details.has_coefficients == (coefficients.eob != 0)
+                    }))
+                    && coefficients.is_valid()
+            })
             && self.records.iter().all(|record| record.matches(query))
     }
 }
@@ -319,8 +342,10 @@ impl BlockRecord {
                     ) && motion.is_valid()
                 }
                 BlockData::Transform { transform } => {
-                    query.kind == BlockEvidenceKind::Transforms
-                        && self.id == transform.id.block
+                    matches!(
+                        query.kind,
+                        BlockEvidenceKind::Transforms | BlockEvidenceKind::Coefficients
+                    ) && self.id == transform.id.block
                         && transform.id.coded.is_valid()
                         && match (query.detail, &transform.details) {
                             (None, None) => true,
@@ -415,6 +440,7 @@ mod tests {
             coverage: BlockCoverage::Truncated,
             replayed_through: u64::MAX,
             records: vec![record; MAX_BLOCK_RECORDS as usize],
+            coefficients: None,
         };
         assert!(evidence.matches(query));
         let mut malformed = evidence.clone();
@@ -448,6 +474,125 @@ mod tests {
         assert!(matches!(
             read_message::<Event>(&mut wire.as_slice())?,
             Some(Envelope { body: Event::AnalysisBlocksReady { document: u64::MAX, evidence: actual }, .. })
+                if *actual == evidence
+        ));
+        Ok(())
+    }
+
+    fn full_coefficient_grid() -> BlockEvidence {
+        let rect = BlockRect {
+            x: 0,
+            y: 0,
+            width: 32,
+            height: 32,
+        };
+        let block = BlockId {
+            tile: 0,
+            tree: BlockTree::Shared,
+            coded: rect,
+        };
+        let id = BlockTransformId {
+            block,
+            plane: SamplePlane::Y,
+            coded: rect,
+        };
+        let query = BlockQuery {
+            kind: BlockEvidenceKind::Coefficients,
+            detail: Some(id),
+            max_events: 1,
+            ..query()
+        };
+        BlockEvidence {
+            query,
+            frame: Some(BlockFrame {
+                coded_offset: query.coded_offset,
+                sequence_offset: 0,
+                layers: DecodeLayers {
+                    extended: 0,
+                    embedded: 0,
+                    temporal: 0,
+                },
+            }),
+            coverage: BlockCoverage::Complete,
+            replayed_through: u64::MAX,
+            records: vec![BlockRecord {
+                id: block,
+                parent: Some(block),
+                visible: Some(rect),
+                data: BlockData::Transform {
+                    transform: BlockTransform {
+                        id,
+                        luma_coded: rect,
+                        details: Some(BlockTransformDetails {
+                            has_coefficients: true,
+                            plane_tx_type: Some("DCT_DCT".into()),
+                            lossless: false,
+                        }),
+                    },
+                },
+            }],
+            coefficients: Some(Box::new(BlockCoefficients {
+                id,
+                codec_revision: "a".repeat(40),
+                width: 32,
+                height: 32,
+                domain: BlockCoefficientDomain::Plane,
+                quantized: vec![i32::MIN; 1024],
+                dequantized: vec![i32::MAX; 1024],
+                scan: Some((0..1024).rev().collect()),
+                eob: 1024,
+                use_tcq: false,
+                forward_scan: false,
+                dc_parity_hidden: false,
+                quantization: Some(BlockCoefficientQuantization {
+                    qindex: 255,
+                    dc_quant: 8000,
+                    ac_quant: 8000,
+                    denominator: 4,
+                    bit_depth: 10,
+                    matrix: None,
+                }),
+                secondary: None,
+            })),
+        }
+    }
+
+    #[test]
+    fn largest_coefficient_result_fits_one_frame_and_round_trips() -> Result<(), ProtocolError> {
+        let evidence = full_coefficient_grid();
+        let query = evidence.query;
+        let id = query
+            .detail
+            .unwrap_or_else(|| unreachable!("missing transform selection"));
+        assert!(evidence.matches(query));
+        let wrong_selection = BlockQuery {
+            detail: Some(BlockTransformId {
+                plane: SamplePlane::U,
+                ..id
+            }),
+            ..query
+        };
+        assert!(!evidence.matches(wrong_selection));
+        let mut duplicate_scan = evidence.clone();
+        let Some(capture) = duplicate_scan.coefficients.as_deref_mut() else {
+            unreachable!("missing capture")
+        };
+        capture.scan = Some(vec![0; 1024]);
+        assert!(!duplicate_scan.matches(query));
+        let mut wire = Vec::new();
+        write_message(
+            &mut wire,
+            &Envelope::new(
+                1,
+                Event::AnalysisBlocksReady {
+                    document: 1,
+                    evidence: Box::new(evidence.clone()),
+                },
+            ),
+        )?;
+        assert!(matches!(
+            read_message::<Event>(&mut wire.as_slice())?,
+            Some(Envelope { body: Event::AnalysisBlocksReady { document: 1, evidence: actual }, .. })
                 if *actual == evidence
         ));
         Ok(())

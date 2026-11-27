@@ -46,6 +46,7 @@ pub struct Controller {
     advanced: RefCell<advanced::Editor>,
     advanced_settle: Timer,
     preset_files: presets::PresetFiles,
+    report_writers: Rc<timeline::ReportWriters>,
     batch_files: batch::BatchFiles,
     export_draft: RefCell<Option<crate::export_setup::Draft>>,
     /// The window was not minimized when last looked at.
@@ -155,6 +156,7 @@ impl Controller {
             advanced: RefCell::default(),
             advanced_settle: Timer::default(),
             preset_files: presets::PresetFiles::default(),
+            report_writers: Rc::default(),
             batch_files: batch::BatchFiles::default(),
             export_draft: RefCell::default(),
             visible: Cell::new(true),
@@ -236,7 +238,7 @@ impl Controller {
         ctl.wire_presets(window);
         ctl.wire_preview(window);
         ctl.wire_analysis(window);
-        timeline::bind(window);
+        timeline::bind(window, &ctl.report_writers);
         ctl.wire_batch(window);
         ctl.wire_export(window);
 
@@ -749,6 +751,7 @@ impl Controller {
         self.cancel_deadline.stop();
         self.resize_settle.stop();
         self.session.borrow_mut().shutdown();
+        self.report_writers.finish();
     }
 }
 
