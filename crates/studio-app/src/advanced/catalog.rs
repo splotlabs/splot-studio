@@ -82,6 +82,7 @@ pub(crate) fn classification(descriptor: &OptionDescriptor) -> Option<Classifica
         "resize_denominator" => Class::named(OUTPUT, "Output resize", false),
         "multi_frame_header" => Class::named(OUTPUT, "Multi-frame header", true),
         "key_frame_metadata" => Class::named(OUTPUT, "Keyframe metadata payloads", true),
+        "frame_metadata" => Class::named(OUTPUT, "Per-frame metadata", true),
         "width" => Class::named(SOURCE, "Source width", false),
         "height" => Class::named(SOURCE, "Source height", false),
         "bit_depth" => Class::named(SOURCE, "Source bit depth", false),
@@ -280,9 +281,11 @@ mod tests {
         assert_eq!(group(&depth), SOURCE);
         assert!(!expert(&depth));
 
-        let payload = descriptor("key_frame_metadata", "Encoder", ValueShape::ReadOnly);
-        assert_eq!(group(&payload), OUTPUT);
-        assert!(expert(&payload));
+        for key in ["key_frame_metadata", "frame_metadata"] {
+            let payload = descriptor(key, "Encoder", ValueShape::ReadOnly);
+            assert_eq!(group(&payload), OUTPUT, "{key}");
+            assert!(expert(&payload), "{key}");
+        }
     }
 
     #[test]
