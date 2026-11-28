@@ -24,6 +24,7 @@ use thiserror::Error;
 
 use crate::analysis::{AnalysisFailure, DocumentSummary, Framing, LocateTarget, Row, RowFilter};
 use crate::blocks::{BlockEvidence, BlockQuery};
+use crate::compare::{DescribeInput, SideFacts};
 use crate::export::{
     ExportArtifact, ExportOutcome, ExportProgress, ExportRequest, ExportStage, ExportTemp,
 };
@@ -44,7 +45,7 @@ use crate::validation::{
 };
 
 /// The protocol version this build speaks. Bump on any incompatible change.
-pub const PROTOCOL_VERSION: u32 = 27;
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// The largest accepted message body. Control messages are small.
 pub const MAX_MESSAGE_BYTES: u32 = 64 * 1024;
@@ -566,6 +567,15 @@ pub enum Command {
         /// The request ID that identifies the report.
         validation: u64,
     },
+    /// Inspect process only. Reads one side of a comparison: a source is
+    /// probed again and checked against its fingerprint, a stream is decoded
+    /// once from its first byte to its last. Answered by
+    /// [`Event::CompareDescribed`] or [`Event::CompareFailed`]. Closing the
+    /// input stops the read.
+    CompareDescribe {
+        /// The file and the selected track or layers.
+        input: DescribeInput,
+    },
     /// Inspect process only. Closes a document. Answered by
     /// [`Event::AnalysisClosed`] or [`Event::AnalysisFailed`].
     AnalysisClose {
@@ -969,6 +979,20 @@ pub enum Event {
     BatchForgotten {
         /// The request ID of the report the worker removed.
         validation: u64,
+    },
+    /// Answers [`Command::CompareDescribe`].
+    CompareDescribed {
+        /// The full Git revision of Splot in this engine.
+        codec_revision: String,
+        /// What the engine read.
+        facts: Box<SideFacts>,
+    },
+    /// A [`Command::CompareDescribe`] has no answer.
+    CompareFailed {
+        /// The machine-readable reason.
+        code: AnalysisFailure,
+        /// A human-readable explanation.
+        message: String,
     },
     /// Answers [`Command::AnalysisClose`].
     AnalysisClosed {

@@ -19,7 +19,7 @@ use crate::queue::{Ending, Item};
 /// One job, in words.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Line {
-    /// "Convert", "First pass", or "Inspect".
+    /// "Convert", "First pass", "Inspect" and so on.
     pub kind: &'static str,
     /// The file's name.
     pub name: String,
@@ -50,6 +50,10 @@ pub fn line(job: &Job<'_>) -> Line {
         ),
         Work::Inspect(_, doc) => ("Inspect", file_name(doc.path()), read(doc, job.state), None),
         Work::Validate(file) => ("Validate", file_name(&file.path), validation(file), None),
+        Work::Compare(status) => {
+            let (name, detail) = super::compare::job(status);
+            ("Compare", name, detail, None)
+        }
         Work::Export(file) => (
             match file.request.format {
                 ExportFormat::Y4m { .. } => "Export Y4M",
@@ -128,7 +132,7 @@ pub fn entry(jobs: &[Job<'_>]) -> (String, String) {
         format!("Jobs · {active}")
     };
     let description = format!(
-        "{active} running or queued, {ended} ended. Opens encode, inspect, validation and export jobs."
+        "{active} running or queued, {ended} ended. Opens encode, inspect, validation, export and compare jobs."
     );
     (label, description)
 }

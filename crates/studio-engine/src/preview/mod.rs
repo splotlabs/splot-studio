@@ -54,6 +54,7 @@ use studio_domain::protocol::{
     write_picture,
 };
 
+pub(crate) use self::document::picture_info;
 use self::document::{DocumentPicture, Recent};
 use crate::job::{JOB_STACK_BYTES, Stop};
 use crate::media::process::Killer;

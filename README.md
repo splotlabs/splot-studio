@@ -51,6 +51,17 @@ codec is young.
   and filters, and the workspace are restored at the next start, after each file is checked
   again: a file that changed or is missing is said so, and nothing about it is shown until
   you read it again or locate it.
+- The Compare workspace pairs two inputs. On a converted file, **Compare with Source**
+  pairs the result with the source that its job read. Studio checks the size and
+  modification time of the source, and the size and picture count of the result. It does
+  not hash the source. You can also choose two AV2 files. Studio decodes each stream once. It then
+  shows whether sample values can be compared without a conversion, how the pictures of
+  the two sides align, and which recorded encoder settings differ. Studio does not crop,
+  scale, change bit depth or convert colour. Pictures align by the frame order of the
+  encode job or by exact timestamps. When neither is available, you enter an index
+  offset, and Studio shows it as your assumption. Settings come from the encode jobs
+  in the list. Studio does not infer settings or a source from a stream. The pair and
+  its policy are restored at the next start, after Studio reads both files again.
 - You can inspect indexed rows, syntax, and bytes while Studio reads the rest of the
   file. Jobs shows the scan and lets you cancel it. If a seek reaches the end of
   the verified prefix, wait for more data and repeat the seek.
@@ -72,7 +83,8 @@ codec is young.
   policy treats errors as failures. Strict policy also treats warnings as failures and
   preserves their warning severity. You can supply local Annex B sequence headers and
   operating point sets for streams that require external context.
-- Jobs lists conversions, stream reads, validations, and decoded exports. Stop Validation
+- Jobs lists conversions, stream reads, validations, decoded exports, and the read of a
+  comparison. Stop Validation
   Batch stops the current file and cancels files still waiting. Completed reports stay available until you
   remove them or close Studio. The session holds at most 32 validation jobs.
 - In Analyze, play a supported AV2 document, step through decoded pictures, or seek to
@@ -187,8 +199,9 @@ rotation or cropping, RGB or alpha, encrypted streams, network and playlist inpu
 
 **What it does not do yet**
 
-- Compare, and more of Analyze. The approved direction is one AV2 workbench with three
-  workspaces (Encode, Analyze and Compare) and shared Jobs; see the
+- Synchronized pictures, difference views and quality metrics in Compare, and more of
+  Analyze. The approved direction is one AV2 workbench with three workspaces (Encode,
+  Analyze and Compare) and shared Jobs; see the
   [roadmap](https://github.com/splotlabs/splot-studio/issues/33).
 - Audio, subtitles and chapters are not carried over; the app lists what a file would lose
   and asks before converting. Container output with audio is planned in

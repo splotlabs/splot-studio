@@ -981,7 +981,7 @@ fn corrupt_storage(rig: &mut Rig, lifecycle: &Scratch) {
         serde_json::from_slice(&text).unwrap_or_else(|e| unreachable!("{e}"));
     let files = journal["items"].as_array().map_or(0, Vec::len);
     assert!(files > 0);
-    journal["view"]["workspace"] = "compare".into();
+    journal["view"]["workspace"] = "decode".into();
     let written = serde_json::to_vec(&journal).unwrap_or_default();
     fs::write(scratch.journal(), &written).unwrap_or_else(|e| unreachable!("{e}"));
     rig.start(&scratch);

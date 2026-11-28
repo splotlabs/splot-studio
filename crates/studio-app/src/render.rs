@@ -10,6 +10,7 @@ pub(crate) mod block_motion;
 mod block_overlay;
 pub(crate) mod blocks;
 mod coefficients;
+mod compare;
 pub(crate) mod entropy;
 mod evidence;
 pub(crate) mod layers;
@@ -39,6 +40,7 @@ use crate::ui::{
 use crate::workspace::Workspace;
 
 pub use analysis::render_analysis;
+pub use compare::render_compare;
 
 /// How many files the confirmation names before "and N more files".
 const SHEET_FILES: usize = 5;
@@ -49,8 +51,9 @@ const SHEET_FILES: usize = 5;
 pub fn render(window: &AppWindow, state: &AppState, now: Instant) {
     let workspace = state.workspace();
     window.set_workspace(match workspace {
+        Workspace::Encode => WorkspaceView::Encode,
         Workspace::Analyze => WorkspaceView::Analyze,
-        Workspace::Encode | Workspace::Compare => WorkspaceView::Encode,
+        Workspace::Compare => WorkspaceView::Compare,
     });
     window.set_workspace_title(workspace.label().into());
     window.set_workspace_index(
@@ -61,6 +64,7 @@ pub fn render(window: &AppWindow, state: &AppState, now: Instant) {
             .unwrap_or(0),
     );
     window.set_can_analyze_result(state.analyzable().is_some());
+    window.set_can_compare_result(state.can_compare());
     let mode = state.mode();
     window.set_view_mode(match mode {
         Mode::Empty => ViewMode::Empty,

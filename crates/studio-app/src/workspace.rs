@@ -7,9 +7,8 @@
 //! workspace; changing it never touches the queue, the global settings or
 //! the immutable `JobSpec` a converting item took, and it is not journalled.
 //!
-//! Encode and Analyze exist. Compare is an approved direction, not a
-//! feature: it is known here so the shell can refuse it, and the window
-//! offers no way to reach it until its flow lands.
+//! Encode converts, Analyze inspects one stream, and Compare pairs a
+//! source with its result, or two results.
 
 /// A task area of the window. Jobs is shared by all of them, so it is not
 /// one.
@@ -20,7 +19,8 @@ pub enum Workspace {
     Encode,
     /// Read-only inspection of AV2 streams: OBUs, properties and bytes.
     Analyze,
-    /// Source against result, or result against result. Not built.
+    /// A pair of inputs: the source of an encode against its result, or one
+    /// result against another, with their compatibility and alignment.
     Compare,
 }
 
@@ -35,14 +35,8 @@ impl Workspace {
         }
     }
 
-    /// The workspace has a working flow in this build and may be shown.
-    #[must_use]
-    pub const fn available(self) -> bool {
-        matches!(self, Self::Encode | Self::Analyze)
-    }
-
-    /// The workspaces the switch offers, in its order: the available ones.
-    pub const OFFERED: [Self; 2] = [Self::Encode, Self::Analyze];
+    /// The workspaces the switch offers, in its order.
+    pub const OFFERED: [Self; 3] = [Self::Encode, Self::Analyze, Self::Compare];
 
     /// The workspace at `index` of [`Self::OFFERED`].
     #[must_use]

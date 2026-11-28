@@ -32,6 +32,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use studio_domain::compare::{EncodeProvenance, StreamInput};
 use studio_domain::job::{Failure, FailureCode, JobSpec, Omissions, SourceFacts};
 use studio_domain::options::{EffectiveOption, OptionRequest, OptionValue};
 use studio_domain::protocol::Capabilities;
@@ -45,6 +46,33 @@ use crate::source::{ProbeFailure, ProbeRequest, TrackPicker};
 use crate::workspace::Workspace;
 
 use self::options::OptionHistory;
+
+/// The report of a completed encode. A first pass publishes no stream.
+fn encode_report(item: &Item) -> Option<&studio_domain::job::JobReport> {
+    let attempt = item
+        .attempt()
+        .filter(|_| item.state == ItemState::Completed)?;
+    match item.ending() {
+        Some(crate::queue::Ending::Completed(report))
+            if attempt.job.purpose == studio_domain::job::JobPurpose::Encode =>
+        {
+            Some(report)
+        }
+        _ => None,
+    }
+}
+
+/// The stream a completed encode published, with what its job recorded.
+fn published(item: &Item) -> Option<StreamInput> {
+    let report = encode_report(item)?;
+    let attempt = item.attempt()?;
+    let encode = EncodeProvenance::of(&attempt.job, report, &attempt.policy)?;
+    Some(StreamInput {
+        path: report.destination.clone(),
+        selection: studio_domain::layers::LayerDecodeSelection::Default,
+        encode: Some(Box::new(encode)),
+    })
+}
 
 /// `splot_encode::Config::DEFAULT_CRF` at the pinned codec revision.
 const CODEC_DEFAULT_CRF: u8 = 20;
@@ -128,7 +156,7 @@ pub enum Intent {
     RedoOptions,
     /// Clear the one file to start over (Convert Another).
     ResetRequested,
-    /// Show another workspace. Refused while it has no flow in this build.
+    /// Show another workspace.
     WorkspaceRequested(Workspace),
     /// The startup handshake finished: what the engine can do, or why it
     /// cannot be used.
@@ -488,9 +516,7 @@ impl AppState {
             state.items = recovered.items;
             state.next_id = recovered.next_id;
             state.settings = recovered.settings;
-            if recovered.view.workspace.available() {
-                state.workspace = recovered.view.workspace;
-            }
+            state.workspace = recovered.view.workspace;
             state.restored_view = recovered.view;
             state.restored_exports = recovered.exports;
         }
@@ -609,11 +635,7 @@ impl AppState {
                     self.remove(self.items[0].id);
                 }
             }
-            Intent::WorkspaceRequested(workspace) => {
-                if workspace.available() {
-                    self.workspace = workspace;
-                }
-            }
+            Intent::WorkspaceRequested(workspace) => self.workspace = workspace,
             Intent::EngineAnswered(answer) => self.engine = Some(answer),
             Intent::ConvertRequested if self.related.is_none() => self.convert(disk),
             Intent::ConvertRequested | Intent::WorkerIdle => {}
@@ -809,6 +831,32 @@ impl AppState {
             }),
             _ => None,
         }
+    }
+
+    /// The shown file's converted result with the job that published it,
+    /// as Compare pairs it with the source of that job.
+    #[must_use]
+    pub fn comparable(&self) -> Option<StreamInput> {
+        self.selected().and_then(published)
+    }
+
+    /// Whether [`Self::comparable`] has a result, without a copy of its job.
+    #[must_use]
+    pub fn can_compare(&self) -> bool {
+        self.selected().and_then(encode_report).is_some()
+    }
+
+    /// The published stream at `path` with its encode job, when a completed
+    /// file of the list names that path.
+    #[must_use]
+    pub fn published(&self, path: &std::path::Path) -> Option<StreamInput> {
+        let path = studio_domain::job::WirePath::from_path(path);
+        // The newest job for a path: an older result of that name was removed.
+        self.items
+            .iter()
+            .rev()
+            .find(|item| encode_report(item).is_some_and(|report| report.destination == path))
+            .and_then(published)
     }
 
     /// The converting item, if any.

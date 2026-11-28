@@ -1,0 +1,323 @@
+// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+// SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
+
+// The Compare workspace: the two sides of one comparison, whether their
+// sample values can be compared, how their pictures align and which
+// settings differ. Rust owns every value and string. This view shows no
+// picture and computes no number.
+
+import { CheckBox, ComboBox, SpinBox } from "std-widgets.slint";
+import { Caption, Label, LinkButton, SectionTitle } from "controls.slint";
+import { Tokens } from "tokens.slint";
+
+export enum CompareState { empty, reading, ready, failed }
+
+// One side: the file name, what is known about it, one fact per line, and
+// the values that must stay exact (the digest and the path).
+export struct CompareSide {
+    name: string,
+    lines: [string],
+    exact: [string],
+}
+
+// One option that the two encode jobs did not set alike.
+export struct CompareSetting {
+    key: string,
+    a: string,
+    b: string,
+    difference: string,
+}
+
+export global Comparison {
+    in property <CompareState> state;
+    // The reading and failed states, and the empty state's guidance.
+    in property <string> message;
+    // A change the user must know about that did not stop the comparison.
+    in property <string> notice;
+    in property <CompareSide> a;
+    in property <CompareSide> b;
+
+    in property <string> verdict;
+    in property <bool> verdict-problem;
+    in property <[string]> verdict-details;
+
+    in property <[string]> basis-labels;
+    in-out property <int> basis-index;
+    in property <bool> offset-shown;
+    in-out property <int> offset;
+    in property <int> offset-limit;
+    in property <string> alignment;
+    in property <bool> alignment-problem;
+    in property <[string]> segments;
+    in-out property <bool> grain;
+
+    in property <string> settings-status;
+    in property <[CompareSetting]> settings;
+    // All of the above as plain text.
+    in property <string> summary;
+
+    callback pick(int);
+    callback choose-basis(int);
+    callback edit-offset(int);
+    callback set-grain(bool);
+    callback close();
+}
+
+component SideCard inherits Rectangle {
+    in property <string> title;
+    in property <CompareSide> side;
+    in property <bool> busy;
+    callback pick();
+
+    border-radius: Tokens.radius-medium;
+    background: Tokens.track;
+    border-width: 1px;
+    border-color: Tokens.border;
+    accessible-role: groupbox;
+    accessible-label: root.title + ": " + root.side.name;
+
+    VerticalLayout {
+        alignment: start;
+        padding: Tokens.space-3;
+        spacing: Tokens.space-1;
+
+        HorizontalLayout {
+            spacing: Tokens.space-2;
+
+            SectionTitle {
+                text: root.title;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+
+            LinkButton {
+                min-height: 0;
+                quiet: true;
+                text: "Choose File…";
+                description: "Choose the AV2 file of " + root.title;
+                enabled: !root.busy;
+                clicked => {
+                    root.pick();
+                }
+            }
+        }
+
+        Label {
+            text: root.side.name;
+            overflow: elide;
+        }
+
+        for line in root.side.lines: Caption {
+            text: line;
+        }
+
+        for value in root.side.exact: Caption {
+            text: value;
+            wrap: char-wrap;
+        }
+    }
+}
+
+// The cells of one row of the settings table. The header row uses them too.
+component SettingCells inherits HorizontalLayout {
+    in property <CompareSetting> setting;
+    in property <bool> header;
+
+    spacing: Tokens.space-2;
+
+    for cell[i] in [root.setting.key, root.setting.a, root.setting.b, root.setting.difference]: Caption {
+        width: i == 0 ? 28% : i == 3 ? 24% : 22%;
+        text: cell;
+        color: root.header || i == 0 ? Tokens.text : Tokens.text-secondary;
+        font-weight: root.header ? Tokens.weight-semibold : Tokens.weight-regular;
+        // A value is never cut: a long one takes more lines.
+        wrap: i == 0 ? char-wrap : word-wrap;
+        accessible-role: none;
+    }
+}
+
+component SettingRow inherits SettingCells {
+    accessible-role: list-item;
+    accessible-label: root.setting.key + ". Side A: " + root.setting.a + ". Side B: " + root.setting.b + ". " + root.setting.difference;
+}
+
+component Section inherits VerticalLayout {
+    in property <string> title;
+    in property <string> status;
+    in property <bool> problem;
+
+    spacing: Tokens.space-1;
+
+    SectionTitle {
+        text: root.title;
+    }
+
+    Text {
+        text: root.status;
+        color: root.problem ? Tokens.error : Tokens.text;
+        font-size: Tokens.type-body * 1rem;
+        wrap: word-wrap;
+        accessible-role: text;
+        accessible-label: root.title + ": " + root.status;
+        accessible-live-region: polite;
+    }
+
+    @children
+}
+
+export component CompareView inherits VerticalLayout {
+    property <length> full-width: 716px;
+    property <length> side-width: (root.full-width - Tokens.space-3) / 2;
+    property <bool> busy: Comparison.state == CompareState.reading;
+
+    // The window copies `text` to the clipboard.
+    callback copy(string);
+
+    min-width: root.full-width;
+    preferred-width: root.full-width;
+    max-width: root.full-width;
+    alignment: start;
+    spacing: Tokens.space-3;
+    accessible-role: main;
+    accessible-label: "Compare";
+
+    HorizontalLayout {
+        spacing: Tokens.space-3;
+
+        SideCard {
+            title: "Side A";
+            side: Comparison.a;
+            busy: root.busy;
+            width: root.side-width;
+            pick => {
+                Comparison.pick(0);
+            }
+        }
+
+        SideCard {
+            title: "Side B";
+            side: Comparison.b;
+            busy: root.busy;
+            width: root.side-width;
+            pick => {
+                Comparison.pick(1);
+            }
+        }
+    }
+
+    if Comparison.message != "": Text {
+        text: Comparison.message;
+        color: Comparison.state == CompareState.failed ? Tokens.error : Tokens.text-secondary;
+        font-size: Tokens.type-body * 1rem;
+        wrap: word-wrap;
+        accessible-role: text;
+        accessible-live-region: polite;
+    }
+
+    if Comparison.notice != "": Text {
+        text: Comparison.notice;
+        color: Tokens.warning;
+        font-size: Tokens.type-caption * 1rem;
+        wrap: word-wrap;
+        accessible-role: text;
+        accessible-live-region: polite;
+    }
+
+    if Comparison.state == CompareState.ready: Section {
+        title: "Sample comparison";
+        status: Comparison.verdict;
+        problem: Comparison.verdict-problem;
+
+        for detail in Comparison.verdict-details: Caption {
+            text: detail;
+        }
+
+        CheckBox {
+            text: "Apply film grain";
+            accessible-description: "Compare the pictures with the film grain that the stream signals. Clear it to compare the pictures before grain.";
+            checked <=> Comparison.grain;
+            toggled => {
+                Comparison.set-grain(self.checked);
+            }
+        }
+    }
+
+    if Comparison.state == CompareState.ready: Section {
+        title: "Alignment";
+        status: Comparison.alignment;
+        problem: Comparison.alignment-problem;
+
+        HorizontalLayout {
+            alignment: start;
+            spacing: Tokens.space-3;
+
+            ComboBox {
+                width: 260px;
+                model: Comparison.basis-labels;
+                current-index <=> Comparison.basis-index;
+                accessible-label: "Alignment basis";
+                selected => {
+                    Comparison.choose-basis(self.current-index);
+                }
+            }
+
+            if Comparison.offset-shown: SpinBox {
+                width: 140px;
+                minimum: -Comparison.offset-limit;
+                maximum: Comparison.offset-limit;
+                value <=> Comparison.offset;
+                accessible-label: "Index offset from side A to side B";
+                edited(value) => {
+                    Comparison.edit-offset(value);
+                }
+            }
+        }
+
+        for segment in Comparison.segments: Caption {
+            text: segment;
+        }
+    }
+
+    if Comparison.state == CompareState.ready: Section {
+        title: "Settings";
+        status: Comparison.settings-status;
+
+        if Comparison.settings.length > 0: SettingCells {
+            header: true;
+            setting: { key: "Option", a: "Side A", b: "Side B", difference: "Difference" };
+        }
+
+        // Every row is in the layout: the card scrolls, and a screen reader
+        // reaches each row. Copy Summary gives the same rows as text.
+        if Comparison.settings.length > 0: VerticalLayout {
+            spacing: Tokens.space-1;
+            accessible-role: list;
+            accessible-label: "Settings that differ";
+
+            for row in Comparison.settings: SettingRow {
+                setting: row;
+            }
+        }
+    }
+
+    if Comparison.state != CompareState.empty: HorizontalLayout {
+        alignment: start;
+        spacing: Tokens.space-4;
+
+        if Comparison.state == CompareState.ready: LinkButton {
+            text: "Copy Summary";
+            description: "Copy the inputs, the compatibility, the alignment and the setting differences as text";
+            clicked => {
+                root.copy(Comparison.summary);
+            }
+        }
+
+        LinkButton {
+            text: Comparison.state == CompareState.reading ? "Stop" : "Close Comparison";
+            description: "Close this comparison. The files and jobs stay as they are.";
+            clicked => {
+                Comparison.close();
+            }
+        }
+    }
+}

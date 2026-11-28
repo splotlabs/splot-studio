@@ -22,6 +22,7 @@ use studio_domain::job::{JobSpec, SourceFingerprint, WirePath};
 use studio_domain::options::OptionRequest;
 
 use crate::analysis::Saved;
+use crate::compare::SavedComparison;
 use crate::journal::{self, Journal, JournalItem, JournalState, JournalView};
 use crate::queue::{Attempt, Cause, Destination, Ending, Item, ItemId, ItemState, PartialFate};
 use crate::source::ProbeFailure;
@@ -199,6 +200,9 @@ pub struct RestoredView {
     /// The view did not parse and nothing of it was restored; a copy of
     /// the journal as it was is here.
     pub unreadable: Option<PathBuf>,
+    /// The comparison Compare showed. A comparison with a path from another
+    /// kind of system is not restored.
+    pub comparison: Option<SavedComparison>,
 }
 
 /// The model's values of a journalled view.
@@ -221,6 +225,7 @@ pub fn view(dto: &JournalView) -> RestoredView {
         documents: kept.into_iter().map(|(_, saved)| saved).collect(),
         shown,
         unreadable: None,
+        comparison: dto.comparison.clone().filter(SavedComparison::is_native),
     }
 }
 
@@ -841,6 +846,8 @@ mod tests {
     fn the_view_comes_back_as_documents_to_read_again() {
         use crate::analysis::Origin;
         use crate::journal::{JournalDocument, JournalOrigin, JournalWorkspace};
+        use studio_domain::compare::{ComparisonSetup, Reference, StreamInput};
+        use studio_domain::layers::LayerDecodeSelection;
         let mut j = journal(JournalState::Waiting);
         #[cfg(not(windows))]
         let foreign = WirePath::Windows(vec![0xD800]);
@@ -862,7 +869,7 @@ mod tests {
                     WirePath::from_path(&abs("/out/clip.ivf")),
                     JournalOrigin::Result {
                         item: 1,
-                        source: foreign,
+                        source: foreign.clone(),
                         bytes: 9,
                     },
                 ),
@@ -875,8 +882,33 @@ mod tests {
                     },
                 ),
             ],
+            comparison: None,
         };
+        let comparison = |a: WirePath| SavedComparison {
+            setup: ComparisonSetup::new(
+                Reference::Stream(StreamInput {
+                    path: a,
+                    selection: LayerDecodeSelection::Default,
+                    encode: None,
+                }),
+                StreamInput {
+                    path: WirePath::from_path(&abs("/out/clip.ivf")),
+                    selection: LayerDecodeSelection::Default,
+                    encode: None,
+                },
+            ),
+            identity: None,
+        };
+        // A comparison is restored as where to read its files again.
+        let native = comparison(WirePath::from_path(&abs("/out/other.obu")));
+        j.view.comparison = Some(native.clone());
+        assert_eq!(
+            recover(j.clone(), &FakeDisk::default()).view.comparison,
+            Some(native)
+        );
+        j.view.comparison = Some(comparison(foreign));
         let view = recover(j, &FakeDisk::default()).view;
+        assert_eq!(view.comparison, None);
         assert_eq!(view.workspace, Workspace::Analyze);
         assert_eq!(view.shown, 1);
         // A path from the other platform family, in the file or its origin.

@@ -15,6 +15,7 @@
 
 pub mod analysis;
 pub mod blocks;
+pub mod compare;
 pub mod export;
 pub mod identity;
 pub mod job;

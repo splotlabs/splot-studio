@@ -324,6 +324,8 @@ impl Activity {
             | Event::ExportFinished { .. }
             | Event::AnalysisLayersReady { .. }
             | Event::AnalysisLayerPage { .. }
+            | Event::CompareDescribed { .. }
+            | Event::CompareFailed { .. }
             | Event::AnalysisFailed { .. } => Step::IGNORED,
         }
     }

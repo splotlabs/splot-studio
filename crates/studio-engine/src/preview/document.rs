@@ -23,6 +23,76 @@ pub(super) struct DocumentPicture {
     pub time: Option<MediaTime>,
 }
 
+/// Geometry and signaled presentation metadata of one decoder output.
+pub(crate) fn picture_info(picture: &Picture) -> Option<DocumentPictureInfo> {
+    let coded = match picture.decoded_frame()? {
+        PictureFrame::Eight(frame) => frame.coded_luma_size(),
+        PictureFrame::Ten(frame) => frame.coded_luma_size(),
+    };
+    let bit_depth = match picture.bit_depth() {
+        BitDepth::Eight => 8,
+        BitDepth::Ten => 10,
+    };
+    let chroma = match picture.pixel_format() {
+        PixelFormat::Monochrome => ChromaLayout::Monochrome,
+        PixelFormat::Yuv420 => ChromaLayout::Yuv420,
+        PixelFormat::Yuv422 => ChromaLayout::Yuv422,
+        PixelFormat::Yuv444 => ChromaLayout::Yuv444,
+    };
+    let content = picture.content_interpretation();
+    let color = content
+        .and_then(|content| content.color_description)
+        .map(|color| {
+            let color = color.derived();
+            PictureColor {
+                primaries: color.code_points.color_primaries,
+                transfer: color.code_points.transfer_characteristics,
+                matrix: color.code_points.matrix_coefficients,
+                full_range: color.full_range,
+            }
+        });
+    let chroma_position = content
+        .and_then(|content| content.chroma_sample_position)
+        .map(|p| PictureChromaPosition {
+            top: p.top,
+            bottom: p.bottom,
+        });
+    let y = rect(picture, PlaneId::Y)?;
+    let (u, v) = if chroma == ChromaLayout::Monochrome {
+        (None, None)
+    } else {
+        (
+            Some(rect(picture, PlaneId::U)?),
+            Some(rect(picture, PlaneId::V)?),
+        )
+    };
+    Some(DocumentPictureInfo {
+        bit_depth,
+        chroma,
+        coded_width: u32::try_from(coded.width()).ok()?,
+        coded_height: u32::try_from(coded.height()).ok()?,
+        y,
+        u,
+        v,
+        color,
+        chroma_position,
+        film_grain: picture.has_film_grain(),
+    })
+}
+
+fn rect(picture: &Picture, plane: PlaneId) -> Option<SampleRect> {
+    let rect = match picture.plane(plane)? {
+        PictureSamples::Eight(plane) => plane.visible_rect(),
+        PictureSamples::Ten(plane) => plane.visible_rect(),
+    };
+    Some(SampleRect {
+        x: u32::try_from(rect.x()).ok()?,
+        y: u32::try_from(rect.y()).ok()?,
+        width: u32::try_from(rect.width()).ok()?,
+        height: u32::try_from(rect.height()).ok()?,
+    })
+}
+
 impl DocumentPicture {
     pub fn matrix(&self) -> Outcome<Option<ColorMatrix>> {
         let Some(color) = self
@@ -53,69 +123,7 @@ impl DocumentPicture {
     }
 
     pub fn info(&self) -> Option<DocumentPictureInfo> {
-        let coded = match self.picture.decoded_frame()? {
-            PictureFrame::Eight(frame) => frame.coded_luma_size(),
-            PictureFrame::Ten(frame) => frame.coded_luma_size(),
-        };
-        let bit_depth = match self.picture.bit_depth() {
-            BitDepth::Eight => 8,
-            BitDepth::Ten => 10,
-        };
-        let chroma = match self.picture.pixel_format() {
-            PixelFormat::Monochrome => ChromaLayout::Monochrome,
-            PixelFormat::Yuv420 => ChromaLayout::Yuv420,
-            PixelFormat::Yuv422 => ChromaLayout::Yuv422,
-            PixelFormat::Yuv444 => ChromaLayout::Yuv444,
-        };
-        let content = self.picture.content_interpretation();
-        let color = content
-            .and_then(|content| content.color_description)
-            .map(|color| {
-                let color = color.derived();
-                PictureColor {
-                    primaries: color.code_points.color_primaries,
-                    transfer: color.code_points.transfer_characteristics,
-                    matrix: color.code_points.matrix_coefficients,
-                    full_range: color.full_range,
-                }
-            });
-        let chroma_position = content
-            .and_then(|content| content.chroma_sample_position)
-            .map(|p| PictureChromaPosition {
-                top: p.top,
-                bottom: p.bottom,
-            });
-        let y = self.rect(PlaneId::Y)?;
-        let (u, v) = if chroma == ChromaLayout::Monochrome {
-            (None, None)
-        } else {
-            (Some(self.rect(PlaneId::U)?), Some(self.rect(PlaneId::V)?))
-        };
-        Some(DocumentPictureInfo {
-            bit_depth,
-            chroma,
-            coded_width: u32::try_from(coded.width()).ok()?,
-            coded_height: u32::try_from(coded.height()).ok()?,
-            y,
-            u,
-            v,
-            color,
-            chroma_position,
-            film_grain: self.picture.has_film_grain(),
-        })
-    }
-
-    fn rect(&self, plane: PlaneId) -> Option<SampleRect> {
-        let rect = match self.picture.plane(plane)? {
-            PictureSamples::Eight(plane) => plane.visible_rect(),
-            PictureSamples::Ten(plane) => plane.visible_rect(),
-        };
-        Some(SampleRect {
-            x: u32::try_from(rect.x()).ok()?,
-            y: u32::try_from(rect.y()).ok()?,
-            width: u32::try_from(rect.width()).ok()?,
-            height: u32::try_from(rect.height()).ok()?,
-        })
+        picture_info(&self.picture)
     }
 
     pub fn sample(&self, point: SamplePoint) -> Outcome<u16> {

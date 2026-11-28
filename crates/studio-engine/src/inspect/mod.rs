@@ -15,6 +15,7 @@
 
 mod batch;
 mod blocks;
+mod compare;
 pub mod document;
 mod identity;
 mod layers;
@@ -37,6 +38,7 @@ use studio_domain::analysis::{
     AnalysisFailure, LocateTarget, RowFilter, ScanOutcome, SourceDigest,
 };
 use studio_domain::blocks::{BlockEvidence, BlockQuery};
+use studio_domain::compare::DescribeInput;
 use studio_domain::identity::IdentityKind;
 use studio_domain::job::WirePath;
 use studio_domain::layers::LayerDecodeSelection;
@@ -117,6 +119,7 @@ enum Request {
     ReaderStopped,
     Inspect(Query),
     Batch(batch::Request),
+    Compare(DescribeInput),
     Close,
     ClearCache,
 }
@@ -693,6 +696,14 @@ fn route<W: Write>(shared: &Shared<W>, requests: &SyncSender<Queued>, id: u64, c
                 EvidenceRequest::References(query),
             );
         }
+        Command::CompareDescribe { input } => {
+            if requests.try_send((id, 0, Request::Compare(input))).is_err() {
+                shared.send(
+                    id,
+                    refusal(ErrorCode::Busy, "The inspection queue is full."),
+                );
+            }
+        }
         command => queue_query(shared, requests, id, &command),
     }
 }
@@ -1027,6 +1038,8 @@ impl<W: Write + Send> Scheduler<'_, '_, W> {
                 self.batch.work(shared, id, request);
                 return;
             }
+            // Only the end of the input stops this read.
+            Request::Compare(input) => compare::describe(&input, &|| shared.stopped()),
             Request::Open {
                 source,
                 progressive,

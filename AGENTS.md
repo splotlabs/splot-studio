@@ -31,8 +31,11 @@ No browser target.
 Approved direction (owner, November 2026; roadmap #33): one application with
 three task workspaces, Encode, Analyze and Compare, and shared Jobs. Encode
 and shared Jobs are available. Read-only Analyze shows envelope and header
-facts, bytes, observed syntax and validation findings. Show Compare and deeper
-Analyze features only when their workflows are available.
+facts, bytes, observed syntax and validation findings. Compare pairs a result
+with the verified source of its encode job, or two AV2 streams. It shows
+sample-domain compatibility, output alignment and recorded setting differences.
+Show Compare pictures, metrics and deeper Analyze features only when their
+workflows are available.
 Keep Analyze read-only. Preserve the source bitstream.
 Splot owns AV2 parsing, validation, and codec instrumentation.
 
