@@ -43,6 +43,7 @@ use crate::workspace::Workspace;
 
 mod advanced;
 mod batch;
+mod compare;
 mod export;
 mod preflight;
 mod related;
@@ -71,6 +72,8 @@ pub enum Route {
     Inspect(u64),
     /// The batch validation process, by spawn number.
     Batch(u64),
+    /// The process that reads a comparison, by spawn number.
+    Compare(u64),
     /// The export worker for this job ID.
     Export(u64),
     /// The confirmed journal write for this export job.
@@ -87,6 +90,9 @@ pub enum UiEffect {
     ShowOpenDialog,
     /// Show the native Open dialog, to open AV2 streams in Analyze.
     ShowAnalyzeDialog,
+    /// Show the native Open dialog for one AV2 file of a comparison. Answer
+    /// with [`Session::compare_picked`].
+    ShowCompareDialog,
     /// Show the native Open dialog for one file: where the shown missing
     /// document is now. Answer with [`Session::locate_picked`].
     ShowLocateDialog,
@@ -123,10 +129,12 @@ pub struct Outcome {
     pub analysis: bool,
     /// The Advanced editor needs to redraw.
     pub advanced: bool,
+    /// The Compare workspace changed.
+    pub compare: bool,
 }
 
 impl Outcome {
-    const fn nothing() -> Self {
+    pub(crate) const fn nothing() -> Self {
         Self {
             ui: Vec::new(),
             changed: Changed::Nothing,
@@ -137,6 +145,7 @@ impl Outcome {
             },
             analysis: false,
             advanced: false,
+            compare: false,
         }
     }
 
@@ -149,6 +158,7 @@ impl Outcome {
         self.preview.thumbs |= other.preview.thumbs;
         self.analysis |= other.analysis;
         self.advanced |= other.advanced;
+        self.compare |= other.compare;
     }
 }
 
@@ -179,6 +189,12 @@ pub struct Session {
     export_notice: Option<String>,
     batch_worker: Option<(u64, Worker)>,
     batch_workers_started: u64,
+    compare: crate::compare::Compare,
+    /// The inspect process that reads a comparison, with its spawn number.
+    compare_worker: Option<(u64, Worker)>,
+    compare_workers_started: u64,
+    /// The Compare Open dialog is showing for this side.
+    compare_dialog: Option<studio_domain::compare::Side>,
     /// The inspect process, started on first need, with its spawn number.
     inspector: Option<(u64, Worker)>,
     inspectors_started: u64,
@@ -216,7 +232,8 @@ impl Session {
         journal: Option<Writer>,
         inspect_data_dir: Option<PathBuf>,
     ) -> Self {
-        let view = state.take_restored_view();
+        let mut view = state.take_restored_view();
+        let comparison = view.comparison.take();
         let exports = state.take_restored_exports();
         let mut session = Self {
             state,
@@ -242,6 +259,10 @@ impl Session {
             export_notice: None,
             batch_worker: None,
             batch_workers_started: 0,
+            compare: crate::compare::Compare::restored(comparison),
+            compare_worker: None,
+            compare_workers_started: 0,
+            compare_dialog: None,
             inspector: None,
             inspectors_started: 0,
             inspect_data_dir,
@@ -281,12 +302,13 @@ impl Session {
     }
 
     /// Reads the shown document if it is not read yet, once Analyze is
-    /// shown.
+    /// shown, and a restored comparison once Compare is shown.
     fn read_if_shown(&mut self) {
         if self.state.workspace() == Workspace::Analyze {
             let effects = self.analysis.read_shown(&RealDisk);
             self.send_inspect(effects);
         }
+        self.read_compare_if_shown();
     }
 
     /// Whether an inspect process runs, for tests of its lifecycle.
@@ -421,6 +443,7 @@ impl Session {
         if self.state.workspace() != workspace {
             self.read_if_shown();
             outcome.analysis |= self.analysis.take_dirty();
+            outcome.compare |= self.compare.take_dirty();
         }
         if outcome.changed == Changed::Phase || self.state.workspace() != workspace {
             self.sync_preview();
@@ -436,6 +459,13 @@ impl Session {
         let scene = if self.state.workspace() == Workspace::Encode {
             self.playback_document = None;
             preview::scene(&self.state)
+        } else if self.state.workspace() == Workspace::Compare {
+            // Compare shows no picture.
+            self.playback_document = None;
+            preview::Scene {
+                stage: None,
+                thumbs: Vec::new(),
+            }
         } else {
             let stage = self
                 .analysis
@@ -607,12 +637,13 @@ impl Session {
         }
     }
 
-    /// Every job of both workspaces; see [`jobs::list`].
+    /// Every job of the workspaces; see [`jobs::list`].
     #[must_use]
     pub fn jobs(&self) -> Vec<jobs::Job<'_>> {
         let mut jobs = jobs::list(&self.state, &self.analysis);
         jobs.extend(self.batch.files.iter().map(jobs::validation));
         jobs.extend(self.exports.rows().iter().map(jobs::export));
+        jobs.extend(jobs::comparison(&self.compare));
         jobs
     }
 
@@ -632,6 +663,9 @@ impl Session {
                     outcome.ui.push(UiEffect::Reveal(path));
                 }
                 return outcome;
+            }
+            Some(Work::Compare(_)) => {
+                return self.dispatch(Intent::WorkspaceRequested(Workspace::Compare), now);
             }
             Some(Work::Convert(item)) => Some((Workspace::Encode, self.index_of_item(item.id()))),
             Some(Work::Inspect(at, _)) => Some((Workspace::Analyze, Some(at))),
@@ -668,6 +702,7 @@ impl Session {
             }
             Some(Work::Validate(file)) => self.cancel_batch_file(file.id, now),
             Some(Work::Export(job)) => self.cancel_export_file(job.id, now),
+            Some(Work::Compare(_)) => self.compare_input(crate::compare::Input::Close, now),
             None => Outcome::nothing(),
         }
     }
@@ -857,6 +892,7 @@ impl Session {
             Route::Preview(spawn) => self.deliver_preview(spawn, delivery),
             Route::Inspect(spawn) => self.deliver_inspect(spawn, delivery),
             Route::Batch(spawn) => self.deliver_batch(spawn, delivery, now),
+            Route::Compare(spawn) => self.deliver_compare(spawn, delivery),
             Route::Export(id) => self.deliver_export(id, delivery, now),
             Route::ExportSaved(id) => self.export_saved(id, delivery, now),
         }
@@ -1144,7 +1180,10 @@ impl Session {
     /// The view record of the workspace and the Analyze documents.
     fn view(&self) -> JournalView {
         let (saved, shown) = self.analysis.saved();
-        journal::view(self.state.workspace(), &saved, shown)
+        JournalView {
+            comparison: self.compare.saved(),
+            ..journal::view(self.state.workspace(), &saved, shown)
+        }
     }
 
     /// Submits the journal when the documents or the workspace changed.
@@ -1223,6 +1262,7 @@ impl Session {
             self.previewer.take().map(|(_, w)| w),
             self.inspector.take().map(|(_, w)| w),
             self.batch_worker.take().map(|(_, w)| w),
+            self.compare_worker.take().map(|(_, w)| w),
             self.take_export_worker(),
         ];
         for worker in workers.into_iter().flatten() {

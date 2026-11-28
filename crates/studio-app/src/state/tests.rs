@@ -1559,29 +1559,64 @@ fn the_selected_row_falls_back_to_what_can_be_edited() {
 // The workspace shell.
 
 #[test]
-fn a_workspace_switch_never_touches_the_queue_and_compare_is_refused() {
+fn a_workspace_switch_never_touches_the_queue() {
     let mut app = App::new();
     app.add(&["/m/a.y4m", "/m/b.y4m"], ready);
     convert(&mut app);
     assert_eq!(app.state.workspace(), Workspace::Encode);
     let before = app.state.clone();
-    let update = app.apply(Intent::WorkspaceRequested(Workspace::Compare));
-    assert_eq!(update.effects, []);
-    assert_eq!(app.state, before, "Compare has no flow yet");
-
-    let update = app.apply(Intent::WorkspaceRequested(Workspace::Analyze));
-    assert_eq!(update.effects, []);
-    assert_eq!(app.state.workspace(), Workspace::Analyze);
-    // Only the workspace changed: the running file, queue and settings
-    // are the same values.
-    assert_eq!(app.state.items(), before.items());
-    assert_eq!(app.state.settings(), before.settings());
-    assert_eq!(
-        app.state.active().map(Item::id),
-        before.active().map(Item::id)
-    );
+    for workspace in [Workspace::Analyze, Workspace::Compare] {
+        let update = app.apply(Intent::WorkspaceRequested(workspace));
+        assert_eq!(update.effects, []);
+        assert_eq!(app.state.workspace(), workspace);
+        // Only the workspace changed: the running file, queue and settings
+        // are the same values.
+        assert_eq!(app.state.items(), before.items());
+        assert_eq!(app.state.settings(), before.settings());
+        assert_eq!(
+            app.state.active().map(Item::id),
+            before.active().map(Item::id)
+        );
+    }
     app.apply(Intent::WorkspaceRequested(Workspace::Encode));
     assert_eq!(app.state, before);
+}
+
+/// Compare takes a converted file with what its job recorded. A file that
+/// only waits, converts or failed has no published stream.
+#[test]
+fn a_completed_encode_is_comparable_with_its_recorded_job() {
+    let mut app = App::new();
+    app.add(&["/m/a.y4m", "/m/b.y4m"], ready);
+    let (a, job) = convert(&mut app);
+    app.apply(Intent::RowSelected(0));
+    assert_eq!(app.state.comparable(), None, "still converting");
+    assert_eq!(app.state.published(&abs("/m/a.ivf")), None);
+    app.complete(a);
+    app.apply(Intent::RowSelected(0));
+    let before = app.state.clone();
+    let result = app.state.comparable();
+    let encode = result.as_ref().and_then(|input| input.encode.as_deref());
+    assert_eq!(
+        result.as_ref().map(|input| &input.path),
+        Some(&job.destination)
+    );
+    assert_eq!(
+        encode.map(|e| (&e.source.path, e.source.fingerprint, e.frames, e.bytes)),
+        Some((&job.source, job.fingerprint, 3, 100))
+    );
+    assert_eq!(encode.map(|e| &e.requested), Some(&job.settings));
+    // The same file, picked by its path, keeps the job. Another path has none.
+    assert_eq!(app.state.published(&abs("/m/a.ivf")), result);
+    assert_eq!(app.state.published(&abs("/m/b.ivf")), None);
+    // Asking changes nothing: the job stays as it was recorded.
+    assert_eq!(app.state, before);
+    app.apply(Intent::RowSelected(1));
+    assert_eq!(
+        app.state.comparable(),
+        None,
+        "the other file did not convert"
+    );
 }
 
 /// Opening files to convert shows Encode, from any workspace.
@@ -1606,7 +1641,7 @@ fn jobs_list_each_conversion_with_its_own_state() {
             .iter()
             .map(|job| match job.work {
                 Work::Convert(item) => (item.source().to_path_buf(), job.state),
-                Work::Inspect(..) | Work::Validate(_) | Work::Export(_) => {
+                Work::Inspect(..) | Work::Validate(_) | Work::Export(_) | Work::Compare(_) => {
                     unreachable!("only conversion jobs")
                 }
             })

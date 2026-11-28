@@ -9,6 +9,8 @@ mod batch;
 #[path = "inspect/blocks.rs"]
 mod blocks;
 mod common;
+#[path = "inspect/compare.rs"]
+mod compare;
 #[path = "inspect/layers.rs"]
 mod layers;
 #[path = "inspect/stages.rs"]

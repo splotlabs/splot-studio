@@ -522,7 +522,10 @@ fn timeline_quantizer(native: Option<BaseQuantizer>) -> TimelineQuantizer {
     }
 }
 
-fn multiple_temporal_units(unit: &TemporalUnit<'_>, cancelled: &dyn Fn() -> bool) -> bool {
+pub(super) fn multiple_temporal_units(
+    unit: &TemporalUnit<'_>,
+    cancelled: &dyn Fn() -> bool,
+) -> bool {
     let mut cursor = AnnexBObuCursor::new(unit.bytes, unit.offset);
     let mut delimiter = false;
     while !cancelled() {

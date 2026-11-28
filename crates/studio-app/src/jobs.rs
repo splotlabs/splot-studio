@@ -12,7 +12,8 @@
 //! the current run. Inspections are the documents' reads: the engine reads
 //! one file at a time, in the order asked, so of several pending reads the
 //! first runs and the others are queued. Unread, missing and changed
-//! documents have no read the engine holds, so no job.
+//! documents have no read the engine holds, so no job. The read of the two
+//! sides of a comparison is one job.
 
 use studio_domain::analysis::{AnalysisFailure, ProblemKind, ScanOutcome};
 use studio_domain::job::JobPurpose;
@@ -70,6 +71,8 @@ pub enum Work<'a> {
     Validate(&'a ValidationFile),
     /// An export from Analyze.
     Export(&'a ExportJob),
+    /// The read of the two sides of the comparison.
+    Compare(crate::compare::Status<'a>),
 }
 
 /// One job.
@@ -121,7 +124,7 @@ impl Job<'_> {
         match self.work {
             Work::Validate(file) => file.can_open_report(),
             Work::Export(file) => file.reveal_path().is_some(),
-            Work::Convert(_) | Work::Inspect(..) => true,
+            Work::Convert(_) | Work::Inspect(..) | Work::Compare(_) => true,
         }
     }
 
@@ -143,7 +146,7 @@ impl Job<'_> {
         match self.work {
             // Cancel stops the converting file; a queued one is removed in
             // Encode instead.
-            Work::Convert(_) => matches!(self.state, State::Running),
+            Work::Convert(_) | Work::Compare(_) => matches!(self.state, State::Running),
             Work::Export(file) => matches!(
                 file.phase,
                 ExportPhase::Queued
@@ -187,6 +190,22 @@ pub fn list<'a>(state: &'a AppState, analysis: &'a Analysis) -> Vec<Job<'a>> {
             })
         });
     conversions.chain(reads).collect()
+}
+
+/// The read of the comparison. A pair that is not read yet has no job.
+pub(crate) fn comparison(compare: &crate::compare::Compare) -> Option<Job<'_>> {
+    use crate::compare::Status;
+    let status = compare.status();
+    let state = match status {
+        Status::Reading(_) if compare.reading() => State::Running,
+        Status::Ready(_) => State::Completed,
+        Status::Failed { .. } => State::Failed,
+        Status::Empty(_) | Status::Reading(_) => return None,
+    };
+    Some(Job {
+        state,
+        work: Work::Compare(status),
+    })
 }
 
 pub(crate) fn validation(file: &ValidationFile) -> Job<'_> {

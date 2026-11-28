@@ -161,7 +161,7 @@ pub(crate) fn reset(
     next
 }
 
-fn display(value: &OptionValue) -> String {
+pub(crate) fn display(value: &OptionValue) -> String {
     match value {
         OptionValue::None => "None".into(),
         OptionValue::Bool(true) => "On".into(),

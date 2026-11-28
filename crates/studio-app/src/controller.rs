@@ -8,6 +8,7 @@
 
 mod advanced;
 mod batch;
+mod compare;
 mod export;
 mod presets;
 mod timeline;
@@ -26,7 +27,9 @@ use studio_domain::settings::OutputKind;
 use crate::activity::{self, Changed};
 use crate::engine::{Delivery, EngineStatus};
 use crate::preview::{Dirty, Input};
-use crate::render::{render, render_analysis, render_counters, render_jobs, render_preview};
+use crate::render::{
+    render, render_analysis, render_compare, render_counters, render_jobs, render_preview,
+};
 use crate::session::{Outcome, Post, Route, Session, UiEffect};
 use crate::state::{Intent, RelatedAction};
 use crate::ui::{AppWindow, JobAction};
@@ -162,20 +165,7 @@ impl Controller {
             visible: Cell::new(true),
         });
         CONTROLLER.with(|c| *c.borrow_mut() = Rc::downgrade(&ctl));
-        render(window, ctl.session.borrow().state(), Instant::now());
-        render_analysis(window, ctl.session.borrow().analysis());
-        render_jobs(window, &ctl.session.borrow().jobs());
-        let all = Dirty {
-            picture: true,
-            view: true,
-            thumbs: true,
-        };
-        render_preview(
-            window,
-            ctl.session.borrow().state(),
-            ctl.session.borrow().preview(),
-            all,
-        );
+        ctl.draw(window);
 
         let on = |intent: fn(i32) -> Intent| {
             let ctl = Rc::downgrade(&ctl);
@@ -241,6 +231,7 @@ impl Controller {
         timeline::bind(window, &ctl.report_writers);
         ctl.wire_batch(window);
         ctl.wire_export(window);
+        ctl.wire_compare(window);
 
         let client = BuildIdentity {
             name: APP_NAME.to_owned(),
@@ -252,6 +243,21 @@ impl Controller {
             ctl.dispatch(Intent::FilesOpened(files));
         }
         ctl
+    }
+
+    /// Draws every part of the window once.
+    fn draw(&self, window: &AppWindow) {
+        let session = self.session.borrow();
+        render(window, session.state(), Instant::now());
+        render_analysis(window, session.analysis());
+        render_compare(window, session.compare());
+        render_jobs(window, &session.jobs());
+        let all = Dirty {
+            picture: true,
+            view: true,
+            thumbs: true,
+        };
+        render_preview(window, session.state(), session.preview(), all);
     }
 
     /// Applies an intent and handles what it leads to.
@@ -514,6 +520,7 @@ impl Controller {
                 UiEffect::ShowOpenDialog => self.show_open_dialog(&window),
                 UiEffect::ShowAnalyzeDialog => self.show_analyze_dialog(&window),
                 UiEffect::ShowLocateDialog => self.show_locate_dialog(&window),
+                UiEffect::ShowCompareDialog => self.show_compare_dialog(&window),
                 UiEffect::ShowSaveDialog {
                     directory,
                     file_name,
@@ -584,6 +591,9 @@ impl Controller {
         }
         if outcome.analysis {
             render_analysis(&window, session.analysis());
+        }
+        if outcome.compare {
+            render_compare(&window, session.compare());
         }
         if outcome.analysis || outcome.preview.any() {
             crate::render::block_motion::render_reference(

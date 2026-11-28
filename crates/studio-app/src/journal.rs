@@ -13,7 +13,8 @@
 //! Version 2 adds the workspace and Analyze view. Version 3 adds typed
 //! settings, frozen submissions and effective attempt policies. Version 4 adds
 //! the job purpose and verified pass digest. Version 5 adds export jobs and
-//! their publication receipts. Older journals keep their items and reports. Legacy settings become Simple
+//! their publication receipts. Version 6 adds the Compare workspace and its
+//! saved comparison. Older journals keep their items and reports. Legacy settings become Simple
 //! requests, and unavailable policy and view data use their defaults. Waiting
 //! items with incomplete source facts need a new probe before preflight.
 //!
@@ -45,13 +46,14 @@ use studio_domain::options::{EffectiveOption, OptionRequest};
 use studio_domain::settings::EncoderSettings;
 
 use crate::analysis::{Origin, Restore, ResultOf, Saved};
+use crate::compare::SavedComparison;
 use crate::queue::{
     Acknowledgement, Cause, Ending, Interruption, Item, ItemId, ItemState, PartialFate, Submission,
 };
 use crate::workspace::Workspace;
 
 /// The journal format this build writes.
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 
 /// The oldest journal format this build reads and migrates.
 pub const OLDEST_VERSION: u32 = 1;
@@ -90,6 +92,10 @@ pub struct JournalView {
     pub shown_document: usize,
     /// The Analyze documents, in the order they were opened.
     pub documents: Vec<JournalDocument>,
+    /// The inputs and policy of the comparison in Compare, absent before
+    /// version 6. The engine reads its files again; no fact about them is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<SavedComparison>,
 }
 
 /// A [`Workspace`] that has a flow.
@@ -101,6 +107,8 @@ pub enum JournalWorkspace {
     Encode,
     /// Analyze.
     Analyze,
+    /// Compare.
+    Compare,
 }
 
 /// One Analyze document: where to read it and what to restore once it is
@@ -318,14 +326,16 @@ pub fn snapshot(
 }
 
 /// The view record of `workspace` and the Analyze documents `saved`, with
-/// the one at `shown` shown. Compare has no flow and is saved as Encode.
+/// the one at `shown` shown. The caller adds the comparison.
 #[must_use]
 pub fn view(workspace: Workspace, saved: &[Saved], shown: usize) -> JournalView {
     JournalView {
         workspace: match workspace {
+            Workspace::Encode => JournalWorkspace::Encode,
             Workspace::Analyze => JournalWorkspace::Analyze,
-            Workspace::Encode | Workspace::Compare => JournalWorkspace::Encode,
+            Workspace::Compare => JournalWorkspace::Compare,
         },
+        comparison: None,
         shown_document: shown,
         documents: saved
             .iter()
@@ -386,6 +396,7 @@ pub const fn workspace(dto: JournalWorkspace) -> Workspace {
     match dto {
         JournalWorkspace::Encode => Workspace::Encode,
         JournalWorkspace::Analyze => Workspace::Analyze,
+        JournalWorkspace::Compare => Workspace::Compare,
     }
 }
 
@@ -968,6 +979,36 @@ mod tests {
         }
     }
 
+    /// A result paired with the source of its job, under a user assumption.
+    fn comparison() -> SavedComparison {
+        use studio_domain::compare::{
+            AlignmentBasis, ComparisonSetup, EncodeProvenance, Reference, StreamInput,
+        };
+        let job = job();
+        let report = JobReport {
+            destination: job.destination.clone(),
+            pass_digest: None,
+            frames: 5,
+            bytes: 82,
+            checks: Vec::new(),
+            disclosures: Vec::new(),
+        };
+        let mut setup = ComparisonSetup::new(
+            Reference::EncodeSource,
+            StreamInput {
+                path: job.destination.clone(),
+                selection: studio_domain::layers::LayerDecodeSelection::Default,
+                encode: EncodeProvenance::of(&job, &report, &[]).map(Box::new),
+            },
+        );
+        setup.basis = AlignmentBasis::AssumedOffset { offset: -2 };
+        setup.grain = studio_domain::preview::GrainPolicy::Skip;
+        SavedComparison {
+            setup,
+            identity: None,
+        }
+    }
+
     fn journal() -> Journal {
         let item = |id, state| JournalItem {
             id,
@@ -1017,6 +1058,7 @@ mod tests {
                         }),
                     },
                 ],
+                comparison: Some(comparison()),
             },
             items: vec![
                 item(1, JournalState::Waiting),
@@ -1146,7 +1188,11 @@ mod tests {
         let dir = Scratch::new("migrate");
         let path = dir.path(FILE_NAME);
         let mut legacy: Value = serde_json::from_str(VERSION_1)?;
-        for (version, view) in [(1, JournalView::default()), (2, journal().view)] {
+        let analyze = JournalView {
+            comparison: None,
+            ..journal().view
+        };
+        for (version, view) in [(1, JournalView::default()), (2, analyze)] {
             legacy["version"] = json!(version);
             if version == 2 {
                 legacy["view"] = json!(view);
@@ -1218,7 +1264,7 @@ mod tests {
         with_color["id"] = json!(7);
         with_color["facts"]["color"] = json!({});
         legacy["items"] = json!([waiting, with_color]);
-        for version in [1, 2, 3, 4, VERSION] {
+        for version in [1, 2, 3, 4, 5, VERSION] {
             legacy["version"] = json!(version);
             assert!(fs::write(&path, serde_json::to_vec(&legacy)?).is_ok());
             let Loaded::Found(loaded) = load(&path) else {
@@ -1262,7 +1308,7 @@ mod tests {
         let path = dir.path(FILE_NAME);
         let mut text: serde_json::Value =
             serde_json::from_slice(&encode(&journal()).unwrap_or_default()).unwrap_or_default();
-        text["view"]["workspace"] = "compare".into();
+        text["view"]["workspace"] = "decode".into();
         let bytes = serde_json::to_vec(&text).unwrap_or_default();
         assert!(fs::write(&path, &bytes).is_ok());
         let loaded = load(&path);
@@ -1275,7 +1321,7 @@ mod tests {
         else {
             unreachable!("{loaded:?}")
         };
-        assert!(error.contains("compare"), "{error}");
+        assert!(error.contains("decode"), "{error}");
         // The queue and settings are all there; the view is the default.
         assert_eq!(
             kept,
@@ -1315,10 +1361,10 @@ mod tests {
     fn a_newer_version_is_left_untouched_and_not_saved_over() {
         let dir = Scratch::new("too-new");
         let path = dir.path(FILE_NAME);
-        let future = br#"{"version": 6, "items": "renamed", "view": {"tabs": []}}"#;
+        let future = br#"{"version": 7, "items": "renamed", "view": {"tabs": []}}"#;
         assert!(fs::write(&path, future).is_ok());
         let loaded = load(&path);
-        assert_eq!(loaded, Loaded::TooNew { version: 6 });
+        assert_eq!(loaded, Loaded::TooNew { version: 7 });
         assert!(!loaded.may_save());
         assert_eq!(fs::read(&path).ok().as_deref(), Some(&future[..]));
     }

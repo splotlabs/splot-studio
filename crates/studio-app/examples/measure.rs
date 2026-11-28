@@ -364,6 +364,7 @@ fn concurrent(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 origin: JournalOrigin::File,
                 read: None,
             }],
+            comparison: None,
         },
     };
     fs::write(

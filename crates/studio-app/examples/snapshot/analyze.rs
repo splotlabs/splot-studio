@@ -298,6 +298,7 @@ fn restored(path: PathBuf) -> AppState {
                 shown: 0,
                 dropped: 0,
                 unreadable: None,
+                comparison: None,
             },
         }),
         problem: None,

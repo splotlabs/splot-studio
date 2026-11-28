@@ -7,8 +7,9 @@
 //! become typed [`state::Intent`]s; [`state::AppState`] holds the queue of
 //! files, the settings and the engine's answers as domain values, and the
 //! window only ever receives display strings. The window is a thin shell
-//! around the current [`workspace::Workspace`]: Encode, or the read-only
-//! Analyze ([`analysis`], served by an inspect engine process). All
+//! around the current [`workspace::Workspace`]: Encode, the read-only
+//! Analyze ([`analysis`], served by an inspect engine process), or Compare
+//! ([`compare`], whose two sides another inspect process reads). All
 //! media work happens in short-lived [`engine::Worker`] processes, one job
 //! at a time, run by the [`session::Session`]; their events reach the Slint
 //! thread through [`slint::invoke_from_event_loop`].
@@ -18,9 +19,9 @@
 //!
 //! The queue survives the app: it is journalled ([`journal`]) in the per-user
 //! data folder ([`instance`]), which one running app owns at a time, and is
-//! reconciled on the next launch ([`recovery`]). So are the workspace and the
-//! Analyze documents, as where to read them again; their files are checked
-//! before anything about them is shown. Encoding never continues without the
+//! reconciled on the next launch ([`recovery`]). So are the workspace, the
+//! Analyze documents and the comparison, as where to read them again; their
+//! files are checked before anything about them is shown. Encoding never continues without the
 //! window; after a restart nothing starts by itself.
 //!
 //! Licensed under `PolyForm` Noncommercial 1.0.0; commercial use requires a
@@ -30,6 +31,7 @@ pub mod activity;
 mod advanced;
 pub mod analysis;
 mod batch;
+pub mod compare;
 mod controller;
 pub mod cpu;
 pub mod engine;
@@ -68,13 +70,15 @@ use crate::simple::{Priority, Quality};
 use crate::state::{AppState, JournalProblem, Startup};
 
 pub use render::block_motion::render_reference as render_block_reference;
-pub use render::{render, render_analysis, render_counters, render_jobs, render_preview};
+pub use render::{
+    render, render_analysis, render_compare, render_counters, render_jobs, render_preview,
+};
 pub use ui::{
     Analysis, AnalysisState, AppWindow, BlockMotionView, BlockOverlay, Blocks, ByteRegion,
-    CheckRow, CoefficientView, DecodeExport, EntropyView, ExportForm, ExportPurpose,
-    ExportSourceRow, Fact, JobAction, JobRow, JobView, NavStep, Notice, NoticeWindow, Palette,
-    Playback, QueueRow, References, RowState, SourceView, StageInspector, StageState, TimelineUi,
-    Tone, ViewMode, WorkspaceView,
+    CheckRow, CoefficientView, CompareState, Comparison, DecodeExport, EntropyView, ExportForm,
+    ExportPurpose, ExportSourceRow, Fact, JobAction, JobRow, JobView, NavStep, Notice,
+    NoticeWindow, Palette, Playback, QueueRow, References, RowState, SourceView, StageInspector,
+    StageState, TimelineUi, Tone, ViewMode, WorkspaceView,
 };
 pub use ui::{LayerDetail, Layers};
 
@@ -320,6 +324,7 @@ pub fn new_window() -> Result<AppWindow, slint::PlatformError> {
         &workspace::Workspace::OFFERED.map(workspace::Workspace::label),
     ));
     render::render_analysis(&window, &analysis::Analysis::new());
+    render::render_compare(&window, &compare::Compare::default());
     Ok(window)
 }
 
@@ -354,6 +359,39 @@ pub fn bind_block_overlay(
         });
     });
     overlay.on_stop(move || send(Input::Stop));
+}
+
+/// Wires the Compare workspace's callbacks to `send`, as the app does.
+/// UI tests use it to drive a session the way the window does.
+pub fn bind_compare(window: &AppWindow, send: impl Fn(compare::Input) + Clone + 'static) {
+    use compare::Input;
+    use studio_domain::compare::Side;
+    let global = window.global::<Comparison>();
+    window.on_compare_result_requested({
+        let send = send.clone();
+        move || send(Input::PairResult)
+    });
+    global.on_pick({
+        let send = send.clone();
+        move |side| send(Input::Pick(if side == 0 { Side::A } else { Side::B }))
+    });
+    global.on_choose_basis({
+        let send = send.clone();
+        move |index| {
+            if let Ok(index) = usize::try_from(index) {
+                send(Input::Basis(index));
+            }
+        }
+    });
+    global.on_edit_offset({
+        let send = send.clone();
+        move |offset| send(Input::Offset(i64::from(offset)))
+    });
+    global.on_set_grain({
+        let send = send.clone();
+        move |apply| send(Input::Grain(apply))
+    });
+    global.on_close(move || send(Input::Close));
 }
 
 /// Wires the Analyze workspace's callbacks to `send`, as the app does.

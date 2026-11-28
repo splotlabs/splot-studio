@@ -191,9 +191,7 @@ fn serve<'scope>(
             Command::Probe {
                 source,
                 video_stream,
-            } => {
-                outbox.reply(id, probe(&source, video_stream));
-            }
+            } => outbox.reply(id, probe(&source, video_stream)),
             Command::Start { job: spec, live } => {
                 start(scope, outbox, id, spec, live, false, &mut job);
             }
@@ -248,6 +246,7 @@ fn serve<'scope>(
             | Command::BatchFindings { .. }
             | Command::BatchExport { .. }
             | Command::BatchForget { .. }
+            | Command::CompareDescribe { .. }
             | Command::AnalysisClose { .. } => {
                 reject_mode(outbox, id, "Use the inspect process for analysis.");
             }

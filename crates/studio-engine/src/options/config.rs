@@ -44,7 +44,7 @@ pub(super) fn from_source(
     Ok(config)
 }
 
-const fn chroma_position(siting: ChromaSiting) -> ChromaSamplePosition {
+pub(crate) const fn chroma_position(siting: ChromaSiting) -> ChromaSamplePosition {
     match siting {
         ChromaSiting::Left => ChromaSamplePosition::Left,
         ChromaSiting::Center => ChromaSamplePosition::Center,

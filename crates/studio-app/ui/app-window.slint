@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 // SPDX-FileCopyrightText: 2026 Bartosz Tomczyk <bartekplus@gmail.com>
 
-// The main window: one centred card, a thin workspace shell around the Encode
-// and Analyze views (analyze.slint). The shell's toolbar switches the
+// The main window: one centred card, a thin workspace shell around the Encode,
+// Analyze (analyze.slint) and Compare (compare.slint) views. The shell's toolbar switches the
 // workspace and opens Jobs, a popup over both that lists every conversion
 // and stream read; Rust owns which workspace is shown and every job row. In Encode, Source, Quality,
 // Priority and Convert are on the left; Advanced opens to the right. Values
@@ -16,6 +16,7 @@ import { FocusRing, KeyboardFocus } from "focus.slint";
 import { Caption, Label, LinkButton, SectionTitle, WorkspaceSwitch } from "controls.slint";
 import { IconButton, Playback, PlaybackPanel, StageState } from "stage.slint";
 import { AnalyzeView } from "analyze.slint";
+import { CompareView } from "compare.slint";
 import { ValidationSetup } from "validation-setup.slint";
 import { DecodeExport, ExportForm, ExportPurpose, ExportSetup, ExportSourceRow } from "export-setup.slint";
 
@@ -39,7 +40,9 @@ export { ReferenceLinkRow, ReferenceSlotRow, References } from "references.slint
 export { Analysis, AnalysisState, ByteCell, ByteLine, ByteRegion, EvidenceRow, Legend, NavRow, NavStep, Property } from "analyze.slint";
 
 // Which workspace the shell shows.
-export enum WorkspaceView { encode, analyze }
+export { CompareSetting, CompareSide, CompareState, Comparison } from "compare.slint";
+
+export enum WorkspaceView { encode, analyze, compare }
 
 // How a status line should read; the text always says the same thing in words.
 export enum Tone { neutral, success, warning, error }
@@ -941,6 +944,8 @@ export component AppWindow inherits Window {
     in property <int> workspace-index;
     // The shown file has a converted result Analyze can open.
     in property <bool> can-analyze-result;
+    // The shown file has a converted result that Compare can pair with its source.
+    in property <bool> can-compare-result;
     // The Jobs entry's label ("Jobs", "Jobs · 2") and what it says in words.
     in property <string> jobs-label: "Jobs";
     in property <string> jobs-description;
@@ -1163,6 +1168,7 @@ export component AppWindow inherits Window {
     callback open-requested();
     callback analyze-open-requested();
     callback analyze-result-requested();
+    callback compare-result-requested();
     callback workspace-chosen(int);
     callback job-show(int);
     callback job-cancel(int);
@@ -1421,14 +1427,17 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // Both workspaces stay alive and only the shown one is
+                    // All workspaces stay alive and only the shown one is
                     // visible, so a switch keeps each one's scroll positions and
                     // view state. A hidden one takes no room, receives no input
                     // or focus and is not in the accessibility tree.
                     workspaces := Rectangle {
                         property <bool> analyze: root.workspace == WorkspaceView.analyze;
-                        property <length> shown-width: self.analyze ? analyze-view.preferred-width : encode-view.width;
-                        property <length> shown-height: self.analyze ? analyze-view.preferred-height : encode-view.preferred-height;
+                        property <bool> compare: root.workspace == WorkspaceView.compare;
+                        property <length> shown-width: self.analyze ? analyze-view.preferred-width
+                            : self.compare ? compare-view.preferred-width : encode-view.width;
+                        property <length> shown-height: self.analyze ? analyze-view.preferred-height
+                            : self.compare ? compare-view.preferred-height : encode-view.preferred-height;
                         min-width: self.shown-width;
                         preferred-width: self.shown-width;
                         max-width: self.shown-width;
@@ -1452,12 +1461,23 @@ export component AppWindow inherits Window {
                             }
                         }
 
+                        compare-view := CompareView {
+                            x: 0;
+                            y: 0;
+                            width: self.preferred-width;
+                            height: self.preferred-height;
+                            visible: parent.compare;
+                            copy(text) => {
+                                root.copy-text(text);
+                            }
+                        }
+
                     encode-view := HorizontalLayout {
                         x: 0;
                         y: 0;
                         width: root.show-advanced ? root.advanced-content-width : self.preferred-width;
                         height: self.preferred-height;
-                        visible: !parent.analyze;
+                        visible: !parent.analyze && !parent.compare;
                         alignment: start;
                         accessible-role: main;
                         accessible-label: root.workspace-title;
@@ -2012,6 +2032,14 @@ export component AppWindow inherits Window {
                                             }
                                         }
 
+                                        if root.can-compare-result: Button {
+                                            text: "Compare with Source";
+                                            accessible-description: "Pair the converted file with the source that its job read. Studio checks the size and time of the source and the size and picture count of the result.";
+                                            clicked => {
+                                                root.compare-result-requested();
+                                            }
+                                        }
+
                                         Button {
                                             text: "Convert Another";
                                             accessible-description: "Clear this result and choose another video";
@@ -2303,12 +2331,21 @@ export component AppWindow inherits Window {
                                         // The list's converted row; one file has a button.
                                         if root.can-analyze-result && root.view-mode == ViewMode.list: HorizontalLayout {
                                             alignment: start;
+                                            spacing: Tokens.space-4;
 
                                             LinkButton {
                                                 text: "Open in Analyze";
                                                 description: "Inspect the converted file's OBUs and bytes, without reading it in again as a source";
                                                 clicked => {
                                                     root.analyze-result-requested();
+                                                }
+                                            }
+
+                                            if root.can-compare-result: LinkButton {
+                                                text: "Compare with Source";
+                                                description: "Pair the converted file with the source that its job read. Studio checks the size and time of the source and the size and picture count of the result.";
+                                                clicked => {
+                                                    root.compare-result-requested();
                                                 }
                                             }
                                         }
