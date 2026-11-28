@@ -1591,7 +1591,7 @@ fn a_completed_encode_is_comparable_with_its_recorded_job() {
     let (a, job) = convert(&mut app);
     app.apply(Intent::RowSelected(0));
     assert_eq!(app.state.comparable(), None, "still converting");
-    assert_eq!(app.state.published(Path::new("/m/a.ivf")), None);
+    assert_eq!(app.state.published(&abs("/m/a.ivf")), None);
     app.complete(a);
     app.apply(Intent::RowSelected(0));
     let before = app.state.clone();
@@ -1607,8 +1607,8 @@ fn a_completed_encode_is_comparable_with_its_recorded_job() {
     );
     assert_eq!(encode.map(|e| &e.requested), Some(&job.settings));
     // The same file, picked by its path, keeps the job. Another path has none.
-    assert_eq!(app.state.published(Path::new("/m/a.ivf")), result);
-    assert_eq!(app.state.published(Path::new("/m/b.ivf")), None);
+    assert_eq!(app.state.published(&abs("/m/a.ivf")), result);
+    assert_eq!(app.state.published(&abs("/m/b.ivf")), None);
     // Asking changes nothing: the job stays as it was recorded.
     assert_eq!(app.state, before);
     app.apply(Intent::RowSelected(1));
